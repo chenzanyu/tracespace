@@ -1,0 +1,13 @@
+@import "tailwindcss";
+@import "tailwindcss-primeui";
+
+html {
+    font-size: 14px;
+
+}
+
+#app {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}

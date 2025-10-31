@@ -217,3 +217,97 @@ export function renderFragments(plotResult: PlotResult): RenderFragmentsResult {
     svgFragmentsById,
   }
 }
+
+
+
+
+//新增扩展
+
+export type MemoryLayerInput = {
+  filename: string
+  type?: GerberType
+  side?: 'top' | 'bottom' | 'inner' | 'all'
+  gerber: string | Uint8Array | ArrayBuffer
+}
+
+
+/**
+ * 从内存层列表（字符串/二进制）构建 renderLayersResult & renderBoardResult
+ */
+export async function fromMemoryLayers(
+  layersInput: MemoryLayerInput[]
+): Promise<{
+  renderLayersResult: RenderLayersResult
+  renderBoardResult: RenderBoardResult
+}> {
+  // 辅助将可能的二进制转换为字符串（若需要）
+  const toString = (v: string | Uint8Array | ArrayBuffer): string => {
+    if (typeof v === 'string') return v
+    if (v instanceof Uint8Array) return new TextDecoder().decode(v)
+    if (v instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(v))
+    return String(v)
+  }
+
+  // 标准化 side -> GerberSide | undefined
+  const normalizeSide = (side?: MemoryLayerInput['side']): GerberSide | undefined => {
+    if (!side) return undefined
+    switch (String(side).toLowerCase()) {
+      case 'top':
+        return 'top' as GerberSide
+      case 'bottom':
+        return 'bottom' as GerberSide
+      case 'inner':
+        return 'inner' as GerberSide
+      case 'all':
+        return 'all' as GerberSide
+      default:
+        return undefined
+    }
+  }
+
+  // 解析并构造与 read() 输出一致的数据结构
+  const parsedLayers: Array<{
+    id: string
+    filename: string
+    type: GerberType | undefined
+    side: GerberSide | undefined
+    parseTree: GerberTree
+  }> = []
+
+  for (const layer of layersInput) {
+    const id = randomId()
+    const contents = toString(layer.gerber)
+    const parseTree = parser.parse(contents) as GerberTree
+
+    parsedLayers.push({
+      id,
+      filename: layer.filename,
+      type: layer.type,
+      side: normalizeSide(layer.side),
+      parseTree,
+    })
+  }
+
+  const layers: ReadResult['layers'] = parsedLayers.map((p) => ({
+    id: p.id,
+    filename: p.filename,
+    type: p.type,
+    side: p.side,
+  }))
+
+  const parseTreesById: ReadResult['parseTreesById'] = Object.fromEntries(
+    parsedLayers.map((p) => [p.id, p.parseTree])
+  )
+
+  const readResult: ReadResult = {
+    layers,
+    parseTreesById,
+  }
+
+  // 走 tracespace 的流程：plot -> renderLayers -> renderBoard
+  const plotResult = plot(readResult)
+  const renderLayersResult = renderLayers(plotResult)
+  const renderBoardResult = renderBoard(renderLayersResult)
+
+  return { renderLayersResult, renderBoardResult }
+}

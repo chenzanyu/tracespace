@@ -79,7 +79,10 @@
         "webpack",
         "rollup"
       ]
-    }
+    },
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   },
   "prettier": {
     "tabWidth": 2,

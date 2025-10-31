@@ -21,7 +21,7 @@
   "engines": {
     "node": ">=18"
   },
-  "packageManager": "pnpm@7.25.0",
+  "packageManager": "pnpm@10.13.1",
   "dependencies": {
     "@tracespace/cli": "workspace:*",
     "@tracespace/core": "workspace:*",

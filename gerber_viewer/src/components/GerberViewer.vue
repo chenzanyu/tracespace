@@ -12,11 +12,17 @@
         </div>
 
         <div v-if="currentStatusIndex == 1">
-            <div v-html="svgHtml"></div>
+            <div v-html="topSvg"></div>
+            <!-- <div v-html="bottomSvg"></div> -->
+
+            <div v-for="layer in layers" class="flex justify-center items-center">
+                <p>{{ layer.name }}</p>
+                <div v-html="layer.svg"></div>
+            </div>
         </div>
 
         <!-- 隐藏文件选择框：双击或“上传文件”按钮触发 -->
-        <input ref="fileInput" type="file" :accept=allowedTypes hidden @change="receiveFileOnInput" />
+        <input ref="fileInput" type="file" hidden @change="receiveFileOnInput" />
     </div>
 </template>
 
@@ -47,7 +53,10 @@ const fileInput = ref(null)
 //是否允许拖动
 const isDragOver = ref(true)
 
-const svgHtml = ref(null)
+const topSvg = ref(null)
+const bottomSvg = ref(null)
+const layers = ref([])
+
 
 //文件上传处理
 const handleUploadFile = async (file) => {
@@ -57,7 +66,7 @@ const handleUploadFile = async (file) => {
 
         try {
             const res = await axios.post(
-                'http://localhost:5256/api/PCBParse/Parse?Mode=0',
+                'http://localhost:5003/api/PCBParse/Parse?Mode=0',
                 formData,
                 {
                     headers: {
@@ -66,12 +75,23 @@ const handleUploadFile = async (file) => {
                     }
                 }
             )
-
             const result = res.data.Data
             const { renderLayersResult, renderBoardResult } = await fromMemoryLayers(result.Items)
-            const data1 = renderLayersResult.rendersById[renderLayersResult.layers[3]["id"]]
-            const svg1 = stringifySvg(data1)
-            svgHtml.value = svg1
+            console.log(renderLayersResult)
+            console.log(renderBoardResult)
+            topSvg.value = stringifySvg(renderBoardResult.top)
+            bottomSvg.value = stringifySvg(renderBoardResult.bottom)
+            for(const currentLayer of renderLayersResult.layers){
+                const currentRenderById = renderLayersResult.rendersById[currentLayer.id]
+                const currentLayerSvg = stringifySvg(currentRenderById)
+                const layerItem = {
+                    svg: currentLayerSvg,
+                    name: currentLayer.filename,
+                    type: currentLayer.type,
+                    side: currentLayer.side
+                }
+                layers.value.push(layerItem)
+            }
             currentStatusIndex.value = 1
         }
         catch (error) {

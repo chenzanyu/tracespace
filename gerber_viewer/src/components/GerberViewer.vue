@@ -15,10 +15,10 @@
             <div v-html="topSvg"></div>
             <!-- <div v-html="bottomSvg"></div> -->
 
-            <div v-for="layer in layers" class="flex justify-center items-center">
+            <!-- <div v-for="layer in layers" class="flex justify-center items-center">
                 <p>{{ layer.name }}</p>
                 <div v-html="layer.svg"></div>
-            </div>
+            </div> -->
         </div>
 
         <!-- 隐藏文件选择框：双击或“上传文件”按钮触发 -->

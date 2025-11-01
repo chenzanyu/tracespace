@@ -1,6 +1,6 @@
 import {s} from 'hastscript'
 
-import type {ImageTree, SizeEnvelope} from '@tracespace/plotter'
+import type {ImageTree, SizeEnvelope, ImageGraphic} from '@tracespace/plotter'
 import {BoundingBox} from '@tracespace/plotter'
 
 import {renderGraphic} from './render'
@@ -31,6 +31,32 @@ export function render(image: ImageTree, viewBox?: ViewBox): SvgElement {
 
   viewBox = viewBox ?? sizeToViewBox(size)
 
+  // Build output children while honoring top-level erase graphics by masking
+  const outChildren: SvgElement[] = []
+  const defs: SvgElement[] = []
+  let content: SvgElement[] = []
+  const [x, y, width, height] = viewBox
+
+  for (const child of children as Array<ImageGraphic & {erase?: boolean}>) {
+    const el = renderGraphic(child)
+
+    if (child.erase === true) {
+      const id = `erase-${Math.random().toString(36).slice(2)}`
+      defs.push(
+        s('mask', {id}, [
+          s('rect', {x, y, width, height, fill: '#fff'}),
+          s('g', {color: '#000'}, [el]),
+        ])
+      )
+      content = [s('g', {mask: `url(#${id})`}, content)]
+    } else {
+      content.push(el)
+    }
+  }
+
+  if (defs.length > 0) outChildren.push(s('defs', defs))
+  outChildren.push(...content)
+
   return s(
     'svg',
     {
@@ -40,7 +66,7 @@ export function render(image: ImageTree, viewBox?: ViewBox): SvgElement {
       width: `${viewBox[2]}${units}`,
       height: `${viewBox[3]}${units}`,
     },
-    children.map(renderGraphic)
+    outChildren
   )
 }
 

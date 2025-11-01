@@ -79,17 +79,23 @@ export interface ImageTree extends Parent {
 export interface ImageShape extends Node {
   type: typeof IMAGE_SHAPE
   shape: Shape
+  /** When true, this graphic should subtract from existing content */
+  erase?: boolean
 }
 
 export interface ImagePath extends Node {
   type: typeof IMAGE_PATH
   width: number
   segments: PathSegment[]
+  /** When true, this graphic should subtract from existing content */
+  erase?: boolean
 }
 
 export interface ImageRegion extends Node {
   type: typeof IMAGE_REGION
   segments: PathSegment[]
+  /** When true, this graphic should subtract from existing content */
+  erase?: boolean
 }
 
 export type PathSegment = PathLineSegment | PathArcSegment

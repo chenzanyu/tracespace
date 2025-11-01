@@ -32,6 +32,8 @@ import {plotShape} from './plot-shape'
 import {plotMacro} from './plot-macro'
 import type {ArcDirection} from './plot-path'
 import {CCW, CW, plotSegment, plotPath} from './plot-path'
+import {LOAD_POLARITY} from '@tracespace/parser'
+import {CLEAR} from '@tracespace/parser'
 
 export interface GraphicPlotter {
   plot: (
@@ -55,6 +57,7 @@ interface GraphicPlotterImpl extends GraphicPlotter {
   _ambiguousArcCenter: boolean
   _regionMode: boolean
   _defaultGraphic: GraphicType | undefined
+  _erase: boolean
 
   _setGraphicState: (node: GerberNode) => GraphicType | undefined
 
@@ -77,6 +80,7 @@ const GraphicPlotterPrototype: GraphicPlotterImpl = {
   _ambiguousArcCenter: false,
   _regionMode: false,
   _defaultGraphic: undefined,
+  _erase: false,
 
   plot(
     node: GerberNode,
@@ -88,15 +92,26 @@ const GraphicPlotterPrototype: GraphicPlotterImpl = {
     const pathGraphic = this._plotCurrentPath(node, tool, nextGraphicType)
 
     if (pathGraphic !== undefined) {
+      if ((this as any)._erase === true) {
+        ;(pathGraphic as any).erase = true
+      }
       graphics.push(pathGraphic)
     }
 
     if (nextGraphicType === SHAPE && tool?.type === SIMPLE_TOOL) {
-      graphics.push({type: Tree.IMAGE_SHAPE, shape: plotShape(tool, location)})
+      graphics.push({
+        type: Tree.IMAGE_SHAPE,
+        shape: plotShape(tool, location),
+        erase: (this as any)._erase === true ? true : undefined,
+      })
     }
 
     if (nextGraphicType === SHAPE && tool?.type === MACRO_TOOL) {
-      graphics.push({type: Tree.IMAGE_SHAPE, shape: plotMacro(tool, location)})
+      graphics.push({
+        type: Tree.IMAGE_SHAPE,
+        shape: plotMacro(tool, location),
+        erase: (this as any)._erase === true ? true : undefined,
+      })
     }
 
     if (nextGraphicType === SEGMENT) {
@@ -115,6 +130,9 @@ const GraphicPlotterPrototype: GraphicPlotterImpl = {
       const slotPathGraphic = plotPath([plotSegment(location)], tool)
 
       if (slotPathGraphic !== undefined) {
+        if ((this as any)._erase === true) {
+          ;(slotPathGraphic as any).erase = true
+        }
         graphics.push(slotPathGraphic)
       }
     }
@@ -133,6 +151,11 @@ const GraphicPlotterPrototype: GraphicPlotterImpl = {
 
     if (node.type === REGION_MODE) {
       this._regionMode = node.region
+    }
+
+    if ((node as any).type === LOAD_POLARITY) {
+      // @ts-expect-error - node narrowing not exact here
+      this._erase = (node as any).polarity === CLEAR
     }
 
     if (node.type !== GRAPHIC) {

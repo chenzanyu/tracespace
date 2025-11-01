@@ -68,17 +68,33 @@ export function shapeToElement(shape: Shape): SvgElement {
     }
 
     case LAYERED_SHAPE: {
+      // Erase semantics in aperture macros mean: subtract the given shape
+      // from previously drawn content. Implement via SVG mask(s), similar to
+      // how board-level masks are built in @tracespace/core.
       const boundingBox = BoundingBox.fromShape(shape)
-      const clipIdBase = createId()
+      const idBase = createId()
       const defs: SvgElement[] = []
       let children: SvgElement[] = []
 
       for (const [index, layerShape] of shape.shapes.entries()) {
         if (layerShape.erase === true && !BoundingBox.isEmpty(boundingBox)) {
-          const clipId = `${clipIdBase}__${index}`
+          const maskId = `${idBase}__m${index}`
+          const [x1, y1, x2, y2] = boundingBox
+          const [x, y, width, height] = [x1, y1, x2 - x1, y2 - y1]
 
-          defs.push(s('clipPath', {id: clipId}, [shapeToElement(layerShape)]))
-          children = [s('g', {clipPath: `url(#${clipId})`}, children)]
+          // Build a mask that reveals everything (white rect) and
+          // then "cuts out" the erase shape (black fill).
+          defs.push(
+            s('mask', {id: maskId, maskUnits: 'userSpaceOnUse'}, [
+              // Invert Y for user-space rectangle to match shape mapping
+              s('rect', {x, y: -y - height, width, height, fill: '#fff'}),
+              s('g', {color: '#000'}, [shapeToElement(layerShape)]),
+            ])
+          )
+
+          // Apply the mask to the content drawn so far; new shapes added
+          // after this will not be affected, preserving layer order.
+          children = [s('g', {mask: `url(#${maskId})`}, children)]
         } else {
           children.push(shapeToElement(layerShape))
         }

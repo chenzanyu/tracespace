@@ -1,4 +1,4 @@
-import {IMAGE_PATH, IMAGE_REGION, BoundingBox} from '@tracespace/plotter'
+import {IMAGE_PATH, IMAGE_REGION, LINE, BoundingBox} from '@tracespace/plotter'
 import {renderGraphic, sizeToViewBox} from '@tracespace/renderer'
 
 import type {
@@ -74,6 +74,39 @@ export function plotBoardShape(
   const [regions, openPaths] = fillGaps(allPaths, maximumGap)
 
   if (regions.length === 0) {
+    // Fallback: some outline layers are drawn as open strokes that never
+    // numerically close (CAD output quirks, rounding, or missing final edge).
+    // In that case, derive a rectangular board shape from the bounding box of
+    // all outline paths so top/bottom renders still get a reasonable clip.
+    const outlinePaths = outlinePlot.children.filter(
+      (n): n is ImagePath => n.type === IMAGE_PATH
+    )
+
+    if (outlinePaths.length > 0) {
+      const box = outlinePaths
+        .map(p => BoundingBox.fromPath(p.segments, p.width))
+        .reduce(BoundingBox.add, BoundingBox.empty())
+
+      if (!BoundingBox.isEmpty(box)) {
+        const [x1, y1, x2, y2] = box
+        const fallbackRegion: ImageRegion = {
+          type: IMAGE_REGION,
+          segments: [
+            {type: LINE, start: [x1, y1], end: [x2, y1]},
+            {type: LINE, start: [x2, y1], end: [x2, y2]},
+            {type: LINE, start: [x2, y2], end: [x1, y2]},
+            {type: LINE, start: [x1, y2], end: [x1, y1]},
+          ],
+        }
+
+        return {
+          regions: [fallbackRegion],
+          openPaths,
+          size: box,
+        }
+      }
+    }
+
     return {size, regions, openPaths, failureReason: NO_CLOSED_REGIONS_FOUND}
   }
 

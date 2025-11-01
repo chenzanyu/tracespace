@@ -95,7 +95,8 @@ export function plot(readResult: ReadResult): PlotResult {
   for (const { id } of layers) {
     plotTreesById[id] = plotter.plot(parseTreesById[id])
   }
-
+  
+  //闭合容差
   const boardShape = plotBoardShape(layers, plotTreesById, 0.02)
 
   return { layers, plotTreesById, boardShape }

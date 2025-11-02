@@ -73,18 +73,30 @@
     <div class="flex-1 relative overflow-hidden bg-gradient-to-br from-gray-800 via-gray-900 to-black" v-show="currentStatusIndex !== 0">
       <div class="h-full w-full">
         <div v-show="viewTab==='top'" ref="topContainer" class="h-full w-full overflow-hidden bg-transparent select-none" @wheel.prevent="onWheel" @mousedown="onPointerDown">
-          <div :style="transformStyle" class="origin-top-left">
+          <GpuStage v-if="useGpu" :svg="topSvg" :scale="viewScale" :translate="viewTranslate" />
+          <div v-else :style="transformStyle" class="origin-top-left">
             <div v-html="topSvg"></div>
           </div>
         </div>
         <div v-show="viewTab==='bottom'" ref="bottomContainer" class="h-full w-full overflow-hidden bg-transparent select-none" @wheel.prevent="onWheel" @mousedown="onPointerDown">
-          <div :style="transformStyle" class="origin-top-left">
+          <GpuStage v-if="useGpu" :svg="bottomSvg" :scale="viewScale" :translate="viewTranslate" />
+          <div v-else :style="transformStyle" class="origin-top-left">
             <div v-html="bottomSvg"></div>
           </div>
         </div>
         <div v-show="viewTab==='layers'" class="h-full w-full">
           <div ref="compositeContainer" class="h-full w-full bg-transparent select-none" @wheel.prevent="onWheel" @mousedown="onPointerDown">
-            <div :style="transformStyle" class="origin-top-left">
+            <CanvasStage v-if="useCanvas"
+              :layers="orderedLayers"
+              :viewBox="fmRef?.value?.compositeViewBox ?? boardViewBox"
+              :mmWidth="parseFloat(String(fmRef?.value?.compositeWidthMm || (boardWidthMm + 'mm')).replace('mm',''))"
+              :mmHeight="parseFloat(String(fmRef?.value?.compositeHeightMm || (boardHeightMm + 'mm')).replace('mm',''))"
+              :scale="viewScale"
+              :translate="viewTranslate"
+              @ready="() => fitToContainer(true)"
+              @resized="() => fitToContainer(true)" />
+            <GpuStage v-else-if="useGpu" :svg="compositeSvg" :scale="viewScale" :translate="viewTranslate" />
+            <div v-else :style="transformStyle" class="origin-top-left">
               <div v-html="compositeSvg"></div>
             </div>
           </div>
@@ -138,6 +150,8 @@
 import { ref, reactive, computed, nextTick, watch, toRaw } from 'vue'
 import axios from 'axios'
 import { fromMemoryLayers, stringifySvg } from '@tracespace/core'
+import GpuStage from './GpuStage.vue'
+import CanvasStage from './CanvasStage.vue'
 
 // Status and basic refs
 const currentStatusIndex = ref(0)
@@ -179,6 +193,12 @@ const orderedLayers = reactive([])
 const showFilenames = ref(false)
 const isSettingsOpen = ref(false)
 const editableLayers = reactive([])
+// 渲染开关：优先 Canvas 矢量绘制；GPU 纹理默认关闭
+const useCanvas = ref(true)
+const useGpu = ref(false)
+
+// Cache for cloned & ID-prefixed layer children per layer
+const layerCloneCache = new Map()
 
 const transformStyle = computed(() => ({
   transform: `translate(${viewTranslate.x}px, ${viewTranslate.y}px) scale(${viewScale.value})`,
@@ -248,10 +268,14 @@ const handleUploadFile = async (file) => {
     })
   }
   orderedLayers.sort((a, b) => a.weight - b.weight)
+  layerCloneCache.clear()
   currentStatusIndex.value = 1
   viewTab.value = 'layers'
   await nextTick()
   fitToContainer(true)
+  if (typeof window !== 'undefined') {
+    requestAnimationFrame(() => requestAnimationFrame(() => fitToContainer(true)))
+  }
   updateComposite()
 }
 
@@ -393,11 +417,20 @@ function buildCompositeSvg() {
     const g = { type: 'element', tagName: 'g', properties: { color: layer.color }, children: [] }
     const src = layer.element
     const rawKids = (src && src.children) ? src.children : []
-    const kids = Array.isArray(rawKids) ? deepClone(rawKids) : []
-    // guard: only proceed if kids is an array
-    if (Array.isArray(kids) && kids.length > 0) {
-      prefixIds({ type: 'element', tagName: 'g', properties: {}, children: kids }, `L${layer.id}_`)
-      if (layer.type === 'outline') boostOutlineVisibility({ type: 'element', tagName: 'g', properties: {}, children: kids })
+    let kids = []
+    if (Array.isArray(rawKids)) {
+      const cached = layerCloneCache.get(layer.id)
+      if (cached) {
+        kids = deepClone(cached)
+      } else {
+        const tmp = deepClone(rawKids)
+        prefixIds({ type: 'element', tagName: 'g', properties: {}, children: tmp }, `L${layer.id}_`)
+        if (layer.type === 'outline') boostOutlineVisibility({ type: 'element', tagName: 'g', properties: {}, children: tmp })
+        layerCloneCache.set(layer.id, tmp)
+        kids = deepClone(tmp)
+      }
+    }
+    if (kids.length > 0) {
       g.children.push(...kids)
     }
     root.children.push(g)
@@ -461,7 +494,7 @@ function onWheel(e) {
   const my = e.clientY - rect.top
   const prev = viewScale.value
   const factor = e.deltaY > 0 ? 0.9 : 1.1
-  const next = Math.min(20, Math.max(0.05, prev * factor))
+  const next = Math.min(200, Math.max(0.02, prev * factor))
   const wx = (mx - viewTranslate.x) / prev
   const wy = (my - viewTranslate.y) / prev
   viewTranslate.x = mx - wx * next
@@ -475,7 +508,8 @@ function setAllVisible(v) {
 }
 
 if (typeof window !== 'undefined') window.addEventListener('resize', () => fitToContainer(true))
-watch(viewTab, async () => { await nextTick(); fitToContainer(true) })
+watch(viewTab, async () => { await nextTick(); fitToContainer(true); if (typeof window !== 'undefined') requestAnimationFrame(() => fitToContainer(true)) })
+watch(orderedLayers, async () => { await nextTick(); if (typeof window !== 'undefined') requestAnimationFrame(() => fitToContainer(true)) }, { deep: true })
 
 // Layer naming and settings
 function displayLayerName(layer) {
@@ -576,6 +610,7 @@ function applySettings() {
       orderedLayers.push({ id: l.id, side: l.side, type: l.type, weight: orderWeight(l.side, l.type), color: kv.color, visible: kv.visible, element: renderLayersResult.rendersById[l.id], filename: l.filename })
     }
     orderedLayers.sort((a, b) => a.weight - b.weight)
+    layerCloneCache.clear()
     updateBoardPreview('top')
     updateBoardPreview('bottom')
     updateComposite()

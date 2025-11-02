@@ -150,6 +150,22 @@ export function renderBoard(
         ? `translate(${2 * x + width},0) scale(-1,1)`
         : undefined
 
+    // Ensure the outline path used for clipping applies even-odd winding so
+    // multi-contour outlines (nested or self-intersecting) clip correctly
+    const shapePathForClip =
+      shapeRender === undefined
+        ? undefined
+        : {
+            ...shapeRender,
+            properties: {
+              ...(shapeRender.properties ?? {}),
+              // Some renderers honor fill-rule on the element inside clipPath
+              // rather than clip-rule; set both for compatibility.
+              'clip-rule': 'evenodd',
+              'fill-rule': 'evenodd',
+            },
+          }
+
     result[side] = s(
       'svg',
       {
@@ -159,17 +175,48 @@ export function renderBoard(
       },
       [
         s('defs', [
-          s('mask', { id: drillMaskId }, [
-            s('rect', { x, y, width, height, fill: '#fff' }),
-            s('g', { color: '#000' }, drillLayers.flatMap(getRenderChildren)),
-          ]),
-          s('mask', { id: resistMaskId }, [
-            s('rect', { x, y, width, height, fill: '#fff' }),
-            s('g', { color: '#000' }, resistLayers.flatMap(getRenderChildren)),
-          ]),
+          // Board-level masks use user-space coordinates for both the mask
+          // region (x/y/width/height) and the mask contents to ensure the
+          // white rect fully covers the board extents.
+          s(
+            'mask',
+            {
+              id: drillMaskId,
+              maskUnits: 'userSpaceOnUse',
+              maskContentUnits: 'userSpaceOnUse',
+              x,
+              y,
+              width,
+              height,
+            },
+            [
+              s('rect', { x, y, width, height, fill: '#fff' }),
+              s('g', { color: '#000' }, drillLayers.flatMap(getRenderChildren)),
+            ]
+          ),
+          s(
+            'mask',
+            {
+              id: resistMaskId,
+              maskUnits: 'userSpaceOnUse',
+              maskContentUnits: 'userSpaceOnUse',
+              x,
+              y,
+              width,
+              height,
+            },
+            [
+              s('rect', { x, y, width, height, fill: '#fff' }),
+              s('g', { color: '#000' }, resistLayers.flatMap(getRenderChildren)),
+            ]
+          ),
           shapeRender === undefined
             ? undefined
-            : s('clipPath', { id: shapeClipId }, shapeRender),
+            : s(
+                'clipPath',
+                { id: shapeClipId, clipPathUnits: 'userSpaceOnUse' },
+                shapePathForClip as any
+              ),
         ]),
         s('g', { transform, 'clip-path': clipPath }, [
           s('g', { mask: `url(#${drillMaskId})` }, [
@@ -229,14 +276,29 @@ export type MemoryLayerInput = {
   type?: 'copper' | 'soldermask' | 'silkscreen' | 'solderpaste' | 'drill' | 'outline' | 'drawing'
   side?: 'top' | 'bottom' | 'inner' | 'all'
   gerber: string | Uint8Array | ArrayBuffer
+  // optional per-layer visual overrides
+  color?: string
+  opacity?: number
 }
 
+export interface MemoryRenderOptions {
+  // Board render color overrides for top/bottom composite
+  boardColors?: {
+    copper?: string
+    soldermask?: string
+    silkscreen?: string
+    solderpaste?: string
+  }
+  // Maximum gap tolerance for outline clipping, in millimeters
+  maxOutlineGapMm?: number
+}
 
 /**
  * 从内存层列表（字符串/二进制）构建 renderLayersResult & renderBoardResult
  */
 export async function fromMemoryLayers(
-  layersInput: MemoryLayerInput[]
+  layersInput: MemoryLayerInput[],
+  options: MemoryRenderOptions = {}
 ): Promise<{
   renderLayersResult: RenderLayersResult
   renderBoardResult: RenderBoardResult
@@ -317,33 +379,134 @@ export async function fromMemoryLayers(
     parsedLayers.map((p) => [p.id, p.parseTree])
   )
 
-  const readResult: ReadResult = {
-    layers,
-    parseTreesById,
+  // === 绘图：生成 plotTrees 并自定义闭合容差 ===
+  const plotTreesById: PlotResult['plotTreesById'] = Object.fromEntries(
+    layers.map(l => [l.id, plotter.plot(parseTreesById[l.id])])
+  )
+
+  // 从首个图确定文件单位（'mm' 或 'in'）
+  const firstTree: ImageTree | undefined = plotTreesById[layers[0]?.id as string]
+  const fileUnits: 'mm' | 'in' = (firstTree?.units as any) ?? 'mm'
+
+  const mmToUnits = (mm: number): number => (fileUnits === 'mm' ? mm : mm / 25.4)
+  const unitsToMm = (val: number): number => (fileUnits === 'mm' ? val : val * 25.4)
+
+  const maxGapUnits = options.maxOutlineGapMm != null
+    ? mmToUnits(options.maxOutlineGapMm)
+    : (fileUnits === 'mm' ? mmToUnits(0.5) : 0.02)
+
+  const boardShape = plotBoardShape(layers, plotTreesById, maxGapUnits)
+  // Composite viewBox across all plotted layers (no board clipping)
+  const allSize = plotter.BoundingBox.sum(
+    Object.values(plotTreesById).map(t => t.size)
+  )
+  const compositeViewBox = renderer.sizeToViewBox(allSize)
+  const boardShapeRender = renderBoardShape(boardShape)
+
+  // === 分层渲染：强制使用相同 viewBox ===
+  const rendersById: RenderLayersResult['rendersById'] = {}
+  for (const {id} of layers) {
+    const svg = renderer.render(plotTreesById[id], boardShapeRender.viewBox)
+    rendersById[id] = svg
   }
 
-  // === tracespace 渲染流程 ===
-  const plotResult = plot(readResult)
-  const renderLayersResult = renderLayers(plotResult)
-  const renderBoardResult = renderBoard(renderLayersResult)
+  let renderLayersResult: RenderLayersResult = {
+    layers,
+    rendersById,
+    boardShapeRender,
+  }
 
-  // === 从 renderLayersResult.boardShapeRender 取尺寸（单位: 英寸） ===
-  const [x, y, wIn, hIn] = renderLayersResult.boardShapeRender.viewBox
-  const widthIn = `${wIn}in`
-  const heightIn = `${hIn}in`
+  // === 板级渲染（top/bottom） ===
+  let renderBoardResult = renderBoard(renderLayersResult)
 
-  // === 给 top / bottom svg 添加 width/height 属性 ===
+  // === 尺寸：统一输出为毫米（mm） ===
+  const [, , wUnits, hUnits] = boardShapeRender.viewBox
+  const widthMm = `${unitsToMm(wUnits)}mm`
+  const heightMm = `${unitsToMm(hUnits)}mm`
+
+  // 每层 SVG 设置 mm 的 width/height，并应用每层颜色/透明度
+  const visualById = new Map<string, {color?: string; opacity?: number}>(
+    layersInput.map((l, i) => [layers[i].id, {color: l.color, opacity: l.opacity}])
+  )
+
+  for (const {id} of layers) {
+    const svg = rendersById[id]
+    if (!svg) continue
+    svg.properties = svg.properties ?? {}
+    svg.properties.width = widthMm
+    svg.properties.height = heightMm
+
+    const v = visualById.get(id)
+    if (v?.color) svg.properties.color = v.color
+    if (typeof v?.opacity === 'number') svg.properties.opacity = String(v.opacity)
+  }
+
+  // 板级颜色覆盖（copper / soldermask / silkscreen / solderpaste）
+  const boardColors = options.boardColors ?? {}
+
+  const applyBoardColors = (root: SvgElement): void => {
+    const stack: SvgElement[] = [root]
+    const all: SvgElement[] = []
+    while (stack.length) {
+      const n = stack.pop()!
+      all.push(n)
+      const kids = (n.children ?? []) as SvgElement[]
+      for (const k of kids) if (k && (k as any).type === 'element') stack.push(k)
+    }
+
+    // drill-masked copper group
+    for (const g of all.filter(n => n.tagName === 'g' && typeof n.properties?.mask === 'string' && (n.properties!.mask as string).startsWith('url(#drill-')) as any) {
+      if (boardColors.copper) {
+        const descendants = (g.children ?? []) as SvgElement[]
+        for (const d of descendants) {
+          if (d.tagName === 'g') {
+            d.properties = d.properties ?? {}
+            d.properties.color = boardColors.copper
+          }
+        }
+      }
+    }
+
+    // resist-masked group: rect (mask color) + silk group
+    for (const g of all.filter(n => n.tagName === 'g' && typeof n.properties?.mask === 'string' && (n.properties!.mask as string).startsWith('url(#resist-')) as any) {
+      const gChildren = (g.children ?? []) as SvgElement[]
+      for (const c of gChildren) {
+        if (c.tagName === 'rect' && boardColors.soldermask) {
+          c.properties = c.properties ?? {}
+          c.properties.fill = boardColors.soldermask
+        }
+        if (c.tagName === 'g' && boardColors.silkscreen) {
+          c.properties = c.properties ?? {}
+          c.properties.color = boardColors.silkscreen
+        }
+      }
+    }
+
+    // paste group (usually the last g with color #999)
+    if (boardColors.solderpaste) {
+      for (const n of all) {
+        if (n.tagName === 'g' && typeof n.properties?.color === 'string') {
+          // Heuristic: default paste color is #999
+          if ((n.properties!.color as string) === '#999') {
+            n.properties.color = boardColors.solderpaste
+          }
+        }
+      }
+    }
+  }
+
   for (const side of [SIDE_TOP, SIDE_BOTTOM] as const) {
     const svg = renderBoardResult[side]
-    if (!svg || !svg.properties) continue
-
-    if (svg.properties.width == null) {
-      svg.properties.width = widthIn
-    }
-    if (svg.properties.height == null) {
-      svg.properties.height = heightIn
-    }
+    if (!svg) continue
+    svg.properties = svg.properties ?? {}
+    svg.properties.width = widthMm
+    svg.properties.height = heightMm
+    applyBoardColors(svg)
   }
 
-  return { renderLayersResult, renderBoardResult }
+  // Also expose composite dimensions for viewers that stack layers without clipping
+  const compositeWidthMm = `${unitsToMm(compositeViewBox[2])}mm`
+  const compositeHeightMm = `${unitsToMm(compositeViewBox[3])}mm`
+
+  return { renderLayersResult, renderBoardResult, compositeViewBox, compositeWidthMm, compositeHeightMm }
 }

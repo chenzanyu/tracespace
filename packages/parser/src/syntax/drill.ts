@@ -118,6 +118,27 @@ const mode: SyntaxRule = {
   ],
 }
 
+// Some NC drill files toggle routing spindle with M15/M16 without repeating a G code.
+// After M16 (spindle off), subsequent coordinate-only lines should be treated as moves,
+// otherwise stray line segments may be drawn. Emit an INTERPOLATE_MODE node to update
+// the default graphic behaviour in the plotter.
+const spindle: SyntaxRule = {
+  name: 'spindle',
+  rules: [one([token(Lexer.M_CODE, '15'), token(Lexer.M_CODE, '16')]), token(Lexer.NEWLINE)],
+  createNodes(tokens) {
+    const isOff = tokens[0].value === '16'
+    return [
+      {
+        type: Tree.INTERPOLATE_MODE,
+        position: tokensToPosition(tokens),
+        // M16 -> MOVE; M15 -> leave in a benign state (DRILL), real drawing
+        // behaviour will be set by the next G01/line command
+        mode: isOff ? Constants.MOVE : Constants.DRILL,
+      },
+    ]
+  },
+}
+
 const operation: SyntaxRule = {
   name: 'operation',
   rules: [
@@ -241,6 +262,7 @@ const comment: SyntaxRule = {
 export const drillGrammar: SyntaxRule[] = [
   tool,
   mode,
+  spindle,
   operation,
   slot,
   comment,

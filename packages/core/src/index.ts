@@ -1,6 +1,7 @@
 import { s } from 'hastscript'
 
 import * as parser from '@tracespace/parser'
+import { UNITS as P_UNITS, COORDINATE_FORMAT as P_COORDFMT } from '@tracespace/parser'
 import * as plotter from '@tracespace/plotter'
 import * as renderer from '@tracespace/renderer'
 import { random as randomId } from '@tracespace/xml-id'
@@ -378,6 +379,30 @@ export async function fromMemoryLayers(
   const parseTreesById: ReadResult['parseTreesById'] = Object.fromEntries(
     parsedLayers.map((p) => [p.id, p.parseTree])
   )
+
+  // If some layers are missing units/format, borrow from layers that have them
+  let commonUnits: any | undefined
+  let commonFormat: [number, number] | undefined
+  let commonZero: any | undefined
+  for (const p of parsedLayers) {
+    const nodes = p.parseTree.children as any[]
+    for (const n of nodes) {
+      if (!commonUnits && n?.type === P_UNITS && n.units) commonUnits = n.units
+      if (!commonFormat && n?.type === P_COORDFMT && n.format) commonFormat = n.format
+      if (!commonZero && n?.type === P_COORDFMT && n.zeroSuppression) commonZero = n.zeroSuppression
+    }
+  }
+  if (commonUnits || commonFormat || commonZero) {
+    for (const p of parsedLayers) {
+      const nodes = p.parseTree.children as any[]
+      const hasUnits = nodes.some((n) => n?.type === P_UNITS)
+      const hasFormat = nodes.some((n) => n?.type === P_COORDFMT)
+      const inserts: any[] = []
+      if (!hasUnits && commonUnits) inserts.push({ type: P_UNITS, units: commonUnits })
+      if (!hasFormat && (commonFormat || commonZero)) inserts.push({ type: P_COORDFMT, format: commonFormat, zeroSuppression: commonZero })
+      if (inserts.length > 0) p.parseTree.children = [...inserts, ...nodes]
+    }
+  }
 
   // === 绘图：生成 plotTrees 并自定义闭合容差 ===
   const plotTreesById: PlotResult['plotTreesById'] = Object.fromEntries(

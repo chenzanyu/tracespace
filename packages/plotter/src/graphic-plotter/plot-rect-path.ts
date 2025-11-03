@@ -9,20 +9,19 @@ import {positionsEqual, HALF_PI, PI} from '../coordinate-math'
 // Rectangular tools make interesting stroke geometry; see the Gerber spec
 // for graphics and examples
 export function plotRectPath(
-  segments: Tree.PathSegment[],
+  segment: Tree.PathSegment,
   shape: Rectangle
-): Tree.ImageShape {
-  const shapes = segments
-    .filter((s): s is Tree.PathLineSegment => s.type === Tree.LINE)
-    .map(segment => plotRectPathSegment(segment, shape))
+): Tree.ImageRegion {
+  const segments =
+    segment.type === Tree.LINE ? plotRectPathSegment(segment, shape) : []
 
-  return {type: Tree.IMAGE_SHAPE, shape: {type: Tree.LAYERED_SHAPE, shapes}}
+  return {type: Tree.IMAGE_REGION, segments}
 }
 
 function plotRectPathSegment(
   segment: Tree.PathLineSegment,
   shape: Rectangle
-): Tree.PolygonShape {
+): Tree.PathLineSegment[] {
   // Since a rectangular stroke like this is so unique to Gerber, it's easier
   // for downstream graphics generators if we calculate the boundaries of the
   // correct shape and emit a region rather than a path with a width (which is
@@ -92,5 +91,13 @@ function plotRectPathSegment(
     ]
   }
 
-  return {type: Tree.POLYGON, points}
+  const segments: Tree.PathLineSegment[] = points.map((point, index) => {
+    return {
+      type: Tree.LINE,
+      start: point,
+      end: points[(index + 1) % points.length],
+    }
+  })
+
+  return segments
 }

@@ -294,16 +294,27 @@ export interface MemoryRenderOptions {
   maxOutlineGapMm?: number
 }
 
+export interface FromMemoryLayersResult {
+  plotResult: PlotResult
+  renderLayersResult: RenderLayersResult
+  renderBoardResult: RenderBoardResult
+  compositeViewBox: ViewBox
+  compositeWidthMm: string
+  compositeHeightMm: string
+  unitMeta: {
+    units: 'mm' | 'in'
+    mmPerUnit: number
+    unitsPerMm: number
+  }
+}
+
 /**
  * 从内存层列表（字符串/二进制）构建 renderLayersResult & renderBoardResult
  */
 export async function fromMemoryLayers(
   layersInput: MemoryLayerInput[],
   options: MemoryRenderOptions = {}
-): Promise<{
-  renderLayersResult: RenderLayersResult
-  renderBoardResult: RenderBoardResult
-}> {
+): Promise<FromMemoryLayersResult> {
   // 辅助将可能的二进制转换为字符串（若需要）
   const toString = (v: string | Uint8Array | ArrayBuffer): string => {
     if (typeof v === 'string') return v
@@ -421,6 +432,7 @@ export async function fromMemoryLayers(
     : (fileUnits === 'mm' ? mmToUnits(0.5) : 0.02)
 
   const boardShape = plotBoardShape(layers, plotTreesById, maxGapUnits)
+  const plotResult: PlotResult = { layers, plotTreesById, boardShape }
   // Composite viewBox across all plotted layers (no board clipping)
   const allSize = plotter.BoundingBox.sum(
     Object.values(plotTreesById).map(t => t.size)
@@ -533,5 +545,20 @@ export async function fromMemoryLayers(
   const compositeWidthMm = `${unitsToMm(compositeViewBox[2])}mm`
   const compositeHeightMm = `${unitsToMm(compositeViewBox[3])}mm`
 
-  return { renderLayersResult, renderBoardResult, compositeViewBox, compositeWidthMm, compositeHeightMm }
+  const mmPerUnit = unitsToMm(1) || 1
+  const unitsPerMm = 1 / mmPerUnit
+
+  return {
+    plotResult,
+    renderLayersResult,
+    renderBoardResult,
+    compositeViewBox,
+    compositeWidthMm,
+    compositeHeightMm,
+    unitMeta: {
+      units: fileUnits,
+      mmPerUnit,
+      unitsPerMm,
+    },
+  }
 }

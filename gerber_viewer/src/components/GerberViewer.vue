@@ -83,11 +83,12 @@
           </div>
         </div>
         <div v-show="viewTab==='layers'" class="h-full w-full">
-          <div ref="compositeContainer" class="h-full w-full bg-transparent select-none" @wheel.prevent="onWheel" @mousedown="onPointerDown">
-            <div :style="transformStyle" class="origin-top-left">
-              <div v-html="compositeSvg"></div>
-            </div>
-          </div>
+          <div
+            ref="compositeContainer"
+            class="h-full w-full bg-transparent select-none relative overflow-hidden"
+            @wheel.prevent="onWheel"
+            @mousedown="onPointerDown"
+          ></div>
         </div>
       </div>
     </div>
@@ -135,9 +136,21 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick, watch, toRaw } from 'vue'
+import { ref, reactive, computed, nextTick, watch, toRaw, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
 import { fromMemoryLayers, stringifySvg } from '@tracespace/core'
+import { Application, Container, Graphics } from 'pixi.js'
+import {
+  IMAGE_SHAPE,
+  IMAGE_PATH,
+  IMAGE_REGION,
+  CIRCLE,
+  RECTANGLE,
+  POLYGON,
+  OUTLINE,
+  LAYERED_SHAPE,
+  LINE,
+} from '@tracespace/plotter'
 
 // Status and basic refs
 const currentStatusIndex = ref(0)
@@ -147,10 +160,8 @@ const isDragOver = ref(true)
 // SVG outputs
 const topSvg = ref('')
 const bottomSvg = ref('')
-const compositeSvg = ref('')
 
 // Layer data & renderer results
-const layers = ref([])
 const fmRef = ref(null)
 const memoryLayers = ref([])
 
@@ -169,6 +180,14 @@ const bottomContainer = ref(null)
 const viewScale = ref(1)
 const viewTranslate = reactive({ x: 0, y: 0 })
 const viewTab = ref('layers')
+
+const PIXELS_PER_MM = 96 / 25.4
+const pixiApp = ref(null)
+let pixiRoot = null
+let pixiCanvas = null
+let pixiInitPromise = null
+let compositeUpdateToken = 0
+let pixiInitLogged = false
 
 let boardViewBox = [0, 0, 0, 0]
 let boardWidthMm = 0
@@ -190,7 +209,7 @@ const handleUploadFile = async (file) => {
   formData.append('UploadFile', file, file.name)
 
   const res = await axios.post(
-    'http://localhost:5003/api/PCBParse/Parse?Mode=0',
+    'http://localhost:5256/api/PCBParse/Parse?Mode=0',
     formData,
     { headers: { 'Content-Type': 'multipart/form-data', accept: '*/*' } },
   )
@@ -198,12 +217,24 @@ const handleUploadFile = async (file) => {
   const result = res.data.Data
   memoryLayers.value = result.Items || []
   const fm = await fromMemoryLayers(memoryLayers.value)
-  const { renderLayersResult, renderBoardResult } = fm
+  const { renderLayersResult, renderBoardResult, plotResult } = fm
+
   fmRef.value = fm
 
   baseTopEl = renderBoardResult.top
   baseBottomEl = renderBoardResult.bottom
   boardViewBox = renderLayersResult.boardShapeRender.viewBox
+  console.groupCollapsed('[GerberViewer] fromMemoryLayers')
+  try {
+    console.log('layer count', renderLayersResult.layers.length)
+    console.log('board viewBox', boardViewBox)
+    console.log('composite viewBox', fm.compositeViewBox)
+    console.log('composite width/height mm', fm.compositeWidthMm, fm.compositeHeightMm)
+    console.log('unit meta', fm.unitMeta)
+    console.log('plot tree keys', Object.keys(plotResult?.plotTreesById ?? {}))
+  } finally {
+    console.groupEnd()
+  }
 
   const wAttr = (baseTopEl?.properties?.width ?? '').toString()
   const hAttr = (baseTopEl?.properties?.height ?? '').toString()
@@ -243,16 +274,16 @@ const handleUploadFile = async (file) => {
       weight: orderWeight(l.side, l.type),
       color: randomHexColor(),
       visible: true,
-      element: renderLayersResult.rendersById[l.id],
       filename: l.filename,
+      opacity: typeof l.opacity === 'number' ? l.opacity : 1,
+      plotTree: plotResult?.plotTreesById?.[l.id],
     })
   }
   orderedLayers.sort((a, b) => a.weight - b.weight)
   currentStatusIndex.value = 1
   viewTab.value = 'layers'
   await nextTick()
-  fitToContainer(true)
-  updateComposite()
+  await updateComposite({ recenter: true })
 }
 
 // Receive files
@@ -274,56 +305,6 @@ function deepClone(input, seen = new WeakMap()) {
   try { if (typeof window !== 'undefined' && typeof window.structuredClone === 'function') { return window.structuredClone(el) } } catch {}
   if (Array.isArray(el)) { const out = new Array(el.length); seen.set(el, out); for (let i=0;i<el.length;i++) out[i]=deepClone(el[i], seen); return out }
   const out = {}; seen.set(el, out); for (const [k,v] of Object.entries(el)) { if (k==='parent' || k==='__v_isReactive' || k==='__v_skip') continue; out[k]=deepClone(v, seen) } ; return out
-}
-
-function prefixIds(root, prefix) {
-  const idMap = new Map()
-  const rewriteUrl = (val) => (typeof val === 'string' ? val.replace(/url\(#([^)]+)\)/g, (m, id) => `url(#${idMap.get(id) ?? prefix + id})`) : val)
-  const rewriteHref = (val) => (typeof val === 'string' && val.startsWith('#') ? `#${idMap.get(val.slice(1)) ?? prefix + val.slice(1)}` : val)
-  const visit = (node) => {
-    if (!node || node.type !== 'element') return
-    node.properties = node.properties || {}
-    const props = node.properties
-    if (typeof props.id === 'string') {
-      const oldId = props.id
-      const newId = prefix + oldId
-      props.id = newId
-      idMap.set(oldId, newId)
-    }
-    for (const k of Object.keys(props)) {
-      const v = props[k]
-      if (typeof v === 'string') {
-        if (k === 'href' || k === 'xlink:href') props[k] = rewriteHref(v)
-        else if (['clip-path', 'mask', 'filter', 'marker-start', 'marker-mid', 'marker-end', 'style'].includes(k)) props[k] = rewriteUrl(v)
-      }
-    }
-    const children = Array.isArray(node.children) ? node.children : []
-    for (const c of children) visit(c)
-  }
-  visit(root)
-}
-
-function boostOutlineVisibility(root) {
-  const stack = [root]
-  while (stack.length) {
-    const n = stack.pop()
-    if (!n || n.type !== 'element') continue
-    if (n.tagName === 'path') {
-      n.properties = n.properties || {}
-      const base = n.properties.style ? String(n.properties.style) + ';' : ''
-      n.properties.style = base + [
-        'fill:none',
-        'stroke:currentColor',
-        'stroke-width:0.5px',
-        'vector-effect:non-scaling-stroke',
-        'stroke-linecap:butt',
-        'stroke-linejoin:miter',
-        'shape-rendering:crispEdges',
-      ].join(';') + ';'
-    }
-    const kids = Array.isArray(n.children) ? n.children : []
-    for (const k of kids) stack.push(k)
-  }
 }
 
 function applyBoardColorsLocal(root, colors) {
@@ -377,37 +358,348 @@ function randomHexColor() {
   return `#${toHex(n())}${toHex(n())}${toHex(n())}`
 }
 
-function buildCompositeSvg() {
-  const vb = fmRef.value?.compositeViewBox ?? boardViewBox
-  let [x, y, w, h] = vb
-  const m = Math.max(w, h) * 0.002
-  x = x - m; y = y - m; w = w + 2 * m; h = h + 2 * m
-  const root = { type: 'element', tagName: 'svg', properties: {
-    version: '1.1', xmlns: 'http://www.w3.org/2000/svg', 'xmlns:xlink': 'http://www.w3.org/1999/xlink',
-    viewBox: `${x} ${y} ${w} ${h}`, width: `${fmRef.value?.compositeWidthMm ?? (boardWidthMm + 'mm')}`, height: `${fmRef.value?.compositeHeightMm ?? (boardHeightMm + 'mm')}`,
-    preserveAspectRatio: 'xMidYMid meet', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'stroke-width': '0', 'fill-rule': 'evenodd', 'clip-rule': 'evenodd', fill: 'currentColor', stroke: 'currentColor',
-  }, children: [] }
-  const renderOrder = [...orderedLayers].sort((a, b) => b.weight - a.weight)
-  for (const layer of renderOrder) {
-    if (!layer.visible) continue
-    const g = { type: 'element', tagName: 'g', properties: { color: layer.color }, children: [] }
-    const src = layer.element
-    const rawKids = (src && src.children) ? src.children : []
-    const kids = Array.isArray(rawKids) ? deepClone(rawKids) : []
-    // guard: only proceed if kids is an array
-    if (Array.isArray(kids) && kids.length > 0) {
-      prefixIds({ type: 'element', tagName: 'g', properties: {}, children: kids }, `L${layer.id}_`)
-      if (layer.type === 'outline') boostOutlineVisibility({ type: 'element', tagName: 'g', properties: {}, children: kids })
-      g.children.push(...kids)
-    }
-    root.children.push(g)
+function parseHexColor(input) {
+  if (typeof input !== 'string') return 0xffffff
+  const hex = input.trim().replace(/^#/, '')
+  if (hex.length === 3) {
+    const [r, g, b] = hex
+    return Number.parseInt(`${r}${r}${g}${g}${b}${b}`, 16)
   }
-  return root
+  if (hex.length === 6) {
+    const value = Number.parseInt(hex, 16)
+    return Number.isNaN(value) ? 0xffffff : value
+  }
+  return 0xffffff
 }
 
-function updateComposite() {
-  const el = buildCompositeSvg()
-  compositeSvg.value = stringifySvg(el)
+function getCompositeViewBox() {
+  return fmRef.value?.compositeViewBox ?? boardViewBox
+}
+
+function getUnitsToPx() {
+  const mmPerUnit = fmRef.value?.unitMeta?.mmPerUnit ?? 1
+  return mmPerUnit * PIXELS_PER_MM
+}
+
+function applyViewTransform() {
+  const app = pixiApp.value
+  if (!app || !pixiRoot) return
+  pixiRoot.scale.set(viewScale.value)
+  pixiRoot.position.set(viewTranslate.x, viewTranslate.y)
+}
+
+function resizePixiToHost() {
+  const app = pixiApp.value
+  const host = compositeContainer.value
+  if (!app || !host) return
+  const width = Math.max(host.clientWidth, 1)
+  const height = Math.max(host.clientHeight, 1)
+  if (app.renderer.width !== width || app.renderer.height !== height) {
+    console.log('[GerberViewer] resizePixiToHost', { width, height })
+    app.renderer.resize(width, height)
+  }
+}
+
+async function ensurePixiApp() {
+  if (pixiApp.value) return pixiApp.value
+  if (pixiInitPromise) return pixiInitPromise
+  const host = compositeContainer.value
+  if (!host) return null
+  const width = Math.max(host.clientWidth || 1, 1)
+  const height = Math.max(host.clientHeight || 1, 1)
+  const resolution = window.devicePixelRatio || 1
+  const app = new Application()
+  pixiInitPromise = (async () => {
+    try {
+      await app.init({
+        width,
+        height,
+        backgroundAlpha: 0,
+        antialias: true,
+        resolution,
+        autoDensity: true,
+        resizeTo: host,
+      })
+      if (!pixiInitLogged) {
+        console.log('[GerberViewer] Pixi initialized', { width, height, resolution })
+        pixiInitLogged = true
+      }
+      const canvasEl = app.canvas ?? app.view
+      canvasEl.style.position = 'absolute'
+      canvasEl.style.left = '0'
+      canvasEl.style.top = '0'
+      canvasEl.style.width = '100%'
+      canvasEl.style.height = '100%'
+      canvasEl.style.pointerEvents = 'none'
+      canvasEl.style.userSelect = 'none'
+      host.appendChild(canvasEl)
+      app.stage.eventMode = 'none'
+      pixiRoot = new Container()
+      pixiRoot.eventMode = 'none'
+      pixiRoot.sortableChildren = true
+      app.stage.sortableChildren = true
+      app.stage.addChild(pixiRoot)
+      resizePixiToHost()
+      pixiApp.value = app
+      pixiCanvas = canvasEl
+      applyViewTransform()
+      return app
+    } catch (error) {
+      try { app.destroy(true) } catch { /* noop */ }
+      throw error
+    } finally {
+      pixiInitPromise = null
+    }
+  })()
+  return pixiInitPromise
+}
+
+function toXY(position) {
+  return [position[0], position[1]]
+}
+
+function positionsClose(a, b, eps = 1e-6) {
+  return Math.abs(a[0] - b[0]) <= eps && Math.abs(a[1] - b[1]) <= eps
+}
+
+function mapSvgPoint(x, y, ctx) {
+  const [vx, vy] = ctx.viewBox
+  return {
+    x: (x - vx) * ctx.unitsToPx,
+    y: (y - vy) * ctx.unitsToPx,
+  }
+}
+
+function mapRawPoint(x, y, ctx) {
+  return mapSvgPoint(x, -y, ctx)
+}
+
+function approximateArcPoints(segment, ctx) {
+  const startAngle = segment.start[2]
+  const endAngle = segment.end[2]
+  let sweep = endAngle - startAngle
+  if (!Number.isFinite(sweep)) return []
+  const startXY = toXY(segment.start)
+  const endXY = toXY(segment.end)
+  if (Math.abs(sweep) < 1e-7 && positionsClose(startXY, endXY)) {
+    sweep = sweep >= 0 ? Math.PI * 2 : -Math.PI * 2
+  }
+  const absSweep = Math.abs(sweep)
+  if (absSweep === 0) return []
+  const steps = Math.max(6, Math.ceil(absSweep / (Math.PI / 16)))
+  const [cx, cy] = segment.center
+  const radius = segment.radius
+  const points = []
+  for (let i = 1; i < steps; i++) {
+    const angle = startAngle + (sweep * i) / steps
+    const px = cx + radius * Math.cos(angle)
+    const py = cy + radius * Math.sin(angle)
+    points.push(mapRawPoint(px, py, ctx))
+  }
+  return points
+}
+
+function drawSegments(graphics, segments, ctx, { closePath }) {
+  if (!Array.isArray(segments) || segments.length === 0) return
+  graphics.beginPath()
+  let currentEnd = null
+  let subpathStart = null
+  for (const segment of segments) {
+    const startRaw = toXY(segment.start)
+    if (!currentEnd || !positionsClose(currentEnd.raw, startRaw)) {
+      if (closePath && currentEnd && subpathStart && !positionsClose(currentEnd.raw, subpathStart.raw)) {
+        graphics.lineTo(subpathStart.point.x, subpathStart.point.y)
+      }
+      const startPoint = mapRawPoint(startRaw[0], startRaw[1], ctx)
+      graphics.moveTo(startPoint.x, startPoint.y)
+      subpathStart = { raw: startRaw, point: startPoint }
+    }
+    if (segment.type === LINE) {
+      const endRaw = toXY(segment.end)
+      const endPoint = mapRawPoint(endRaw[0], endRaw[1], ctx)
+      graphics.lineTo(endPoint.x, endPoint.y)
+      currentEnd = { raw: endRaw, point: endPoint }
+    } else {
+      const arcPoints = approximateArcPoints(segment, ctx)
+      for (const p of arcPoints) graphics.lineTo(p.x, p.y)
+      const endRaw = toXY(segment.end)
+      const endPoint = mapRawPoint(endRaw[0], endRaw[1], ctx)
+      graphics.lineTo(endPoint.x, endPoint.y)
+      currentEnd = { raw: endRaw, point: endPoint }
+    }
+  }
+  if (closePath && subpathStart && currentEnd && !positionsClose(currentEnd.raw, subpathStart.raw)) {
+    graphics.lineTo(subpathStart.point.x, subpathStart.point.y)
+  }
+  if (closePath) graphics.closePath()
+}
+
+function applyFill(graphics) {
+  graphics.fill({ color: 0xffffff })
+}
+
+function applyStroke(graphics, width) {
+  graphics.stroke({ width, color: 0xffffff, alignment: 0.5 })
+}
+
+function drawRegion(graphics, node, ctx) {
+  drawSegments(graphics, node.segments, ctx, { closePath: true })
+  applyFill(graphics)
+}
+
+function drawPath(graphics, node, ctx) {
+  drawSegments(graphics, node.segments, ctx, { closePath: false })
+  const widthPxRaw = (node.width ?? 0) * ctx.unitsToPx
+  const strokeWidth = Math.max(widthPxRaw, 0.75)
+  applyStroke(graphics, strokeWidth)
+}
+
+function drawPolygon(graphics, points, ctx) {
+  if (!Array.isArray(points) || points.length === 0) return
+  graphics.beginPath()
+  const first = mapRawPoint(points[0][0], points[0][1], ctx)
+  graphics.moveTo(first.x, first.y)
+  for (let i = 1; i < points.length; i++) {
+    const pt = mapRawPoint(points[i][0], points[i][1], ctx)
+    graphics.lineTo(pt.x, pt.y)
+  }
+  graphics.lineTo(first.x, first.y)
+  graphics.closePath()
+}
+
+function renderShape(solid, eraser, shape, ctx, forceErase = false) {
+  if (!shape) return
+  if (shape.type === LAYERED_SHAPE) {
+    for (const sub of shape.shapes || []) {
+      const subErase = forceErase || sub?.erase === true
+      renderShape(solid, eraser, sub, ctx, subErase)
+    }
+    return
+  }
+
+  const target = forceErase || shape?.erase === true ? eraser : solid
+
+  switch (shape.type) {
+    case CIRCLE: {
+      const center = mapSvgPoint(shape.cx, -shape.cy, ctx)
+      const radius = Math.max(shape.r * ctx.unitsToPx, 0)
+      target.circle(center.x, center.y, radius)
+      applyFill(target)
+      break
+    }
+    case RECTANGLE: {
+      const topLeft = mapSvgPoint(shape.x, -shape.y - shape.ySize, ctx)
+      const width = shape.xSize * ctx.unitsToPx
+      const height = shape.ySize * ctx.unitsToPx
+      const radius = Math.max((shape.r ?? 0) * ctx.unitsToPx, 0)
+      target.roundRect(topLeft.x, topLeft.y, width, height, radius)
+      applyFill(target)
+      break
+    }
+    case POLYGON: {
+      drawPolygon(target, shape.points, ctx)
+      applyFill(target)
+      break
+    }
+    case OUTLINE: {
+      drawSegments(target, shape.segments, ctx, { closePath: true })
+      const outlineWidth = Math.max(ctx.unitsToPx * 0.05, 0.8)
+      applyStroke(target, outlineWidth)
+      break
+    }
+    default:
+      break
+  }
+}
+
+function renderGraphic(solid, eraser, graphic, ctx) {
+  if (!graphic) return
+  const target = graphic.erase === true ? eraser : solid
+  switch (graphic.type) {
+    case IMAGE_SHAPE:
+      renderShape(solid, eraser, graphic.shape, ctx, graphic.erase === true)
+      break
+    case IMAGE_PATH:
+      drawPath(target, graphic, ctx)
+      break
+    case IMAGE_REGION:
+      drawRegion(target, graphic, ctx)
+      break
+    default:
+      break
+  }
+}
+
+function createLayerGraphics(tree, ctx, colorValue, opacity = 1) {
+  console.debug('[GerberViewer] createLayerGraphics', {
+    id: tree?.id,
+    childCount: tree?.children?.length ?? 0,
+    colorValue: colorValue?.toString(16),
+    opacity,
+  })
+  const solid = new Graphics()
+  solid.eventMode = 'none'
+  solid.tint = colorValue
+  solid.alpha = opacity
+
+  const eraser = new Graphics()
+  eraser.eventMode = 'none'
+  eraser.blendMode = 'erase'
+  eraser.tint = 0xffffff
+
+  for (const graphic of tree.children || []) renderGraphic(solid, eraser, graphic, ctx)
+
+  const container = new Container()
+  container.eventMode = 'none'
+  container.alpha = 1
+  container.addChild(solid)
+  container.addChild(eraser)
+  return container
+}
+
+async function updateComposite({ recenter = false } = {}) {
+  compositeUpdateToken += 1
+  const token = compositeUpdateToken
+  const fm = fmRef.value
+  const app = await ensurePixiApp()
+  if (!app || token !== compositeUpdateToken) return
+  if (!pixiRoot) return
+  resizePixiToHost()
+  console.groupCollapsed('[GerberViewer] updateComposite', { recenter, token, viewTab: viewTab.value })
+  pixiRoot.removeChildren()
+  if (!fm) {
+    console.warn('[GerberViewer] updateComposite: fmRef missing')
+    if (recenter) fitToContainer(true)
+    else applyViewTransform()
+    console.groupEnd()
+    return
+  }
+  const viewBox = getCompositeViewBox()
+  const unitsToPx = getUnitsToPx()
+  console.log('viewBox', viewBox, 'unitsToPx', unitsToPx)
+  console.log('orderedLayers', orderedLayers.length)
+  const ctx = { viewBox, unitsToPx }
+  const plotTrees = fm.plotResult?.plotTreesById ?? {}
+  const sorted = [...orderedLayers].sort((a, b) => b.weight - a.weight)
+  let zIndex = 0
+  for (const layer of sorted) {
+    if (!layer.visible) continue
+    const tree = layer.plotTree ?? plotTrees[layer.id]
+    if (!tree) {
+      console.warn('[GerberViewer] missing plot tree', layer.id, layer.filename)
+      continue
+    }
+    layer.plotTree = tree
+    const colorValue = parseHexColor(layer.color)
+    const layerOpacity = typeof layer.opacity === 'number' ? layer.opacity : 1
+    const graphics = createLayerGraphics(tree, ctx, colorValue, layerOpacity)
+    graphics.zIndex = zIndex++
+    pixiRoot.addChild(graphics)
+  }
+  console.log('layer graphics added', zIndex)
+  if (recenter) fitToContainer(true)
+  else applyViewTransform()
+  console.groupEnd()
 }
 
 function getActiveContainer() {
@@ -421,19 +713,29 @@ function fitToContainer(center = false) {
   if (!el) return
   const rect = el.getBoundingClientRect()
   if (rect.width > 0 && rect.height > 0) {
-    const PX_PER_MM = 96 / 25.4
     const mmW = (viewTab.value === 'layers' && fmRef.value?.compositeWidthMm)
       ? parseFloat(String(fmRef.value.compositeWidthMm).replace('mm', ''))
       : boardWidthMm
     const mmH = (viewTab.value === 'layers' && fmRef.value?.compositeHeightMm)
       ? parseFloat(String(fmRef.value.compositeHeightMm).replace('mm', ''))
       : boardHeightMm
-    const contentW = mmW * PX_PER_MM
-    const contentH = mmH * PX_PER_MM
+    const contentW = mmW * PIXELS_PER_MM
+    const contentH = mmH * PIXELS_PER_MM
     const margin = 0.3
     const scaleX = (rect.width * (1 - margin)) / contentW
     const scaleY = (rect.height * (1 - margin)) / contentH
     viewScale.value = Math.max(0.05, Math.min(scaleX, scaleY))
+    console.log('[GerberViewer] fitToContainer', {
+      rect,
+      mmW,
+      mmH,
+      contentW,
+      contentH,
+      scaleX,
+      scaleY,
+      chosenScale: viewScale.value,
+      centerRequested: center,
+    })
     if (center) {
       const drawW = contentW * viewScale.value
       const drawH = contentH * viewScale.value
@@ -444,12 +746,18 @@ function fitToContainer(center = false) {
       viewTranslate.y = align(centerY)
     }
   }
+  applyViewTransform()
 }
 
 let drag = { active: false, startX: 0, startY: 0, ox: 0, oy: 0 }
 function onPointerDown(e) {
   drag = { active: true, startX: e.clientX, startY: e.clientY, ox: viewTranslate.x, oy: viewTranslate.y }
-  const move = (ev) => { if (!drag.active) return; viewTranslate.x = drag.ox + (ev.clientX - drag.startX); viewTranslate.y = drag.oy + (ev.clientY - drag.startY) }
+  const move = (ev) => {
+    if (!drag.active) return
+    viewTranslate.x = drag.ox + (ev.clientX - drag.startX)
+    viewTranslate.y = drag.oy + (ev.clientY - drag.startY)
+    applyViewTransform()
+  }
   const up = () => { drag.active = false; window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
   window.addEventListener('mousemove', move)
   window.addEventListener('mouseup', up)
@@ -467,6 +775,7 @@ function onWheel(e) {
   viewTranslate.x = mx - wx * next
   viewTranslate.y = my - wy * next
   viewScale.value = next
+  applyViewTransform()
 }
 
 function setAllVisible(v) {
@@ -474,8 +783,43 @@ function setAllVisible(v) {
   updateComposite()
 }
 
-if (typeof window !== 'undefined') window.addEventListener('resize', () => fitToContainer(true))
-watch(viewTab, async () => { await nextTick(); fitToContainer(true) })
+const handleResize = () => {
+  resizePixiToHost()
+  fitToContainer(true)
+}
+if (typeof window !== 'undefined') window.addEventListener('resize', handleResize)
+watch(viewTab, async (tab) => {
+  await nextTick()
+  if (tab === 'layers') {
+    await ensurePixiApp()
+    await updateComposite()
+  }
+  resizePixiToHost()
+  fitToContainer(true)
+})
+
+onMounted(() => {
+  if (viewTab.value === 'layers') {
+    ensurePixiApp().then(() => updateComposite())
+  }
+})
+
+onBeforeUnmount(() => {
+  if (typeof window !== 'undefined') window.removeEventListener('resize', handleResize)
+  const app = pixiApp.value
+  if (app) {
+    try {
+      app.destroy(true)
+    } catch (err) {
+      console.warn('Failed to destroy pixi application', err)
+    }
+  }
+  if (pixiCanvas?.parentNode) pixiCanvas.parentNode.removeChild(pixiCanvas)
+  pixiApp.value = null
+  pixiRoot = null
+  pixiCanvas = null
+  pixiInitPromise = null
+})
 
 // Layer naming and settings
 function displayLayerName(layer) {
@@ -539,9 +883,9 @@ function applySettings() {
     const target = list.find((it) => it.filename === e.filename)
     if (target) { target.type = e.type; target.side = e.side }
   }
-  fromMemoryLayers(list).then((fm) => {
+  fromMemoryLayers(list).then(async (fm) => {
     fmRef.value = fm
-    const { renderLayersResult, renderBoardResult } = fm
+    const { renderLayersResult, renderBoardResult, plotResult } = fm
     baseTopEl = renderBoardResult.top
     baseBottomEl = renderBoardResult.bottom
     boardViewBox = renderLayersResult.boardShapeRender.viewBox
@@ -549,7 +893,7 @@ function applySettings() {
     const hAttr = (baseTopEl?.properties?.height ?? '').toString()
     boardWidthMm = parseFloat(wAttr.replace('mm', '')) || boardViewBox[2]
     boardHeightMm = parseFloat(hAttr.replace('mm', '')) || boardViewBox[3]
-    const keep = new Map(orderedLayers.map((l) => [l.filename, { color: l.color, visible: l.visible }]))
+    const keep = new Map(orderedLayers.map((l) => [l.filename, { color: l.color, visible: l.visible, opacity: l.opacity }]))
     orderedLayers.splice(0)
     const orderWeight = (side, type) => {
       const s = side || ''
@@ -572,13 +916,23 @@ function applySettings() {
       return map[key] ?? 100
     }
     for (const l of renderLayersResult.layers) {
-      const kv = keep.get(l.filename) || { color: randomHexColor(), visible: true }
-      orderedLayers.push({ id: l.id, side: l.side, type: l.type, weight: orderWeight(l.side, l.type), color: kv.color, visible: kv.visible, element: renderLayersResult.rendersById[l.id], filename: l.filename })
+      const kv = keep.get(l.filename) || { color: randomHexColor(), visible: true, opacity: 1 }
+      orderedLayers.push({
+        id: l.id,
+        side: l.side,
+        type: l.type,
+        weight: orderWeight(l.side, l.type),
+        color: kv.color,
+        visible: kv.visible,
+        opacity: typeof kv.opacity === 'number' ? kv.opacity : 1,
+        filename: l.filename,
+        plotTree: plotResult?.plotTreesById?.[l.id],
+      })
     }
     orderedLayers.sort((a, b) => a.weight - b.weight)
     updateBoardPreview('top')
     updateBoardPreview('bottom')
-    updateComposite()
+    await updateComposite()
     memoryLayers.value = list
     isSettingsOpen.value = false
   })

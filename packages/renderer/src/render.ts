@@ -1,8 +1,10 @@
 import {s} from 'hastscript'
 
+import {CLEAR, DARK} from '@tracespace/parser'
 import {random as createId} from '@tracespace/xml-id'
 import type {
-  ImageGraphic,
+  ImageTree,
+  ImageGraphicBase,
   ImageShape,
   ImagePath,
   ImageRegion,
@@ -22,9 +24,67 @@ import {
   LINE,
 } from '@tracespace/plotter'
 
-import type {SvgElement} from './types'
+import type {SvgElement, ViewBox} from './types'
 
-export function renderGraphic(node: ImageGraphic): SvgElement {
+export function renderTreeGraphics(
+  image: ImageTree,
+  viewBox: ViewBox
+): SvgElement[] {
+  const idBase = createId()
+  const defs: SvgElement[] = []
+  let layerTree: SvgElement[] = []
+  const layerChildren: SvgElement[] = []
+  const layerHoles: SvgElement[] = []
+  const [x, y, width, height] = viewBox
+
+  for (const [index, child] of image.children.entries()) {
+    const element = renderGraphic(child)
+    const polarity = child.polarity ?? DARK
+
+    if (polarity === CLEAR) {
+      layerHoles.push(element)
+
+      const next = image.children[index + 1]
+      const nextPolarity = next?.polarity ?? DARK
+      const nextIsDark = nextPolarity === DARK
+      const isLast = index === image.children.length - 1
+
+      if (isLast || nextIsDark) {
+        const maskId = `${idBase}__lp${index}`
+
+        defs.push(
+          s(
+            'mask',
+            {
+              id: maskId,
+              maskUnits: 'userSpaceOnUse',
+              maskContentUnits: 'userSpaceOnUse',
+            },
+            [
+              s('rect', {x, y, width, height, fill: '#fff'}),
+              s('g', {color: '#000'}, layerHoles.splice(0)),
+            ]
+          )
+        )
+
+        layerTree = [
+          s('g', {mask: `url(#${maskId})`}, [
+            ...layerChildren.splice(0),
+            ...layerTree,
+          ]),
+        ]
+      }
+    } else {
+      layerChildren.push(element)
+    }
+  }
+
+  layerTree.push(...layerChildren)
+
+  return defs.length > 0 ? [s('defs', defs), ...layerTree] : layerTree
+}
+
+export function renderGraphic(node: ImageGraphicBase): SvgElement {
   if (node.type === IMAGE_SHAPE) {
     return renderShape(node)
   }
@@ -58,7 +118,7 @@ export function shapeToElement(shape: Shape): SvgElement {
     }
 
     case POLYGON: {
-      const points = shape.points.map(([x, y]) => `${x},${-y}`).join(' ')
+      const points = shape.points.map(([px, py]) => `${px},${-py}`).join(' ')
 
       return s('polygon', {points})
     }
@@ -80,14 +140,14 @@ export function shapeToElement(shape: Shape): SvgElement {
         if (layerShape.erase === true && !BoundingBox.isEmpty(boundingBox)) {
           const maskId = `${idBase}__m${index}`
           const [x1, y1, x2, y2] = boundingBox
-          const [x, y, width, height] = [x1, y1, x2 - x1, y2 - y1]
+          const [mx, my, mWidth, mHeight] = [x1, y1, x2 - x1, y2 - y1]
 
           // Build a mask that reveals everything (white rect) and
           // then "cuts out" the erase shape (black fill).
           defs.push(
             s('mask', {id: maskId, maskUnits: 'userSpaceOnUse'}, [
               // Invert Y for user-space rectangle to match shape mapping
-              s('rect', {x, y: -y - height, width, height, fill: '#fff'}),
+              s('rect', {x: mx, y: -my - mHeight, width: mWidth, height: mHeight, fill: '#fff'}),
               s('g', {color: '#000'}, [shapeToElement(layerShape)]),
             ])
           )
@@ -114,7 +174,14 @@ export function shapeToElement(shape: Shape): SvgElement {
 export function renderPath(node: ImagePath | ImageRegion): SvgElement {
   const pathData = segmentsToPathData(node.segments)
   const props =
-    node.type === IMAGE_PATH ? {strokeWidth: node.width, fill: 'none'} : {}
+    node.type === IMAGE_PATH
+      ? {
+          strokeWidth: node.width,
+          fill: 'none',
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+        }
+      : {}
 
   return s('path', {...props, d: pathData})
 }

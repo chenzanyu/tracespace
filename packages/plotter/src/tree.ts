@@ -1,6 +1,6 @@
 import type {Node, Parent} from 'unist'
 
-import type {UnitsType} from '@tracespace/parser'
+import type {UnitsType, Polarity} from '@tracespace/parser'
 
 export const IMAGE = 'image'
 export const IMAGE_SHAPE = 'imageShape'
@@ -76,26 +76,27 @@ export interface ImageTree extends Parent {
   children: ImageGraphic[]
 }
 
-export interface ImageShape extends Node {
-  type: typeof IMAGE_SHAPE
-  shape: Shape
+export interface ImageGraphicBase extends Node {
+  polarity?: Polarity
+  dcode?: string
   /** When true, this graphic should subtract from existing content */
   erase?: boolean
 }
 
-export interface ImagePath extends Node {
+export interface ImageShape extends ImageGraphicBase {
+  type: typeof IMAGE_SHAPE
+  shape: Shape
+}
+
+export interface ImagePath extends ImageGraphicBase {
   type: typeof IMAGE_PATH
   width: number
   segments: PathSegment[]
-  /** When true, this graphic should subtract from existing content */
-  erase?: boolean
 }
 
-export interface ImageRegion extends Node {
+export interface ImageRegion extends ImageGraphicBase {
   type: typeof IMAGE_REGION
   segments: PathSegment[]
-  /** When true, this graphic should subtract from existing content */
-  erase?: boolean
 }
 
 export type PathSegment = PathLineSegment | PathArcSegment

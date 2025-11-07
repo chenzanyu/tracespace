@@ -4,7 +4,7 @@
     <div
       class="relative bg-gradient-to-b from-gray-900 to-gray-800 text-gray-100 border-r border-gray-700 transition-all duration-300 ease-in-out"
       :class="currentStatusIndex===0 ? 'flex-1 flex items-center justify-center' : 'shrink-0'"
-      :style="currentStatusIndex === 0 ? undefined : { width: isLayerPanelOpen ? '20rem' : '0px' }"
+      :style="panelStyle"
     >
       <!-- Upload panel -->
       <div v-if="currentStatusIndex === 0" class="h-full flex items-center justify-center p-4">
@@ -133,6 +133,26 @@
         </div>
       </div>
 
+      <div class="absolute top-4 left-4 z-30 space-y-2" v-if="viewMode==='layers'">
+        <div class="flex gap-2">
+          <button
+            class="px-3 py-2 bg-gray-900/80 text-white uppercase text-[11px] tracking-wide border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800"
+            title="重置视图"
+            @click="resetCompositeSize"
+          >
+            <img :src="resetIcon" alt="reset" class="w-4 h-4" />
+          </button>
+          <button
+            class="px-3 py-2 uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition-colors"
+            :class="measurementMode ? 'bg-[#0092b8] text-white border-[#3fd3ff] drop-shadow-[0_0_12px_rgba(0,146,184,0.8)]' : 'bg-gray-900/80 text-white border-white/30 hover:bg-gray-800'"
+            title="尺寸测量"
+            @click="toggleMeasurementMode"
+          >
+            <img :src="measureIcon" alt="measurement" class="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
       <div class="h-full w-full">
         <div v-show="viewMode==='2d'" ref="topContainer" class="h-full w-full overflow-hidden bg-transparent select-none" @wheel.prevent="onWheel" @mousedown="onPointerDown">
           <div :style="transformStyle" class="origin-top-left">
@@ -150,7 +170,42 @@
             class="h-full w-full bg-transparent select-none relative overflow-hidden"
             @wheel.prevent="onWheel"
             @mousedown="onPointerDown"
-          ></div>
+            @mousemove="onCompositeMouseMove"
+            @mouseleave="onCompositeMouseLeave"
+          >
+            <div
+              v-if="measurementOverlayVisible"
+              class="pointer-events-none absolute inset-0 z-30"
+            >
+              <div
+                v-if="crosshair.visible"
+                class="absolute inset-0"
+              >
+                <div
+                  class="absolute w-px bg-white/70"
+                  :style="{ left: `${crosshair.x}px`, top: '0', height: '100%' }"
+                ></div>
+                <div
+                  class="absolute h-px bg-white/70"
+                  :style="{ top: `${crosshair.y}px`, left: '0', width: '100%' }"
+                ></div>
+              </div>
+              <div
+                v-if="measurementRect"
+                class="absolute border border-cyan-400 bg-cyan-400/10"
+                :style="measurementRect.style"
+              ></div>
+              <div
+                v-if="measurementValues && measurementRect"
+                class="absolute text-[15px] font-semibold text-white bg-[#04111f]/95 px-4 py-3 border border-cyan-300 shadow-[0_0_16px_rgba(0,255,255,0.8)] tracking-wide"
+                :style="measurementLabelStyle"
+              >
+                DX: {{ measurementValues.dx.toFixed(2) }}mm<br/>
+                DY: {{ measurementValues.dy.toFixed(2) }}mm<br/>
+                D: {{ measurementValues.diagonal.toFixed(2) }}mm
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -204,6 +259,8 @@ import axios from 'axios'
 import { fromMemoryLayers, stringifySvg } from '@tracespace/core'
 import { CLEAR } from '@tracespace/parser'
 import {Application, Container, Graphics} from 'pixi.js'
+const resetIcon = new URL('../assets/resetting.svg', import.meta.url).href
+const measureIcon = new URL('../assets/measurement.svg', import.meta.url).href
 import {
   IMAGE_SHAPE,
   IMAGE_PATH,
@@ -252,6 +309,10 @@ const viewModeOptions = [
 ]
 const isLayerPanelOpen = ref(true)
 const layerPanelPreference = ref(null)
+const measurementMode = ref(false)
+const measurementStart = ref(null)
+const measurementEnd = ref(null)
+const crosshair = reactive({ x: 0, y: 0, visible: false })
 
 const PIXELS_PER_MM = 96 / 25.4
 const MIN_PATH_STROKE_PX = 1.2
@@ -275,6 +336,55 @@ const editableLayers = reactive([])
 const transformStyle = computed(() => ({
   transform: `translate(${viewTranslate.x}px, ${viewTranslate.y}px) scale(${viewScale.value})`,
 }))
+const panelStyle = computed(() => {
+  if (currentStatusIndex.value === 0) return {}
+  const width = isLayerPanelOpen.value ? '20rem' : '0px'
+  return { width, flexBasis: width }
+})
+const measurementOverlayVisible = computed(() => viewMode.value === 'layers' && measurementMode.value)
+const measurementRect = computed(() => {
+  if (!measurementStart.value || !measurementEnd.value) return null
+  const left = Math.min(measurementStart.value.x, measurementEnd.value.x)
+  const top = Math.min(measurementStart.value.y, measurementEnd.value.y)
+  const width = Math.abs(measurementEnd.value.x - measurementStart.value.x)
+  const height = Math.abs(measurementEnd.value.y - measurementStart.value.y)
+  return {
+    style: {
+      left: `${left}px`,
+      top: `${top}px`,
+      width: `${width}px`,
+      height: `${height}px`,
+    },
+    left,
+    top,
+    width,
+    height,
+  }
+})
+const measurementValues = computed(() => {
+  if (!measurementStart.value || !measurementEnd.value) return null
+  const dxPx = measurementEnd.value.x - measurementStart.value.x
+  const dyPx = measurementEnd.value.y - measurementStart.value.y
+  const pxToMm = 1 / (PIXELS_PER_MM * (viewScale.value || 0.0001))
+  return {
+    dx: Math.abs(dxPx) * pxToMm,
+    dy: Math.abs(dyPx) * pxToMm,
+    diagonal: Math.hypot(dxPx, dyPx) * pxToMm,
+  }
+})
+const measurementLabelStyle = computed(() => {
+  if (!measurementRect.value) return { display: 'none' }
+  const container = compositeContainer.value?.getBoundingClientRect()
+  const baseLeft = measurementRect.value.left + measurementRect.value.width + 8
+  const baseTop = measurementRect.value.top - 48
+  const maxLeft = container ? container.width - 120 : baseLeft
+  const left = Math.min(Math.max(0, baseLeft), maxLeft)
+  const top = baseTop < 0 ? measurementRect.value.top + measurementRect.value.height + 8 : baseTop
+  return {
+    left: `${left}px`,
+    top: `${top}px`,
+  }
+})
 
 // Upload handler
 const handleUploadFile = async (file) => {
@@ -888,6 +998,13 @@ function fitToContainer(center = false) {
 
 let drag = { active: false, startX: 0, startY: 0, ox: 0, oy: 0 }
 function onPointerDown(e) {
+  if (measurementOverlayVisible.value) {
+    if (e.button !== 0) return
+    e.preventDefault()
+    const local = getCompositeLocal(e)
+    handleMeasurementClick(local)
+    return
+  }
   drag = { active: true, startX: e.clientX, startY: e.clientY, ox: viewTranslate.x, oy: viewTranslate.y }
   const move = (ev) => {
     if (!drag.active) return
@@ -918,6 +1035,60 @@ function onWheel(e) {
 function setAllVisible(v) {
   for (const l of orderedLayers) l.visible = v
   updateComposite()
+}
+
+function resetCompositeSize() {
+  fitToContainer(true)
+}
+
+function toggleMeasurementMode() {
+  if (measurementMode.value) {
+    exitMeasurementMode()
+    return
+  }
+  measurementMode.value = true
+  measurementStart.value = null
+  measurementEnd.value = null
+  crosshair.visible = false
+}
+
+function exitMeasurementMode() {
+  measurementMode.value = false
+  measurementStart.value = null
+  measurementEnd.value = null
+  crosshair.visible = false
+}
+
+function getCompositeLocal(event) {
+  const rect = compositeContainer.value?.getBoundingClientRect()
+  if (!rect) return { x: 0, y: 0 }
+  const x = Math.max(0, Math.min(event.clientX - rect.left, rect.width))
+  const y = Math.max(0, Math.min(event.clientY - rect.top, rect.height))
+  return { x, y }
+}
+
+function handleMeasurementClick(local) {
+  if (!measurementStart.value) {
+    measurementStart.value = local
+    measurementEnd.value = local
+  } else {
+    measurementStart.value = null
+    measurementEnd.value = null
+  }
+}
+
+function onCompositeMouseMove(e) {
+  if (!measurementOverlayVisible.value) return
+  const local = getCompositeLocal(e)
+  crosshair.x = local.x
+  crosshair.y = local.y
+  crosshair.visible = true
+  if (measurementStart.value) measurementEnd.value = local
+}
+
+function onCompositeMouseLeave() {
+  if (!measurementOverlayVisible.value) return
+  crosshair.visible = false
 }
 
 const runAfterLayout = (cb) => {
@@ -952,7 +1123,15 @@ const syncLayerPanelToViewport = () => {
   const width = previewContainer.value?.clientWidth ?? 0
   console.log('[GerberViewer] syncLayerPanelToViewport', { width, panelOpen: isLayerPanelOpen.value })
   if (!width) return
-  isLayerPanelOpen.value = width >= 700
+  const next = width >= 700
+  if (isLayerPanelOpen.value !== next) {
+    isLayerPanelOpen.value = next
+    schedulePreviewRefresh('auto panel toggle')
+    runAfterLayout(() => {
+      resizePixiToHost()
+      fitToContainer(true)
+    })
+  }
 }
 
 const handleResize = () => {
@@ -968,12 +1147,14 @@ watch(viewMode, async (mode) => {
     await updateComposite()
   }
   schedulePreviewRefresh('viewMode change')
+  if (mode !== 'layers' && measurementMode.value) exitMeasurementMode()
 })
 
 watch(currentStatusIndex, (idx) => {
   if (idx === 0) {
     layerPanelPreference.value = null
     isLayerPanelOpen.value = true
+    if (measurementMode.value) exitMeasurementMode()
   }
   nextTick(() => {
     if (idx !== 0) syncLayerPanelToViewport()
@@ -983,6 +1164,10 @@ watch(currentStatusIndex, (idx) => {
 
 watch(isLayerPanelOpen, () => {
   schedulePreviewRefresh('panel toggle')
+  runAfterLayout(() => {
+    resizePixiToHost()
+    fitToContainer(true)
+  })
 })
 
 onMounted(() => {

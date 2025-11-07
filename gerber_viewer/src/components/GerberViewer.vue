@@ -1,9 +1,13 @@
 <template>
-  <div class="h-screen w-screen flex">
+  <div class="h-screen w-screen flex relative">
     <!-- Left panel: controls -->
-    <div :class="currentStatusIndex===0 ? 'flex-1 p-0 overflow-hidden flex items-center justify-center bg-gradient-to-br from-gray-800 via-gray-900 to-black' : 'w-80 shrink-0 border-r border-gray-700 p-4 overflow-y-auto bg-gradient-to-b from-gray-900 to-gray-800 text-gray-100'">
+    <div
+      class="relative bg-gradient-to-b from-gray-900 to-gray-800 text-gray-100 border-r border-gray-700 transition-all duration-300 ease-in-out"
+      :class="currentStatusIndex===0 ? 'flex-1 flex items-center justify-center' : 'shrink-0'"
+      :style="currentStatusIndex === 0 ? undefined : { width: isLayerPanelOpen ? '20rem' : '0px' }"
+    >
       <!-- Upload panel -->
-      <div v-if="currentStatusIndex === 0" class="h-full flex items-center justify-center">
+      <div v-if="currentStatusIndex === 0" class="h-full flex items-center justify-center p-4">
         <div
           @dblclick="receiveFileOnDbClick"
           @drop.prevent="receiveFileOnDrop"
@@ -18,40 +22,21 @@
         </div>
       </div>
 
-      <!-- Controls panel -->
-      <div v-else class="space-y-6">
-        <div>
-          <h3 class="text-sm font-semibold mb-2">Gerber预览</h3>
-          <div class="flex gap-2">
-            <button class="px-2 py-1 rounded border border-gray-600" :class="{ 'bg-cyan-600 text-white': viewTab==='layers' }" @click="viewTab='layers'">layers</button>
-            <button class="px-2 py-1 rounded border border-gray-600" :class="{ 'bg-cyan-600 text-white': viewTab==='top' }" @click="viewTab='top'">top</button>
-            <button class="px-2 py-1 rounded border border-gray-600" :class="{ 'bg-cyan-600 text-white': viewTab==='bottom' }" @click="viewTab='bottom'">bottom</button>
+      <!-- Layer manager -->
+      <div v-else class="h-full flex flex-col" v-show="isLayerPanelOpen">
+        <div class="p-4 flex flex-col flex-1 overflow-y-auto space-y-4">
+          <div class="flex items-center gap-2">
+            <h3 class="text-sm font-semibold flex-1">图层列表</h3>
+            <button class="px-2 py-1 border rounded" @click="openSettings()">设置</button>
           </div>
-        </div>
-
-        <div v-if="viewTab==='top' || viewTab==='bottom'">
-          <h3 class="text-sm font-semibold mb-2">{{ viewTab }} 颜色</h3>
-          <div class="grid grid-cols-2 gap-2 text-xs">
-            <label class="flex items-center gap-2">copper <input type="color" v-model="boardColors[viewTab].copper" @input="updateBoardPreview(viewTab)"/></label>
-            <label class="flex items-center gap-2">soldermask <input type="color" v-model="boardColors[viewTab].soldermask" @input="updateBoardPreview(viewTab)"/></label>
-            <label class="flex items-center gap-2">silkscreen <input type="color" v-model="boardColors[viewTab].silkscreen" @input="updateBoardPreview(viewTab)"/></label>
-            <label class="flex items-center gap-2">solderpaste <input type="color" v-model="boardColors[viewTab].solderpaste" @input="updateBoardPreview(viewTab)"/></label>
-          </div>
-        </div>
-
-        <div v-if="viewTab==='layers'">
-          <h3 class="text-sm font-semibold mb-2">图层列表</h3>
-          <div class="mb-2 flex items-center gap-2">
-            <button class="px-2 py-1 border rounded" @click="setAllVisible(true)">全部显示</button>
-            <button class="px-2 py-1 border rounded" @click="setAllVisible(false)">全部隐藏</button>
-            <button class="ml-auto px-2 py-1 border rounded" @click="openSettings()">设置</button>
-          </div>
-          <div class="mb-2 text-xs text-gray-300 flex items-center gap-2">
-            <label class="flex items-center gap-1 select-none cursor-pointer">
+          <div class="flex items-center gap-2 text-xs text-gray-300 flex-wrap">
+            <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(true)">全部显示</button>
+            <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(false)">全部隐藏</button>
+            <label class="flex items-center gap-1 select-none cursor-pointer ml-auto">
               <input type="checkbox" v-model="showFilenames" /> 显示文件名
             </label>
           </div>
-          <div>
+          <div class="space-y-2">
             <div v-for="layer in orderedLayers" :key="layer.id" class="py-2 border-b border-gray-700 flex items-center gap-2">
               <button class="w-8 h-8 shrink-0 flex items-center justify-center rounded border border-gray-600 hover:bg-gray-700" :title="layer.visible ? '隐藏' : '显示'" @click="layer.visible=!layer.visible; updateComposite()">
                 <span :class="layer.visible ? 'pi pi-eye' : 'pi pi-eye-slash'" />
@@ -67,22 +52,99 @@
       </div>
 
       <input ref="fileInput" type="file" hidden @change="receiveFileOnInput" />
+
+      <div
+        v-if="currentStatusIndex !== 0"
+        class="absolute inset-y-0 right-0 z-40 flex items-center pr-0 pointer-events-none"
+      >
+        <div class="pointer-events-auto" v-if="isLayerPanelOpen">
+          <button
+            class="flex h-11 w-11 translate-x-full items-center justify-center rounded-r-full border-2 border-[#0092b8] border-l-0 bg-white text-[#0092b8] shadow-lg transition hover:bg-[#0092b8] hover:text-white focus:outline-none"
+            @click="toggleLayerPanel"
+          >
+            <span class="pi pi-angle-left"></span>
+          </button>
+        </div>
+      </div>
     </div>
 
+    <button
+      v-if="currentStatusIndex !== 0 && !isLayerPanelOpen"
+      class="absolute left-0 top-1/2 z-30 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-r-full border-2 border-l-0 border-[#0092b8] bg-white text-[#0092b8] shadow-lg transition hover:bg-[#0092b8] hover:text-white focus:outline-none"
+      @click="toggleLayerPanel"
+    >
+      <span class="pi pi-angle-right"></span>
+    </button>
+
     <!-- Right panel: canvas -->
-    <div class="flex-1 relative overflow-hidden bg-gradient-to-br from-gray-800 via-gray-900 to-black" v-show="currentStatusIndex !== 0">
+    <div
+      ref="previewContainer"
+      class="flex-1 relative overflow-hidden bg-gradient-to-br from-gray-800 via-gray-900 to-black"
+      v-show="currentStatusIndex !== 0"
+    >
+      <div class="absolute top-4 right-4 z-20">
+        <div class="inline-flex overflow-hidden rounded-full border-2 border-[#0092b8] bg-white shadow">
+          <button
+            v-for="mode in viewModeOptions"
+            :key="mode.value"
+            class="px-5 py-2 text-sm font-semibold uppercase tracking-wide transition-colors focus:outline-none"
+            :class="viewMode===mode.value ? 'bg-[#0092b8] text-white' : 'bg-white text-[#0092b8]'"
+            @click="viewMode = mode.value"
+          >
+            {{ mode.label }}
+          </button>
+        </div>
+      </div>
+
+      <div
+        v-if="viewMode==='2d' || viewMode==='3d'"
+        class="absolute top-4 left-4 z-20 bg-gray-900/70 backdrop-blur rounded-lg border border-gray-700 p-3 text-xs text-gray-100 space-y-2"
+      >
+        <div class="font-semibold uppercase tracking-wide">{{ viewMode }} 颜色</div>
+        <div class="grid grid-cols-2 gap-2">
+          <label class="flex items-center gap-2">copper
+            <input
+              type="color"
+              v-model="boardColors[viewMode === '3d' ? 'bottom' : 'top'].copper"
+              @input="updateBoardPreview(viewMode === '3d' ? 'bottom' : 'top')"
+            />
+          </label>
+          <label class="flex items-center gap-2">soldermask
+            <input
+              type="color"
+              v-model="boardColors[viewMode === '3d' ? 'bottom' : 'top'].soldermask"
+              @input="updateBoardPreview(viewMode === '3d' ? 'bottom' : 'top')"
+            />
+          </label>
+          <label class="flex items-center gap-2">silkscreen
+            <input
+              type="color"
+              v-model="boardColors[viewMode === '3d' ? 'bottom' : 'top'].silkscreen"
+              @input="updateBoardPreview(viewMode === '3d' ? 'bottom' : 'top')"
+            />
+          </label>
+          <label class="flex items-center gap-2">solderpaste
+            <input
+              type="color"
+              v-model="boardColors[viewMode === '3d' ? 'bottom' : 'top'].solderpaste"
+              @input="updateBoardPreview(viewMode === '3d' ? 'bottom' : 'top')"
+            />
+          </label>
+        </div>
+      </div>
+
       <div class="h-full w-full">
-        <div v-show="viewTab==='top'" ref="topContainer" class="h-full w-full overflow-hidden bg-transparent select-none" @wheel.prevent="onWheel" @mousedown="onPointerDown">
+        <div v-show="viewMode==='2d'" ref="topContainer" class="h-full w-full overflow-hidden bg-transparent select-none" @wheel.prevent="onWheel" @mousedown="onPointerDown">
           <div :style="transformStyle" class="origin-top-left">
             <div v-html="topSvg"></div>
           </div>
         </div>
-        <div v-show="viewTab==='bottom'" ref="bottomContainer" class="h-full w-full overflow-hidden bg-transparent select-none" @wheel.prevent="onWheel" @mousedown="onPointerDown">
+        <div v-show="viewMode==='3d'" ref="bottomContainer" class="h-full w-full overflow-hidden bg-transparent select-none" @wheel.prevent="onWheel" @mousedown="onPointerDown">
           <div :style="transformStyle" class="origin-top-left">
             <div v-html="bottomSvg"></div>
           </div>
         </div>
-        <div v-show="viewTab==='layers'" class="h-full w-full">
+        <div v-show="viewMode==='layers'" class="h-full w-full">
           <div
             ref="compositeContainer"
             class="h-full w-full bg-transparent select-none relative overflow-hidden"
@@ -135,6 +197,7 @@
   </div>
 </template>
 
+
 <script setup>
 import { ref, reactive, computed, nextTick, watch, toRaw, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
@@ -178,9 +241,17 @@ let baseBottomEl = null
 const compositeContainer = ref(null)
 const topContainer = ref(null)
 const bottomContainer = ref(null)
+const previewContainer = ref(null)
 const viewScale = ref(1)
 const viewTranslate = reactive({ x: 0, y: 0 })
-const viewTab = ref('layers')
+const viewMode = ref('layers')
+const viewModeOptions = [
+  { label: 'Layers', value: 'layers' },
+  { label: '2D', value: '2d' },
+  { label: '3D', value: '3d' },
+]
+const isLayerPanelOpen = ref(true)
+const layerPanelPreference = ref(null)
 
 const PIXELS_PER_MM = 96 / 25.4
 const MIN_PATH_STROKE_PX = 1.2
@@ -283,8 +354,14 @@ const handleUploadFile = async (file) => {
   }
   orderedLayers.sort((a, b) => a.weight - b.weight)
   currentStatusIndex.value = 1
-  viewTab.value = 'layers'
+  viewMode.value = 'layers'
   await nextTick()
+  syncLayerPanelToViewport()
+  console.log('[GerberViewer] handleUploadFile complete', {
+    previewWidth: previewContainer.value?.clientWidth ?? 0,
+    panelOpen: isLayerPanelOpen.value,
+  })
+  schedulePreviewRefresh('upload complete')
   await updateComposite({ recenter: true })
 }
 
@@ -708,7 +785,7 @@ async function updateComposite({ recenter = false } = {}) {
   if (!app || token !== compositeUpdateToken) return
   if (!pixiRoot) return
   resizePixiToHost()
-  console.groupCollapsed('[GerberViewer] updateComposite', { recenter, token, viewTab: viewTab.value })
+  console.groupCollapsed('[GerberViewer] updateComposite', { recenter, token, viewMode: viewMode.value })
   const removed = pixiRoot.removeChildren()
   for (const child of removed) {
     if (typeof child?.destroy === 'function') {
@@ -763,8 +840,8 @@ async function updateComposite({ recenter = false } = {}) {
 }
 
 function getActiveContainer() {
-  if (viewTab.value === 'top') return topContainer.value
-  if (viewTab.value === 'bottom') return bottomContainer.value
+  if (viewMode.value === '2d') return topContainer.value
+  if (viewMode.value === '3d') return bottomContainer.value
   return compositeContainer.value
 }
 
@@ -773,10 +850,10 @@ function fitToContainer(center = false) {
   if (!el) return
   const rect = el.getBoundingClientRect()
   if (rect.width > 0 && rect.height > 0) {
-    const mmW = (viewTab.value === 'layers' && fmRef.value?.compositeWidthMm)
+    const mmW = (viewMode.value === 'layers' && fmRef.value?.compositeWidthMm)
       ? parseFloat(String(fmRef.value.compositeWidthMm).replace('mm', ''))
       : boardWidthMm
-    const mmH = (viewTab.value === 'layers' && fmRef.value?.compositeHeightMm)
+    const mmH = (viewMode.value === 'layers' && fmRef.value?.compositeHeightMm)
       ? parseFloat(String(fmRef.value.compositeHeightMm).replace('mm', ''))
       : boardHeightMm
     const contentW = mmW * PIXELS_PER_MM
@@ -843,23 +920,77 @@ function setAllVisible(v) {
   updateComposite()
 }
 
+const runAfterLayout = (cb) => {
+  if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+    setTimeout(cb, 16)
+    return
+  }
+  window.requestAnimationFrame(() => window.requestAnimationFrame(cb))
+}
+
+const schedulePreviewRefresh = (reason = 'unknown') => {
+  runAfterLayout(() => {
+    const width = previewContainer.value?.clientWidth ?? 0
+    console.log('[GerberViewer] schedulePreviewRefresh', { reason, width, panelOpen: isLayerPanelOpen.value })
+    resizePixiToHost()
+    fitToContainer(true)
+  })
+}
+
+function toggleLayerPanel() {
+  const next = !isLayerPanelOpen.value
+  isLayerPanelOpen.value = next
+  layerPanelPreference.value = next
+}
+
+const syncLayerPanelToViewport = () => {
+  if (currentStatusIndex.value === 0) {
+    isLayerPanelOpen.value = true
+    return
+  }
+  if (layerPanelPreference.value !== null) return
+  const width = previewContainer.value?.clientWidth ?? 0
+  console.log('[GerberViewer] syncLayerPanelToViewport', { width, panelOpen: isLayerPanelOpen.value })
+  if (!width) return
+  isLayerPanelOpen.value = width >= 700
+}
+
 const handleResize = () => {
   resizePixiToHost()
   fitToContainer(true)
+  syncLayerPanelToViewport()
 }
 if (typeof window !== 'undefined') window.addEventListener('resize', handleResize)
-watch(viewTab, async (tab) => {
+watch(viewMode, async (mode) => {
   await nextTick()
-  if (tab === 'layers') {
+  if (mode === 'layers') {
     await ensurePixiApp()
     await updateComposite()
   }
-  resizePixiToHost()
-  fitToContainer(true)
+  schedulePreviewRefresh('viewMode change')
+})
+
+watch(currentStatusIndex, (idx) => {
+  if (idx === 0) {
+    layerPanelPreference.value = null
+    isLayerPanelOpen.value = true
+  }
+  nextTick(() => {
+    if (idx !== 0) syncLayerPanelToViewport()
+    schedulePreviewRefresh('status change')
+  })
+})
+
+watch(isLayerPanelOpen, () => {
+  schedulePreviewRefresh('panel toggle')
 })
 
 onMounted(() => {
-  if (viewTab.value === 'layers') {
+  nextTick(() => {
+    syncLayerPanelToViewport()
+    schedulePreviewRefresh('mounted')
+  })
+  if (viewMode.value === 'layers') {
     ensurePixiApp().then(() => updateComposite())
   }
 })

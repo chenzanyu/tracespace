@@ -140,13 +140,7 @@ import { ref, reactive, computed, nextTick, watch, toRaw, onMounted, onBeforeUnm
 import axios from 'axios'
 import { fromMemoryLayers, stringifySvg } from '@tracespace/core'
 import { CLEAR } from '@tracespace/parser'
-import {
-  Application,
-  Container,
-  Graphics,
-  RenderTexture,
-  Sprite,
-} from 'pixi.js'
+import {Application, Container, Graphics} from 'pixi.js'
 import {
   IMAGE_SHAPE,
   IMAGE_PATH,
@@ -189,18 +183,13 @@ const viewTranslate = reactive({ x: 0, y: 0 })
 const viewTab = ref('layers')
 
 const PIXELS_PER_MM = 96 / 25.4
-const LAYER_RT_OVERSAMPLE = 4
-const LAYER_RT_EDGE_PAD = 6
-const MAX_RT_DIMENSION = 8192
-const SCALE_REPAINT_FACTOR = 1.2
+const MIN_PATH_STROKE_PX = 1.2
 const pixiApp = ref(null)
 let pixiRoot = null
 let pixiCanvas = null
 let pixiInitPromise = null
 let compositeUpdateToken = 0
 let pixiInitLogged = false
-let lastCompositeScale = 1
-let scheduledScaleUpdate = null
 
 let boardViewBox = [0, 0, 0, 0]
 let boardWidthMm = 0
@@ -222,7 +211,7 @@ const handleUploadFile = async (file) => {
   formData.append('UploadFile', file, file.name)
 
   const res = await axios.post(
-    'http://localhost:5256/api/PCBParse/Parse?Mode=0',
+    'http://10.168.8.251:5004/api/PCBParse/Parse?Mode=0',
     formData,
     { headers: { 'Content-Type': 'multipart/form-data', accept: '*/*' } },
   )
@@ -383,19 +372,6 @@ function parseHexColor(input) {
     return Number.isNaN(value) ? 0xffffff : value
   }
   return 0xffffff
-}
-
-function scheduleCompositeUpdate(extra = {}) {
-  if (viewTab.value !== 'layers') return
-  const currentScale = viewScale.value || 1
-  if (scheduledScaleUpdate) return
-  if (Math.abs(currentScale - lastCompositeScale) <= Number.EPSILON) return
-  if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return
-
-  scheduledScaleUpdate = requestAnimationFrame(() => {
-    scheduledScaleUpdate = null
-    updateComposite(extra)
-  })
 }
 
 function getCompositeViewBox() {
@@ -576,7 +552,7 @@ function drawRegion(graphics, node, ctx) {
 function drawPath(graphics, node, ctx) {
   drawSegments(graphics, node.segments, ctx, { closePath: false })
   const widthPxRaw = (node.width ?? 0) * ctx.unitsToPx
-  const strokeWidth = Math.max(widthPxRaw, 0.75)
+  const strokeWidth = Math.max(widthPxRaw, MIN_PATH_STROKE_PX)
   applyStroke(graphics, strokeWidth)
 }
 
@@ -593,24 +569,15 @@ function drawPolygon(graphics, points, ctx) {
   graphics.closePath()
 }
 
-function renderShape(solid, eraser, shape, ctx, forceErase = false) {
+function drawShapeGeometry(graphics, shape, ctx) {
   if (!shape) return
-  if (shape.type === LAYERED_SHAPE) {
-    for (const sub of shape.shapes || []) {
-      const subErase = forceErase || sub?.erase === true
-      renderShape(solid, eraser, sub, ctx, subErase)
-    }
-    return
-  }
-
-  const target = forceErase || shape?.erase === true ? eraser : solid
 
   switch (shape.type) {
     case CIRCLE: {
       const center = mapSvgPoint(shape.cx, -shape.cy, ctx)
       const radius = Math.max(shape.r * ctx.unitsToPx, 0)
-      target.circle(center.x, center.y, radius)
-      applyFill(target)
+      graphics.circle(center.x, center.y, radius)
+      applyFill(graphics)
       break
     }
     case RECTANGLE: {
@@ -618,19 +585,19 @@ function renderShape(solid, eraser, shape, ctx, forceErase = false) {
       const width = shape.xSize * ctx.unitsToPx
       const height = shape.ySize * ctx.unitsToPx
       const radius = Math.max((shape.r ?? 0) * ctx.unitsToPx, 0)
-      target.roundRect(topLeft.x, topLeft.y, width, height, radius)
-      applyFill(target)
+      graphics.roundRect(topLeft.x, topLeft.y, width, height, radius)
+      applyFill(graphics)
       break
     }
     case POLYGON: {
-      drawPolygon(target, shape.points, ctx)
-      applyFill(target)
+      drawPolygon(graphics, shape.points, ctx)
+      applyFill(graphics)
       break
     }
     case OUTLINE: {
-      drawSegments(target, shape.segments, ctx, { closePath: true })
-      const outlineWidth = Math.max(ctx.unitsToPx * 0.05, 0.8)
-      applyStroke(target, outlineWidth)
+      drawSegments(graphics, shape.segments, ctx, {closePath: true})
+      const outlineWidth = Math.max(ctx.unitsToPx * 0.05, MIN_PATH_STROKE_PX)
+      applyStroke(graphics, outlineWidth)
       break
     }
     default:
@@ -638,134 +605,102 @@ function renderShape(solid, eraser, shape, ctx, forceErase = false) {
   }
 }
 
-function renderGraphic(solid, eraser, graphic, ctx) {
+function renderShapeRecursive(shape, ctx, chunk, mode) {
+  if (!shape) return
+  const nextMode = mode === 'mask' || shape.erase === true ? 'mask' : 'solid'
+
+  if (shape.type === LAYERED_SHAPE) {
+    for (const sub of shape.shapes || []) renderShapeRecursive(sub, ctx, chunk, nextMode)
+    return
+  }
+
+  const target = nextMode === 'mask' ? chunk.mask : chunk.solid
+  if (!target) return
+  drawShapeGeometry(target, shape, ctx)
+}
+
+function drawGraphicRecursive(graphic, ctx, chunk, mode) {
   if (!graphic) return
-  const polarity = graphic.polarity ?? 'dark'
-  const polarityIsClear = polarity === CLEAR || polarity === 'clear'
-  const isEraseGraphic = graphic.erase === true
-  const isClear = polarityIsClear || isEraseGraphic
-  const target = isClear ? eraser : solid
+  const nextMode = mode === 'mask' || graphic.erase === true ? 'mask' : 'solid'
+  const target = nextMode === 'mask' ? chunk.mask : chunk.solid
+
   switch (graphic.type) {
     case IMAGE_SHAPE:
-      renderShape(solid, eraser, graphic.shape, ctx, isClear)
+      renderShapeRecursive(graphic.shape, ctx, chunk, nextMode)
       break
-    case IMAGE_PATH:
-      drawPath(target, graphic, ctx)
+    case IMAGE_PATH: {
+      if (!target) break
+      drawSegments(target, graphic.segments, ctx, {closePath: false})
+      const widthPxRaw = (graphic.width ?? 0) * ctx.unitsToPx
+      const strokeWidth = Math.max(widthPxRaw, MIN_PATH_STROKE_PX)
+      applyStroke(target, strokeWidth)
       break
+    }
     case IMAGE_REGION:
-      drawRegion(target, graphic, ctx)
+      if (!target) break
+      drawSegments(target, graphic.segments, ctx, {closePath: true})
+      applyFill(target)
       break
     default:
       break
   }
 }
 
-function createLayerDisplay(tree, ctx, colorValue, opacity = 1, renderer, scaleHint = 1) {
+function createLayerDisplay(tree, ctx, colorValue, opacity = 1) {
   console.debug('[GerberViewer] createLayerDisplay', {
     id: tree?.id,
     childCount: tree?.children?.length ?? 0,
     colorValue: colorValue?.toString(16),
     opacity,
   })
-  if (!renderer) {
-    console.warn('[GerberViewer] createLayerDisplay: renderer unavailable')
-    return null
-  }
   const layerContainer = new Container()
   layerContainer.eventMode = 'none'
 
-  const chunks = []
-  const unitsToPx = ctx?.unitsToPx ?? 1
-  const [, , viewWidth = 0, viewHeight = 0] = ctx?.viewBox ?? []
-  const widthPx = Math.max(1, Math.ceil(Math.abs(viewWidth * unitsToPx)))
-  const heightPx = Math.max(1, Math.ceil(Math.abs(viewHeight * unitsToPx)))
-  const edgePadding = LAYER_RT_EDGE_PAD
-  const paddedWidthPx = widthPx + edgePadding * 2
-  const paddedHeightPx = heightPx + edgePadding * 2
-
   const createChunk = () => {
+    const container = new Container({isRenderGroup: true})
+    container.eventMode = 'none'
+
     const solid = new Graphics()
     solid.eventMode = 'none'
     solid.tint = colorValue
-    solid.alpha = 1
+    solid.alpha = opacity
+    container.addChild(solid)
 
-    const eraser = new Graphics()
-    eraser.eventMode = 'none'
-    eraser.blendMode = 'erase'
-    eraser.tint = 0xffffff
+  const mask = new Graphics()
+  mask.eventMode = 'none'
+  container.addChild(mask)
+  container.setMask({mask, inverse: true})
 
-    const chunk = new Container()
-    chunk.eventMode = 'none'
-    chunk.addChild(solid)
-    chunk.addChild(eraser)
-    chunk.position.set(edgePadding, edgePadding)
+    layerContainer.addChild(container)
 
-    const state = {
-      container: chunk,
-      solid,
-      eraser,
-      hasClear: false,
-    }
+    console.debug('[GerberViewer] new chunk created', {color: colorValue, opacity})
 
-    chunks.push(state)
-    return state
+    return {container, solid, mask, hasClear: false}
   }
 
   let chunk = null
 
   for (const graphic of tree.children || []) {
-    const polarity = graphic.polarity ?? 'dark'
-    const polarityIsClear = polarity === CLEAR || polarity === 'clear'
-    const isClear = polarityIsClear || graphic.erase === true
+    const isClear = graphic.polarity === CLEAR
+    const needsChunk = chunk === null || (!isClear && chunk.hasClear)
 
-    if (!chunk) chunk = createChunk()
+    if (needsChunk) chunk = createChunk()
 
-    if (!isClear && chunk.hasClear) {
-      // Clear特性已经作用在当前chunk上，新出现的dark图形需要开启新的chunk
-      chunk = createChunk()
-    }
-
-    renderGraphic(chunk.solid, chunk.eraser, graphic, ctx)
-
-    if (isClear) chunk.hasClear = true
-  }
-
-  const maxDimension = Math.max(paddedWidthPx, paddedHeightPx)
-  const rendererResolution = renderer.resolution ?? 1
-  const targetResolution = Math.max(rendererResolution, scaleHint) * LAYER_RT_OVERSAMPLE
-  const maxAllowedResolution = Math.max(1, Math.floor(MAX_RT_DIMENSION / Math.max(1, maxDimension)))
-  const renderResolution = Math.max(1, Math.min(targetResolution, maxAllowedResolution))
-
-  for (const state of chunks) {
-    const renderTexture = RenderTexture.create({
-      width: paddedWidthPx,
-      height: paddedHeightPx,
-      resolution: renderResolution,
-      antialias: false,
+    console.debug('[GerberViewer] drawGraphicRecursive', {
+      id: tree?.id,
+      isClear,
+      erase: graphic.erase,
+      type: graphic.type,
     })
-    renderTexture.baseTexture.scaleMode = 'nearest'
 
-    renderer.render(state.container, {renderTexture, clear: true})
-    state.container.destroy({children: true})
-
-    const sprite = new Sprite(renderTexture)
-    sprite.eventMode = 'none'
-    sprite.alpha = opacity
-    sprite.x = -edgePadding
-    sprite.y = -edgePadding
-    layerContainer.addChild(sprite)
+    drawGraphicRecursive(graphic, ctx, chunk, isClear ? 'mask' : 'solid')
+    if (isClear) chunk.hasClear = true
   }
 
   return layerContainer
 }
 
 async function updateComposite({ recenter = false } = {}) {
-  if (scheduledScaleUpdate !== null) {
-    if (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
-      cancelAnimationFrame(scheduledScaleUpdate)
-    }
-    scheduledScaleUpdate = null
-  }
   compositeUpdateToken += 1
   const token = compositeUpdateToken
   const fm = fmRef.value
@@ -778,7 +713,7 @@ async function updateComposite({ recenter = false } = {}) {
   for (const child of removed) {
     if (typeof child?.destroy === 'function') {
       try {
-        child.destroy({children: true, texture: true, baseTexture: true})
+        child.destroy({children: true})
       } catch (error) {
         console.warn('[GerberViewer] failed to destroy previous display object', error)
       }
@@ -799,10 +734,6 @@ async function updateComposite({ recenter = false } = {}) {
   const plotTrees = fm.plotResult?.plotTreesById ?? {}
   const sorted = [...orderedLayers].sort((a, b) => b.weight - a.weight)
   let zIndex = 0
-  const renderer = app.renderer
-  const currentScale = viewScale.value || 1
-  const scaleHint = currentScale * SCALE_REPAINT_FACTOR
-  lastCompositeScale = currentScale
   for (const layer of sorted) {
     if (!layer.visible) continue
     const tree = layer.plotTree ?? plotTrees[layer.id]
@@ -813,7 +744,7 @@ async function updateComposite({ recenter = false } = {}) {
     layer.plotTree = tree
     const colorValue = parseHexColor(layer.color)
     const layerOpacity = typeof layer.opacity === 'number' ? layer.opacity : 1
-    const display = createLayerDisplay(tree, ctx, colorValue, layerOpacity, renderer, scaleHint)
+    const display = createLayerDisplay(tree, ctx, colorValue, layerOpacity)
     if (!display) continue
     display.zIndex = zIndex++
     pixiRoot.addChild(display)
@@ -869,7 +800,6 @@ function fitToContainer(center = false) {
     }
   }
   applyViewTransform()
-  scheduleCompositeUpdate({recenter: center})
 }
 
 let drag = { active: false, startX: 0, startY: 0, ox: 0, oy: 0 }
@@ -880,7 +810,6 @@ function onPointerDown(e) {
     viewTranslate.x = drag.ox + (ev.clientX - drag.startX)
     viewTranslate.y = drag.oy + (ev.clientY - drag.startY)
     applyViewTransform()
-    scheduleCompositeUpdate()
   }
   const up = () => { drag.active = false; window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
   window.addEventListener('mousemove', move)
@@ -900,7 +829,6 @@ function onWheel(e) {
   viewTranslate.y = my - wy * next
   viewScale.value = next
   applyViewTransform()
-  scheduleCompositeUpdate()
 }
 
 function setAllVisible(v) {

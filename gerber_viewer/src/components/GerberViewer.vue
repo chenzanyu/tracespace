@@ -732,9 +732,16 @@ async function updateComposite({ recenter = false } = {}) {
   console.log('orderedLayers', orderedLayers.length)
   const ctx = { viewBox, unitsToPx }
   const plotTrees = fm.plotResult?.plotTreesById ?? {}
-  const sorted = [...orderedLayers].sort((a, b) => b.weight - a.weight)
+  const stackingOrder = orderedLayers
+    .map((layer, index) => ({ layer, index }))
+    .sort((a, b) => {
+      const weightA = Number.isFinite(a.layer?.weight) ? a.layer.weight : 100
+      const weightB = Number.isFinite(b.layer?.weight) ? b.layer.weight : 100
+      if (weightB !== weightA) return weightB - weightA
+      return b.index - a.index
+    })
   let zIndex = 0
-  for (const layer of sorted) {
+  for (const { layer } of stackingOrder) {
     if (!layer.visible) continue
     const tree = layer.plotTree ?? plotTrees[layer.id]
     if (!tree) {

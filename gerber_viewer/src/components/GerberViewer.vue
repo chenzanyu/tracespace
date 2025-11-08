@@ -2,7 +2,7 @@
   <div class="h-screen w-screen flex relative">
     <!-- Left panel: controls -->
     <div
-      class="relative bg-gradient-to-b from-gray-900 to-gray-800 text-gray-100 border-r border-gray-700 transition-all duration-300 ease-in-out"
+      class="relative bg-linear-to-b from-gray-900 to-gray-800 text-gray-100 border-r border-gray-700 transition-all duration-300 ease-in-out"
       :class="currentStatusIndex===0 ? 'flex-1 flex items-center justify-center' : 'shrink-0'"
       :style="panelStyle"
     >
@@ -59,7 +59,7 @@
       >
         <div class="pointer-events-auto" v-if="isLayerPanelOpen">
           <button
-            class="flex h-11 w-11 translate-x-full items-center justify-center rounded-r-full border-2 border-[#0092b8] border-l-0 bg-white text-[#0092b8] shadow-lg transition hover:bg-[#0092b8] hover:text-white focus:outline-none"
+            class="flex h-11 w-8 translate-x-full items-center justify-center rounded-r-full border-2 border-[#0092b8] border-l-0 bg-white text-[#0092b8] shadow-lg transition hover:bg-[#0092b8] hover:text-white focus:outline-none"
             @click="toggleLayerPanel"
           >
             <span class="pi pi-angle-left"></span>
@@ -70,7 +70,7 @@
 
     <button
       v-if="currentStatusIndex !== 0 && !isLayerPanelOpen"
-      class="absolute left-0 top-1/2 z-30 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-r-full border-2 border-l-0 border-[#0092b8] bg-white text-[#0092b8] shadow-lg transition hover:bg-[#0092b8] hover:text-white focus:outline-none"
+      class="absolute left-0 top-1/2 z-30 flex h-11 w-8 -translate-y-1/2 items-center justify-center rounded-r-full border-2 border-l-0 border-[#0092b8] bg-white text-[#0092b8] shadow-lg transition hover:bg-[#0092b8] hover:text-white focus:outline-none"
       @click="toggleLayerPanel"
     >
       <span class="pi pi-angle-right"></span>
@@ -136,19 +136,19 @@
       <div class="absolute top-4 left-4 z-30 space-y-2" v-if="viewMode==='layers'">
         <div class="flex gap-2">
           <button
-            class="px-3 py-2 bg-gray-900/80 text-white uppercase text-[11px] tracking-wide border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800"
+            class="px-2 py-1 bg-gray-900/80 text-white uppercase text-[11px] tracking-wide border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800"
             title="重置视图"
             @click="resetCompositeSize"
           >
-            <img :src="resetIcon" alt="reset" class="w-4 h-4" />
+            <img :src="resetIcon" alt="reset" class="w-6 h-6" />
           </button>
           <button
-            class="px-3 py-2 uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition-colors"
+            class="px-2 py-1 uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition-colors"
             :class="measurementMode ? 'bg-[#0092b8] text-white border-[#3fd3ff] drop-shadow-[0_0_12px_rgba(0,146,184,0.8)]' : 'bg-gray-900/80 text-white border-white/30 hover:bg-gray-800'"
             title="尺寸测量"
             @click="toggleMeasurementMode"
           >
-            <img :src="measureIcon" alt="measurement" class="w-4 h-4" />
+            <img :src="measureIcon" alt="measurement" class="w-6 h-6" />
           </button>
         </div>
       </div>

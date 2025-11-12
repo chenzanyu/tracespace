@@ -99,52 +99,11 @@
           </div>
         </div>
 
-        <!-- 颜色控制，仅 3D -->
-        <div
-          v-if="activeView==='3d'"
-          class="absolute top-24 left-4 z-30 bg-gray-900/70 backdrop-blur rounded-lg border border-gray-700 p-3 text-xs text-gray-100 space-y-3"
-        >
-          <div>
-            <div class="font-semibold uppercase tracking-wide mb-1">顶层颜色</div>
-            <div class="grid grid-cols-2 gap-2">
-              <label class="flex items-center gap-2">copper
-                <input type="color" v-model="boardColors.top.copper" @input="updateBoardPreview('top')" />
-              </label>
-              <label class="flex items-center gap-2">soldermask
-                <input type="color" v-model="boardColors.top.soldermask" @input="updateBoardPreview('top')" />
-              </label>
-              <label class="flex items-center gap-2">silkscreen
-                <input type="color" v-model="boardColors.top.silkscreen" @input="updateBoardPreview('top')" />
-              </label>
-              <label class="flex items-center gap-2">solderpaste
-                <input type="color" v-model="boardColors.top.solderpaste" @input="updateBoardPreview('top')" />
-              </label>
-            </div>
-          </div>
-          <div>
-            <div class="font-semibold uppercase tracking-wide mb-1">底层颜色</div>
-            <div class="grid grid-cols-2 gap-2">
-              <label class="flex items-center gap-2">copper
-                <input type="color" v-model="boardColors.bottom.copper" @input="updateBoardPreview('bottom')" />
-              </label>
-              <label class="flex items-center gap-2">soldermask
-                <input type="color" v-model="boardColors.bottom.soldermask" @input="updateBoardPreview('bottom')" />
-              </label>
-              <label class="flex items-center gap-2">silkscreen
-                <input type="color" v-model="boardColors.bottom.silkscreen" @input="updateBoardPreview('bottom')" />
-              </label>
-              <label class="flex items-center gap-2">solderpaste
-                <input type="color" v-model="boardColors.bottom.solderpaste" @input="updateBoardPreview('bottom')" />
-              </label>
-            </div>
-          </div>
-        </div>
-
         <!-- 层叠视图 -->
         <LayerStackPreview
           v-show="activeView==='layers'"
           :ordered-layers="orderedLayers"
-          :fm-result="fmRef.value"
+          :fm-result="fmRef"
           :board-view-box="boardViewBox"
           :board-width-mm="boardWidthMm"
           :board-height-mm="boardHeightMm"
@@ -214,7 +173,7 @@
  * - 调用 LayerStackPreview（Pixi）与 Pcb3dPreview（Three）渲染
  * - 负责旧版 tracespace 结果到新版组件的数据转换
  */
-import { ref, reactive, nextTick, toRaw } from 'vue'
+import { ref, reactive, nextTick, watch } from 'vue'
 import axios from 'axios'
 import { fromMemoryLayers } from '@tracespace/core'
 import { fromMemoryLayers as legacyFromMemoryLayers, stringifySvg as legacyStringifySvg } from '../libs/tracespace_svg/tracespace-core'
@@ -247,9 +206,9 @@ const viewOptions = [
   { label: '3D', value: '3d' },
 ]
 
-// 板颜色
-const defaultBoard = { copper: '#cc9933', soldermask: '#004200', silkscreen: '#ffffff', solderpaste: '#999999' }
-const boardColors = reactive({ top: { ...defaultBoard }, bottom: { ...defaultBoard } })
+watch(fmRef, (val) => {
+  console.log('[GerberViewer] fmRef updated', { hasFm: Boolean(val) })
+})
 
 // 设置面板
 const isSettingsOpen = ref(false)
@@ -328,60 +287,6 @@ const updateBoardDimensionsFromBase = () => {
   boardHeightMm.value = parseDim(heightAttr, fallbackHeight)
 }
 
-const deepClone = (input, seen = new WeakMap()) => {
-  const el = (typeof input === 'object' && input !== null && input.__v_isReactive) ? toRaw(input) : input
-  if (el === null || typeof el !== 'object') return el
-  if (seen.has(el)) return seen.get(el)
-  try { if (typeof window !== 'undefined' && typeof window.structuredClone === 'function') { return window.structuredClone(el) } } catch {}
-  if (Array.isArray(el)) { const out = new Array(el.length); seen.set(el, out); for (let i = 0; i < el.length; i++) out[i] = deepClone(el[i], seen); return out }
-  const out = {}; seen.set(el, out); for (const [k, v] of Object.entries(el)) { if (k === 'parent' || k === '__v_isReactive' || k === '__v_skip') continue; out[k] = deepClone(v, seen) } return out
-}
-
-const applyBoardColorsLocal = (root, colors) => {
-  const all = []
-  const stack = [root]
-  while (stack.length) {
-    const node = stack.pop()
-    all.push(node)
-    for (const child of node.children || []) if (child && child.type === 'element') stack.push(child)
-  }
-  for (const g of all.filter((n) => n.tagName === 'g' && typeof n.properties?.mask === 'string' && n.properties.mask.startsWith('url(#drill-'))) {
-    if (colors.copper) {
-      const children = Array.isArray(g.children) ? g.children : []
-      for (const child of children) if (child.tagName === 'g') { child.properties = child.properties || {}; child.properties.color = colors.copper }
-    }
-  }
-  for (const g of all.filter((n) => n.tagName === 'g' && typeof n.properties?.mask === 'string' && n.properties.mask.startsWith('url(#resist-'))) {
-    const children = Array.isArray(g.children) ? g.children : []
-    for (const child of children) {
-      if (child.tagName === 'rect' && colors.soldermask) { child.properties = child.properties || {}; child.properties.fill = colors.soldermask }
-      if (child.tagName === 'g' && colors.silkscreen) { child.properties = child.properties || {}; child.properties.color = colors.silkscreen }
-    }
-  }
-  if (colors.solderpaste) {
-    for (const node of all) if (node.tagName === 'g' && typeof node.properties?.color === 'string' && node.properties.color === '#999') node.properties.color = colors.solderpaste
-  }
-}
-
-const updateBoardPreview = (side) => {
-  if (side === 'top' && baseTopEl) {
-    const clone = deepClone(baseTopEl)
-    applyBoardColorsLocal(clone, boardColors.top)
-    clone.properties = clone.properties || {}
-    clone.properties.preserveAspectRatio = 'xMidYMid meet'
-    if (clone.properties.style) delete clone.properties.style
-    topSvg.value = legacyStringifySvg(clone)
-  }
-  if (side === 'bottom' && baseBottomEl) {
-    const clone = deepClone(baseBottomEl)
-    applyBoardColorsLocal(clone, boardColors.bottom)
-    clone.properties = clone.properties || {}
-    clone.properties.preserveAspectRatio = 'xMidYMid meet'
-    if (clone.properties.style) delete clone.properties.style
-    bottomSvg.value = legacyStringifySvg(clone)
-  }
-}
-
 const refreshLegacyBoardRenders = async (layers) => {
   const token = ++legacyBoardUpdateToken
   if (!Array.isArray(layers) || layers.length === 0) {
@@ -403,8 +308,8 @@ const refreshLegacyBoardRenders = async (layers) => {
       boardViewBox.value = renderLayersResult.boardShapeRender.viewBox
     }
     updateBoardDimensionsFromBase()
-    updateBoardPreview('top')
-    updateBoardPreview('bottom')
+    if (baseTopEl) topSvg.value = legacyStringifySvg(baseTopEl)
+    if (baseBottomEl) bottomSvg.value = legacyStringifySvg(baseBottomEl)
   } catch (error) {
     if (token !== legacyBoardUpdateToken) return
     console.error('[GerberViewer] legacy board render failed', error)

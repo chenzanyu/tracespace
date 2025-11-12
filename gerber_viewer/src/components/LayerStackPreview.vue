@@ -38,7 +38,7 @@
  * Gerber 层叠视图：负责 Pixi.js 渲染与测量交互。
  * 父组件仅负责传入图层数据与控制测量开关，避免重复的 WebGL 初始化逻辑。
  */
-import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount, unref } from 'vue'
 import { Application, Container } from 'pixi.js'
 import { createLayerDisplay, parseHexColor } from '../libs/gerber_stack'
 
@@ -112,7 +112,13 @@ let pixiCanvas = null
 let pixiInitPromise = null
 let compositeUpdateToken = 0
 
-const getFm = () => props.fmResult || null
+const fmData = computed(() => unref(props.fmResult))
+
+watch(fmData, (val) => {
+  console.log('[LayerStackPreview] fmResult updated', { hasFm: Boolean(val) })
+}, { immediate: true })
+
+const getFm = () => fmData.value
 
 const getCompositeViewBox = () => getFm()?.compositeViewBox ?? props.boardViewBox
 const getUnitsToPx = () => {
@@ -201,6 +207,12 @@ const destroyPixi = () => {
 }
 
 const updateComposite = async ({ recenter = false } = {}) => {
+  console.log('[LayerStackPreview] updateComposite triggered', {
+    active: props.active,
+    recenter,
+    layers: props.orderedLayers.length,
+    hasFm: Boolean(getFm()),
+  })
   if (!props.active) return
   compositeUpdateToken += 1
   const token = compositeUpdateToken
@@ -220,12 +232,14 @@ const updateComposite = async ({ recenter = false } = {}) => {
     }
   }
   if (!fm) {
+    console.warn('[LayerStackPreview] skip render: fmResult missing')
     if (recenter) fitToContainer(true)
     else applyViewTransform()
     return
   }
   const viewBox = getCompositeViewBox()
   const unitsToPx = getUnitsToPx()
+  console.log('[LayerStackPreview] render context', { viewBox, unitsToPx })
   const ctx = { viewBox, unitsToPx }
   const plotTrees = fm.plotResult?.plotTreesById ?? {}
   const stackingOrder = props.orderedLayers
@@ -377,10 +391,14 @@ watch(() => props.measurementActive, (active) => {
 })
 
 watch(() => props.orderedLayers, () => {
+  console.log('[LayerStackPreview] orderedLayers changed')
+  if (!props.active) return
   updateComposite()
 }, { deep: true })
 
-watch(() => props.fmResult, () => {
+watch(fmData, () => {
+  console.log('[LayerStackPreview] fmResult changed', { hasFm: Boolean(fmData.value) })
+  if (!props.active) return
   updateComposite({ recenter: true })
 })
 
@@ -401,6 +419,10 @@ watch(() => props.active, async (active) => {
 })
 
 onMounted(() => {
+  console.log('[LayerStackPreview] mounted', {
+    hasFm: Boolean(getFm()),
+    layers: props.orderedLayers.length,
+  })
   nextTick(() => {
     resizePixiToHost()
     fitToContainer(true)

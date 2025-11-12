@@ -6,7 +6,7 @@
 import { onMounted, onBeforeUnmount, ref, watch, nextTick, defineExpose } from 'vue';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { CanvasGeometry } from '../three/CanvasGeometry.js';
+import { CanvasGeometry } from '../libs/3d/CanvasGeometry';
 import { SRGBColorSpace } from 'three';
 
 const props = defineProps({

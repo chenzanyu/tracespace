@@ -27,7 +27,7 @@
         <div class="p-4 flex flex-col flex-1 overflow-y-auto space-y-4">
           <div class="flex items-center gap-2">
             <h3 class="text-sm font-semibold flex-1">图层列表</h3>
-            <button class="px-2 py-1 border rounded" @click="openSettings()">设置</button>
+            <button class="text-sm text-gray-100 hover:text-white px-3 py-1.5 rounded-md border border-white/20 bg-white/5" @click="collapseLayerPanel">折叠</button>
           </div>
           <div class="flex items-center gap-2 text-xs text-gray-300 flex-wrap">
             <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(true)">全部显示</button>
@@ -52,29 +52,7 @@
       </div>
 
       <input ref="fileInput" type="file" hidden @change="receiveFileOnInput" />
-
-      <div
-        v-if="currentStatusIndex !== 0"
-        class="absolute inset-y-0 right-0 z-40 flex items-center pr-0 pointer-events-none"
-      >
-        <div class="pointer-events-auto" v-if="isLayerPanelOpen">
-          <button
-            class="flex h-11 w-8 translate-x-full items-center justify-center rounded-r-full border-2 border-[#0092b8] border-l-0 bg-white text-[#0092b8] shadow-lg transition hover:bg-[#0092b8] hover:text-white focus:outline-none"
-            @click="toggleLayerPanel"
-          >
-            <span class="pi pi-angle-left"></span>
-          </button>
-        </div>
-      </div>
     </div>
-
-    <button
-      v-if="currentStatusIndex !== 0 && !isLayerPanelOpen"
-      class="absolute left-0 top-1/2 z-30 flex h-11 w-8 -translate-y-1/2 items-center justify-center rounded-r-full border-2 border-l-0 border-[#0092b8] bg-white text-[#0092b8] shadow-lg transition hover:bg-[#0092b8] hover:text-white focus:outline-none"
-      @click="toggleLayerPanel"
-    >
-      <span class="pi pi-angle-right"></span>
-    </button>
 
     <!-- Right panel: canvas -->
     <div
@@ -98,7 +76,7 @@
 
       <div
         v-if="viewMode==='2d' || viewMode==='3d'"
-        class="absolute top-4 left-4 z-20 bg-gray-900/70 backdrop-blur rounded-lg border border-gray-700 p-3 text-xs text-gray-100 space-y-2"
+        :class="['absolute left-4 z-20 bg-gray-900/70 backdrop-blur rounded-lg border border-gray-700 p-3 text-xs text-gray-100 space-y-2', currentStatusIndex !== 0 ? 'top-20' : 'top-4']"
       >
         <div class="font-semibold uppercase tracking-wide">{{ viewMode }} 颜色</div>
         <div class="grid grid-cols-2 gap-2">
@@ -133,17 +111,38 @@
         </div>
       </div>
 
-      <div class="absolute top-4 left-4 z-30 space-y-2" v-if="viewMode==='layers'">
-        <div class="flex gap-2">
+      <div
+        v-if="currentStatusIndex !== 0"
+        class="absolute top-4 left-4 z-40 flex flex-col gap-2"
+      >
+        <div class="flex items-center gap-2">
           <button
-            class="px-2 py-1 bg-gray-900/80 text-white uppercase text-[11px] tracking-wide border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800"
+            v-if="!isLayerPanelOpen"
+            class="px-3 py-2.5 rounded-md bg-gray-900/80 text-white text-sm border border-white/30 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition flex items-center gap-2"
+            @click="openLayerPanel"
+          >
+            图层列表
+          </button>
+
+          <button
+            class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+            title="设置"
+            @click="openSettings()"
+          >
+            <span class="pi pi-cog" style="font-size: 16px;margin: 2px;"></span>
+          </button>
+
+          <button
+            v-if="viewMode === 'layers'"
+            class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white uppercase text-[11px] tracking-wide border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
             title="重置视图"
             @click="resetCompositeSize"
           >
             <img :src="resetIcon" alt="reset" class="w-6 h-6" />
           </button>
           <button
-            class="px-2 py-1 uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition-colors"
+            v-if="viewMode === 'layers'"
+            class="px-2.5 py-2 rounded-md uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition"
             :class="measurementMode ? 'bg-[#0092b8] text-white border-[#3fd3ff] drop-shadow-[0_0_12px_rgba(0,146,184,0.8)]' : 'bg-gray-900/80 text-white border-white/30 hover:bg-gray-800'"
             title="尺寸测量"
             @click="toggleMeasurementMode"
@@ -298,8 +297,7 @@ const viewModeOptions = [
   { label: '2D', value: '2d' },
   { label: '3D', value: '3d' },
 ]
-const isLayerPanelOpen = ref(true)
-const layerPanelPreference = ref(null)
+const isLayerPanelOpen = ref(false)
 const measurementMode = ref(false)
 const measurementStart = ref(null)
 const measurementEnd = ref(null)
@@ -459,7 +457,6 @@ const handleUploadFile = async (file) => {
   currentStatusIndex.value = 1
   viewMode.value = 'layers'
   await nextTick()
-  syncLayerPanelToViewport()
   schedulePreviewRefresh('upload complete')
   await updateComposite({ recenter: true })
 }
@@ -742,6 +739,15 @@ function setAllVisible(v) {
   updateComposite()
 }
 
+function openLayerPanel() {
+  if (currentStatusIndex.value === 0) return
+  isLayerPanelOpen.value = true
+}
+
+function collapseLayerPanel() {
+  isLayerPanelOpen.value = false
+}
+
 function resetCompositeSize() {
   fitToContainer(true)
 }
@@ -812,35 +818,9 @@ const schedulePreviewRefresh = (reason = 'unknown') => {
   })
 }
 
-function toggleLayerPanel() {
-  const next = !isLayerPanelOpen.value
-  isLayerPanelOpen.value = next
-  layerPanelPreference.value = next
-}
-
-const syncLayerPanelToViewport = () => {
-  if (currentStatusIndex.value === 0) {
-    isLayerPanelOpen.value = true
-    return
-  }
-  if (layerPanelPreference.value !== null) return
-  const width = previewContainer.value?.clientWidth ?? 0
-  if (!width) return
-  const next = width >= 700
-  if (isLayerPanelOpen.value !== next) {
-    isLayerPanelOpen.value = next
-    schedulePreviewRefresh('auto panel toggle')
-    runAfterLayout(() => {
-      resizePixiToHost()
-      fitToContainer(true)
-    })
-  }
-}
-
 const handleResize = () => {
   resizePixiToHost()
   fitToContainer(true)
-  syncLayerPanelToViewport()
 }
 if (typeof window !== 'undefined') window.addEventListener('resize', handleResize)
 watch(viewMode, async (mode) => {
@@ -855,12 +835,10 @@ watch(viewMode, async (mode) => {
 
 watch(currentStatusIndex, (idx) => {
   if (idx === 0) {
-    layerPanelPreference.value = null
-    isLayerPanelOpen.value = true
+    isLayerPanelOpen.value = false
     if (measurementMode.value) exitMeasurementMode()
   }
   nextTick(() => {
-    if (idx !== 0) syncLayerPanelToViewport()
     schedulePreviewRefresh('status change')
   })
 })
@@ -875,7 +853,6 @@ watch(isLayerPanelOpen, () => {
 
 onMounted(() => {
   nextTick(() => {
-    syncLayerPanelToViewport()
     schedulePreviewRefresh('mounted')
   })
   if (viewMode.value === 'layers') {

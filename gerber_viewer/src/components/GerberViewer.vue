@@ -256,9 +256,10 @@
 <script setup>
 import { ref, reactive, computed, nextTick, watch, toRaw, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
-import { fromMemoryLayers, stringifySvg } from '@tracespace/core'
+import { fromMemoryLayers } from '@tracespace/core'
 import { CLEAR } from '@tracespace/parser'
 import {Application, Container, Graphics} from 'pixi.js'
+import { fromMemoryLayers as legacyFromMemoryLayers, stringifySvg as legacyStringifySvg } from '../libs/tracespace-core.js'
 const resetIcon = new URL('../assets/resetting.svg', import.meta.url).href
 const measureIcon = new URL('../assets/measurement.svg', import.meta.url).href
 import {
@@ -326,6 +327,49 @@ let pixiInitLogged = false
 let boardViewBox = [0, 0, 0, 0]
 let boardWidthMm = 0
 let boardHeightMm = 0
+let legacyBoardUpdateToken = 0
+
+function updateBoardDimensionsFromBase() {
+  const fallbackWidth = Array.isArray(boardViewBox) ? boardViewBox[2] || 0 : 0
+  const fallbackHeight = Array.isArray(boardViewBox) ? boardViewBox[3] || 0 : 0
+  const parseDim = (attr, fallback) => {
+    const numeric = parseFloat(String(attr ?? '').replace('mm', ''))
+    return Number.isFinite(numeric) ? numeric : fallback
+  }
+  const widthAttr = baseTopEl?.properties?.width ?? baseBottomEl?.properties?.width
+  const heightAttr = baseTopEl?.properties?.height ?? baseBottomEl?.properties?.height
+  boardWidthMm = parseDim(widthAttr, fallbackWidth)
+  boardHeightMm = parseDim(heightAttr, fallbackHeight)
+}
+
+async function refreshLegacyBoardRenders(layers) {
+  const token = ++legacyBoardUpdateToken
+  if (!Array.isArray(layers) || layers.length === 0) {
+    baseTopEl = null
+    baseBottomEl = null
+    topSvg.value = ''
+    bottomSvg.value = ''
+    boardWidthMm = 0
+    boardHeightMm = 0
+    return
+  }
+  try {
+    const legacyResult = await legacyFromMemoryLayers(layers)
+    if (token !== legacyBoardUpdateToken) return
+    const { renderBoardResult, renderLayersResult } = legacyResult || {}
+    baseTopEl = renderBoardResult?.top ?? null
+    baseBottomEl = renderBoardResult?.bottom ?? null
+    if (renderLayersResult?.boardShapeRender?.viewBox) {
+      boardViewBox = renderLayersResult.boardShapeRender.viewBox
+    }
+    updateBoardDimensionsFromBase()
+    updateBoardPreview('top')
+    updateBoardPreview('bottom')
+  } catch (error) {
+    if (token !== legacyBoardUpdateToken) return
+    console.error('[GerberViewer] legacy board render failed', error)
+  }
+}
 
 // Ordered layers for stacking view
 const orderedLayers = reactive([])
@@ -399,13 +443,12 @@ const handleUploadFile = async (file) => {
 
   const result = res.data.Data
   memoryLayers.value = result.Items || []
+  const legacyBoardPromise = refreshLegacyBoardRenders(memoryLayers.value)
   const fm = await fromMemoryLayers(memoryLayers.value)
-  const { renderLayersResult, renderBoardResult, plotResult } = fm
+  const { renderLayersResult, plotResult } = fm
 
   fmRef.value = fm
 
-  baseTopEl = renderBoardResult.top
-  baseBottomEl = renderBoardResult.bottom
   boardViewBox = renderLayersResult.boardShapeRender.viewBox
   console.groupCollapsed('[GerberViewer] fromMemoryLayers')
   try {
@@ -418,14 +461,7 @@ const handleUploadFile = async (file) => {
   } finally {
     console.groupEnd()
   }
-
-  const wAttr = (baseTopEl?.properties?.width ?? '').toString()
-  const hAttr = (baseTopEl?.properties?.height ?? '').toString()
-  boardWidthMm = parseFloat(wAttr.replace('mm', '')) || boardViewBox[2]
-  boardHeightMm = parseFloat(hAttr.replace('mm', '')) || boardViewBox[3]
-
-  updateBoardPreview('top')
-  updateBoardPreview('bottom')
+  await legacyBoardPromise
 
   const orderWeight = (side, type) => {
     const s = side || ''
@@ -529,7 +565,7 @@ function updateBoardPreview(side) {
     clone.properties = clone.properties || {}
     clone.properties.preserveAspectRatio = 'xMidYMid meet'
     if (clone.properties.style) delete clone.properties.style
-    topSvg.value = stringifySvg(clone)
+    topSvg.value = legacyStringifySvg(clone)
   }
   if (side === 'bottom' && baseBottomEl) {
     const clone = deepClone(baseBottomEl)
@@ -537,7 +573,7 @@ function updateBoardPreview(side) {
     clone.properties = clone.properties || {}
     clone.properties.preserveAspectRatio = 'xMidYMid meet'
     if (clone.properties.style) delete clone.properties.style
-    bottomSvg.value = stringifySvg(clone)
+    bottomSvg.value = legacyStringifySvg(clone)
   }
 }
 
@@ -1235,7 +1271,7 @@ function coerceSideForType(type, side) {
   return opts[0]
 }
 
-function applySettings() {
+async function applySettings() {
   const list = (memoryLayers.value || []).map((x) => ({ ...x }))
   for (const e of editableLayers) e.side = coerceSideForType(e.type, e.side)
   const keyFor = (t, s) => {
@@ -1259,16 +1295,12 @@ function applySettings() {
     const target = list.find((it) => it.filename === e.filename)
     if (target) { target.type = e.type; target.side = e.side }
   }
-  fromMemoryLayers(list).then(async (fm) => {
+  const legacyBoardPromise = refreshLegacyBoardRenders(list)
+  try {
+    const fm = await fromMemoryLayers(list)
     fmRef.value = fm
-    const { renderLayersResult, renderBoardResult, plotResult } = fm
-    baseTopEl = renderBoardResult.top
-    baseBottomEl = renderBoardResult.bottom
+    const { renderLayersResult, plotResult } = fm
     boardViewBox = renderLayersResult.boardShapeRender.viewBox
-    const wAttr = (baseTopEl?.properties?.width ?? '').toString()
-    const hAttr = (baseTopEl?.properties?.height ?? '').toString()
-    boardWidthMm = parseFloat(wAttr.replace('mm', '')) || boardViewBox[2]
-    boardHeightMm = parseFloat(hAttr.replace('mm', '')) || boardViewBox[3]
     const keep = new Map(orderedLayers.map((l) => [l.filename, { color: l.color, visible: l.visible, opacity: l.opacity }]))
     orderedLayers.splice(0)
     const orderWeight = (side, type) => {
@@ -1306,12 +1338,13 @@ function applySettings() {
       })
     }
     orderedLayers.sort((a, b) => a.weight - b.weight)
-    updateBoardPreview('top')
-    updateBoardPreview('bottom')
+    await legacyBoardPromise
     await updateComposite()
     memoryLayers.value = list
     isSettingsOpen.value = false
-  })
+  } catch (error) {
+    console.error('[GerberViewer] applySettings failed', error)
+  }
 }
 </script>
 

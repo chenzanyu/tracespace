@@ -257,22 +257,11 @@
 import { ref, reactive, computed, nextTick, watch, toRaw, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
 import { fromMemoryLayers } from '@tracespace/core'
-import { CLEAR } from '@tracespace/parser'
-import {Application, Container, Graphics} from 'pixi.js'
-import { fromMemoryLayers as legacyFromMemoryLayers, stringifySvg as legacyStringifySvg } from '../libs/tracespace-core.js'
+import { Application, Container } from 'pixi.js'
+import { fromMemoryLayers as legacyFromMemoryLayers, stringifySvg as legacyStringifySvg } from '../libs/tracespace_svg/tracespace-core'
+import { createLayerDisplay, parseHexColor, randomHexColor, orderLayerWeight } from '../libs/gerber_stack'
 const resetIcon = new URL('../assets/resetting.svg', import.meta.url).href
 const measureIcon = new URL('../assets/measurement.svg', import.meta.url).href
-import {
-  IMAGE_SHAPE,
-  IMAGE_PATH,
-  IMAGE_REGION,
-  CIRCLE,
-  RECTANGLE,
-  POLYGON,
-  OUTLINE,
-  LAYERED_SHAPE,
-  LINE,
-} from '@tracespace/plotter'
 
 // Status and basic refs
 const currentStatusIndex = ref(0)
@@ -289,13 +278,14 @@ const memoryLayers = ref([])
 
 // Board colors
 const defaultBoard = { copper: '#cc9933', soldermask: '#004200', silkscreen: '#ffffff', solderpaste: '#999999' }
+// PCB 前后板的默认配色，可在设置面板中实时调整
 const boardColors = reactive({ top: { ...defaultBoard }, bottom: { ...defaultBoard } })
 
 // Base board SVGs for recolor
 let baseTopEl = null
 let baseBottomEl = null
 
-// View state
+// 视图状态（缩放、平移、模式、测量等）
 const compositeContainer = ref(null)
 const topContainer = ref(null)
 const bottomContainer = ref(null)
@@ -316,13 +306,11 @@ const measurementEnd = ref(null)
 const crosshair = reactive({ x: 0, y: 0, visible: false })
 
 const PIXELS_PER_MM = 96 / 25.4
-const MIN_PATH_STROKE_PX = 1.2
 const pixiApp = ref(null)
 let pixiRoot = null
 let pixiCanvas = null
 let pixiInitPromise = null
 let compositeUpdateToken = 0
-let pixiInitLogged = false
 
 let boardViewBox = [0, 0, 0, 0]
 let boardWidthMm = 0
@@ -385,6 +373,7 @@ const panelStyle = computed(() => {
   const width = isLayerPanelOpen.value ? '20rem' : '0px'
   return { width, flexBasis: width }
 })
+// 测量框与数值计算，基于当前缩放值换算为毫米
 const measurementOverlayVisible = computed(() => viewMode.value === 'layers' && measurementMode.value)
 const measurementRect = computed(() => {
   if (!measurementStart.value || !measurementEnd.value) return null
@@ -430,7 +419,7 @@ const measurementLabelStyle = computed(() => {
   }
 })
 
-// Upload handler
+// 上传并解析 PCB 文件，拉起渲染流程
 const handleUploadFile = async (file) => {
   const formData = new FormData()
   formData.append('UploadFile', file, file.name)
@@ -450,39 +439,7 @@ const handleUploadFile = async (file) => {
   fmRef.value = fm
 
   boardViewBox = renderLayersResult.boardShapeRender.viewBox
-  console.groupCollapsed('[GerberViewer] fromMemoryLayers')
-  try {
-    console.log('layer count', renderLayersResult.layers.length)
-    console.log('board viewBox', boardViewBox)
-    console.log('composite viewBox', fm.compositeViewBox)
-    console.log('composite width/height mm', fm.compositeWidthMm, fm.compositeHeightMm)
-    console.log('unit meta', fm.unitMeta)
-    console.log('plot tree keys', Object.keys(plotResult?.plotTreesById ?? {}))
-  } finally {
-    console.groupEnd()
-  }
   await legacyBoardPromise
-
-  const orderWeight = (side, type) => {
-    const s = side || ''
-    const t = type || ''
-    const map = {
-      'top:solderpaste': 1,
-      'top:silkscreen': 2,
-      'top:soldermask': 3,
-      'top:copper': 4,
-      'inner:copper': 5,
-      'bottom:copper': 6,
-      'bottom:soldermask': 7,
-      'bottom:silkscreen': 8,
-      'bottom:solderpaste': 9,
-      'all:outline': 10,
-      'all:drill': 11,
-      'null:drawing': 12,
-    }
-    const key = `${s || 'null'}:${t}`
-    return map[key] ?? 100
-  }
 
   orderedLayers.splice(0)
   for (const l of renderLayersResult.layers) {
@@ -490,7 +447,7 @@ const handleUploadFile = async (file) => {
       id: l.id,
       side: l.side,
       type: l.type,
-      weight: orderWeight(l.side, l.type),
+      weight: orderLayerWeight(l.side, l.type),
       color: randomHexColor(),
       visible: true,
       filename: l.filename,
@@ -503,10 +460,6 @@ const handleUploadFile = async (file) => {
   viewMode.value = 'layers'
   await nextTick()
   syncLayerPanelToViewport()
-  console.log('[GerberViewer] handleUploadFile complete', {
-    previewWidth: previewContainer.value?.clientWidth ?? 0,
-    panelOpen: isLayerPanelOpen.value,
-  })
   schedulePreviewRefresh('upload complete')
   await updateComposite({ recenter: true })
 }
@@ -532,6 +485,7 @@ function deepClone(input, seen = new WeakMap()) {
   const out = {}; seen.set(el, out); for (const [k,v] of Object.entries(el)) { if (k==='parent' || k==='__v_isReactive' || k==='__v_skip') continue; out[k]=deepClone(v, seen) } ; return out
 }
 
+// 复用旧版 tracespace 渲染结果，对 SVG 逐节点染色
 function applyBoardColorsLocal(root, colors) {
   const all = []
   const stack = [root]
@@ -577,26 +531,6 @@ function updateBoardPreview(side) {
   }
 }
 
-function randomHexColor() {
-  const n = () => Math.floor(Math.random() * 256)
-  const toHex = (v) => v.toString(16).padStart(2, '0')
-  return `#${toHex(n())}${toHex(n())}${toHex(n())}`
-}
-
-function parseHexColor(input) {
-  if (typeof input !== 'string') return 0xffffff
-  const hex = input.trim().replace(/^#/, '')
-  if (hex.length === 3) {
-    const [r, g, b] = hex
-    return Number.parseInt(`${r}${r}${g}${g}${b}${b}`, 16)
-  }
-  if (hex.length === 6) {
-    const value = Number.parseInt(hex, 16)
-    return Number.isNaN(value) ? 0xffffff : value
-  }
-  return 0xffffff
-}
-
 function getCompositeViewBox() {
   return fmRef.value?.compositeViewBox ?? boardViewBox
 }
@@ -620,7 +554,6 @@ function resizePixiToHost() {
   const width = Math.max(host.clientWidth, 1)
   const height = Math.max(host.clientHeight, 1)
   if (app.renderer.width !== width || app.renderer.height !== height) {
-    console.log('[GerberViewer] resizePixiToHost', { width, height })
     app.renderer.resize(width, height)
   }
 }
@@ -645,10 +578,6 @@ async function ensurePixiApp() {
         autoDensity: true,
         resizeTo: host,
       })
-      if (!pixiInitLogged) {
-        console.log('[GerberViewer] Pixi initialized', { width, height, resolution })
-        pixiInitLogged = true
-      }
       const canvasEl = app.canvas ?? app.view
       canvasEl.style.position = 'absolute'
       canvasEl.style.left = '0'
@@ -679,250 +608,7 @@ async function ensurePixiApp() {
   return pixiInitPromise
 }
 
-function toXY(position) {
-  return [position[0], position[1]]
-}
-
-function positionsClose(a, b, eps = 1e-6) {
-  return Math.abs(a[0] - b[0]) <= eps && Math.abs(a[1] - b[1]) <= eps
-}
-
-function mapSvgPoint(x, y, ctx) {
-  const [vx, vy] = ctx.viewBox
-  return {
-    x: (x - vx) * ctx.unitsToPx,
-    y: (y - vy) * ctx.unitsToPx,
-  }
-}
-
-function mapRawPoint(x, y, ctx) {
-  return mapSvgPoint(x, -y, ctx)
-}
-
-function approximateArcPoints(segment, ctx) {
-  const startAngle = segment.start[2]
-  const endAngle = segment.end[2]
-  let sweep = endAngle - startAngle
-  if (!Number.isFinite(sweep)) return []
-  const startXY = toXY(segment.start)
-  const endXY = toXY(segment.end)
-  if (Math.abs(sweep) < 1e-7 && positionsClose(startXY, endXY)) {
-    sweep = sweep >= 0 ? Math.PI * 2 : -Math.PI * 2
-  }
-  const absSweep = Math.abs(sweep)
-  if (absSweep === 0) return []
-  const steps = Math.max(6, Math.ceil(absSweep / (Math.PI / 16)))
-  const [cx, cy] = segment.center
-  const radius = segment.radius
-  const points = []
-  for (let i = 1; i < steps; i++) {
-    const angle = startAngle + (sweep * i) / steps
-    const px = cx + radius * Math.cos(angle)
-    const py = cy + radius * Math.sin(angle)
-    points.push(mapRawPoint(px, py, ctx))
-  }
-  return points
-}
-
-function drawSegments(graphics, segments, ctx, { closePath }) {
-  if (!Array.isArray(segments) || segments.length === 0) return
-  graphics.beginPath()
-  let currentEnd = null
-  let subpathStart = null
-  for (const segment of segments) {
-    const startRaw = toXY(segment.start)
-    if (!currentEnd || !positionsClose(currentEnd.raw, startRaw)) {
-      if (closePath && currentEnd && subpathStart && !positionsClose(currentEnd.raw, subpathStart.raw)) {
-        graphics.lineTo(subpathStart.point.x, subpathStart.point.y)
-      }
-      const startPoint = mapRawPoint(startRaw[0], startRaw[1], ctx)
-      graphics.moveTo(startPoint.x, startPoint.y)
-      subpathStart = { raw: startRaw, point: startPoint }
-    }
-    if (segment.type === LINE) {
-      const endRaw = toXY(segment.end)
-      const endPoint = mapRawPoint(endRaw[0], endRaw[1], ctx)
-      graphics.lineTo(endPoint.x, endPoint.y)
-      currentEnd = { raw: endRaw, point: endPoint }
-    } else {
-      const arcPoints = approximateArcPoints(segment, ctx)
-      for (const p of arcPoints) graphics.lineTo(p.x, p.y)
-      const endRaw = toXY(segment.end)
-      const endPoint = mapRawPoint(endRaw[0], endRaw[1], ctx)
-      graphics.lineTo(endPoint.x, endPoint.y)
-      currentEnd = { raw: endRaw, point: endPoint }
-    }
-  }
-  if (closePath && subpathStart && currentEnd && !positionsClose(currentEnd.raw, subpathStart.raw)) {
-    graphics.lineTo(subpathStart.point.x, subpathStart.point.y)
-  }
-  if (closePath) graphics.closePath()
-}
-
-function applyFill(graphics) {
-  graphics.fill({ color: 0xffffff })
-}
-
-function applyStroke(graphics, width) {
-  graphics.stroke({ width, color: 0xffffff, alignment: 0.5 })
-}
-
-function drawRegion(graphics, node, ctx) {
-  drawSegments(graphics, node.segments, ctx, { closePath: true })
-  applyFill(graphics)
-}
-
-function drawPath(graphics, node, ctx) {
-  drawSegments(graphics, node.segments, ctx, { closePath: false })
-  const widthPxRaw = (node.width ?? 0) * ctx.unitsToPx
-  const strokeWidth = Math.max(widthPxRaw, MIN_PATH_STROKE_PX)
-  applyStroke(graphics, strokeWidth)
-}
-
-function drawPolygon(graphics, points, ctx) {
-  if (!Array.isArray(points) || points.length === 0) return
-  graphics.beginPath()
-  const first = mapRawPoint(points[0][0], points[0][1], ctx)
-  graphics.moveTo(first.x, first.y)
-  for (let i = 1; i < points.length; i++) {
-    const pt = mapRawPoint(points[i][0], points[i][1], ctx)
-    graphics.lineTo(pt.x, pt.y)
-  }
-  graphics.lineTo(first.x, first.y)
-  graphics.closePath()
-}
-
-function drawShapeGeometry(graphics, shape, ctx) {
-  if (!shape) return
-
-  switch (shape.type) {
-    case CIRCLE: {
-      const center = mapSvgPoint(shape.cx, -shape.cy, ctx)
-      const radius = Math.max(shape.r * ctx.unitsToPx, 0)
-      graphics.circle(center.x, center.y, radius)
-      applyFill(graphics)
-      break
-    }
-    case RECTANGLE: {
-      const topLeft = mapSvgPoint(shape.x, -shape.y - shape.ySize, ctx)
-      const width = shape.xSize * ctx.unitsToPx
-      const height = shape.ySize * ctx.unitsToPx
-      const radius = Math.max((shape.r ?? 0) * ctx.unitsToPx, 0)
-      graphics.roundRect(topLeft.x, topLeft.y, width, height, radius)
-      applyFill(graphics)
-      break
-    }
-    case POLYGON: {
-      drawPolygon(graphics, shape.points, ctx)
-      applyFill(graphics)
-      break
-    }
-    case OUTLINE: {
-      drawSegments(graphics, shape.segments, ctx, {closePath: true})
-      const outlineWidth = Math.max(ctx.unitsToPx * 0.05, MIN_PATH_STROKE_PX)
-      applyStroke(graphics, outlineWidth)
-      break
-    }
-    default:
-      break
-  }
-}
-
-function renderShapeRecursive(shape, ctx, chunk, mode) {
-  if (!shape) return
-  const nextMode = mode === 'mask' || shape.erase === true ? 'mask' : 'solid'
-
-  if (shape.type === LAYERED_SHAPE) {
-    for (const sub of shape.shapes || []) renderShapeRecursive(sub, ctx, chunk, nextMode)
-    return
-  }
-
-  const target = nextMode === 'mask' ? chunk.mask : chunk.solid
-  if (!target) return
-  drawShapeGeometry(target, shape, ctx)
-}
-
-function drawGraphicRecursive(graphic, ctx, chunk, mode) {
-  if (!graphic) return
-  const nextMode = mode === 'mask' || graphic.erase === true ? 'mask' : 'solid'
-  const target = nextMode === 'mask' ? chunk.mask : chunk.solid
-
-  switch (graphic.type) {
-    case IMAGE_SHAPE:
-      renderShapeRecursive(graphic.shape, ctx, chunk, nextMode)
-      break
-    case IMAGE_PATH: {
-      if (!target) break
-      drawSegments(target, graphic.segments, ctx, {closePath: false})
-      const widthPxRaw = (graphic.width ?? 0) * ctx.unitsToPx
-      const strokeWidth = Math.max(widthPxRaw, MIN_PATH_STROKE_PX)
-      applyStroke(target, strokeWidth)
-      break
-    }
-    case IMAGE_REGION:
-      if (!target) break
-      drawSegments(target, graphic.segments, ctx, {closePath: true})
-      applyFill(target)
-      break
-    default:
-      break
-  }
-}
-
-function createLayerDisplay(tree, ctx, colorValue, opacity = 1) {
-  console.debug('[GerberViewer] createLayerDisplay', {
-    id: tree?.id,
-    childCount: tree?.children?.length ?? 0,
-    colorValue: colorValue?.toString(16),
-    opacity,
-  })
-  const layerContainer = new Container()
-  layerContainer.eventMode = 'none'
-
-  const createChunk = () => {
-    const container = new Container({isRenderGroup: true})
-    container.eventMode = 'none'
-
-    const solid = new Graphics()
-    solid.eventMode = 'none'
-    solid.tint = colorValue
-    solid.alpha = opacity
-    container.addChild(solid)
-
-  const mask = new Graphics()
-  mask.eventMode = 'none'
-  container.addChild(mask)
-  container.setMask({mask, inverse: true})
-
-    layerContainer.addChild(container)
-
-    console.debug('[GerberViewer] new chunk created', {color: colorValue, opacity})
-
-    return {container, solid, mask, hasClear: false}
-  }
-
-  let chunk = null
-
-  for (const graphic of tree.children || []) {
-    const isClear = graphic.polarity === CLEAR
-    const needsChunk = chunk === null || (!isClear && chunk.hasClear)
-
-    if (needsChunk) chunk = createChunk()
-
-    console.debug('[GerberViewer] drawGraphicRecursive', {
-      id: tree?.id,
-      isClear,
-      erase: graphic.erase,
-      type: graphic.type,
-    })
-
-    drawGraphicRecursive(graphic, ctx, chunk, isClear ? 'mask' : 'solid')
-    if (isClear) chunk.hasClear = true
-  }
-
-  return layerContainer
-}
-
+// 根据当前可见的图层状态刷新 Pixi 渲染树
 async function updateComposite({ recenter = false } = {}) {
   compositeUpdateToken += 1
   const token = compositeUpdateToken
@@ -931,7 +617,6 @@ async function updateComposite({ recenter = false } = {}) {
   if (!app || token !== compositeUpdateToken) return
   if (!pixiRoot) return
   resizePixiToHost()
-  console.groupCollapsed('[GerberViewer] updateComposite', { recenter, token, viewMode: viewMode.value })
   const removed = pixiRoot.removeChildren()
   for (const child of removed) {
     if (typeof child?.destroy === 'function') {
@@ -946,13 +631,10 @@ async function updateComposite({ recenter = false } = {}) {
     console.warn('[GerberViewer] updateComposite: fmRef missing')
     if (recenter) fitToContainer(true)
     else applyViewTransform()
-    console.groupEnd()
     return
   }
   const viewBox = getCompositeViewBox()
   const unitsToPx = getUnitsToPx()
-  console.log('viewBox', viewBox, 'unitsToPx', unitsToPx)
-  console.log('orderedLayers', orderedLayers.length)
   const ctx = { viewBox, unitsToPx }
   const plotTrees = fm.plotResult?.plotTreesById ?? {}
   const stackingOrder = orderedLayers
@@ -979,10 +661,8 @@ async function updateComposite({ recenter = false } = {}) {
     display.zIndex = zIndex++
     pixiRoot.addChild(display)
   }
-  console.log('layer graphics added', zIndex)
   if (recenter) fitToContainer(true)
   else applyViewTransform()
-  console.groupEnd()
 }
 
 function getActiveContainer() {
@@ -1008,17 +688,6 @@ function fitToContainer(center = false) {
     const scaleX = (rect.width * (1 - margin)) / contentW
     const scaleY = (rect.height * (1 - margin)) / contentH
     viewScale.value = Math.max(0.05, Math.min(scaleX, scaleY))
-    console.log('[GerberViewer] fitToContainer', {
-      rect,
-      mmW,
-      mmH,
-      contentW,
-      contentH,
-      scaleX,
-      scaleY,
-      chosenScale: viewScale.value,
-      centerRequested: center,
-    })
     if (center) {
       const drawW = contentW * viewScale.value
       const drawH = contentH * viewScale.value
@@ -1127,6 +796,7 @@ function onCompositeMouseLeave() {
   crosshair.visible = false
 }
 
+// 统一通过 requestAnimationFrame 推迟计算，避免布局抖动
 const runAfterLayout = (cb) => {
   if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
     setTimeout(cb, 16)
@@ -1137,8 +807,6 @@ const runAfterLayout = (cb) => {
 
 const schedulePreviewRefresh = (reason = 'unknown') => {
   runAfterLayout(() => {
-    const width = previewContainer.value?.clientWidth ?? 0
-    console.log('[GerberViewer] schedulePreviewRefresh', { reason, width, panelOpen: isLayerPanelOpen.value })
     resizePixiToHost()
     fitToContainer(true)
   })
@@ -1157,7 +825,6 @@ const syncLayerPanelToViewport = () => {
   }
   if (layerPanelPreference.value !== null) return
   const width = previewContainer.value?.clientWidth ?? 0
-  console.log('[GerberViewer] syncLayerPanelToViewport', { width, panelOpen: isLayerPanelOpen.value })
   if (!width) return
   const next = width >= 700
   if (isLayerPanelOpen.value !== next) {
@@ -1303,33 +970,13 @@ async function applySettings() {
     boardViewBox = renderLayersResult.boardShapeRender.viewBox
     const keep = new Map(orderedLayers.map((l) => [l.filename, { color: l.color, visible: l.visible, opacity: l.opacity }]))
     orderedLayers.splice(0)
-    const orderWeight = (side, type) => {
-      const s = side || ''
-      const t = type || ''
-      const map = {
-        'top:solderpaste': 1,
-        'top:silkscreen': 2,
-        'top:soldermask': 3,
-        'top:copper': 4,
-        'inner:copper': 5,
-        'bottom:copper': 6,
-        'bottom:soldermask': 7,
-        'bottom:silkscreen': 8,
-        'bottom:solderpaste': 9,
-        'all:outline': 10,
-        'all:drill': 11,
-        'null:drawing': 12,
-      }
-      const key = `${s || 'null'}:${t}`
-      return map[key] ?? 100
-    }
     for (const l of renderLayersResult.layers) {
       const kv = keep.get(l.filename) || { color: randomHexColor(), visible: true, opacity: 1 }
       orderedLayers.push({
         id: l.id,
         side: l.side,
         type: l.type,
-        weight: orderWeight(l.side, l.type),
+        weight: orderLayerWeight(l.side, l.type),
         color: kv.color,
         visible: kv.visible,
         opacity: typeof kv.opacity === 'number' ? kv.opacity : 1,

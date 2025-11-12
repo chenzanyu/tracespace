@@ -1,11 +1,11 @@
-import * as Fe from "@tracespace/parser";
-import { GERBER as un, DRILL as cn, UNITS as le, COORDINATE_FORMAT as Z } from "@tracespace/parser";
-import * as ie from "@tracespace/plotter";
-import { LINE as $, IMAGE_REGION as me, IMAGE_PATH as se, BoundingBox as B } from "@tracespace/plotter";
-import * as j from "@tracespace/renderer";
-import { sizeToViewBox as pn, renderGraphic as dn } from "@tracespace/renderer";
-import { random as fe } from "@tracespace/xml-id";
-import { identifyLayers as gn, TYPE_DRILL as ze, SIDE_ALL as mn, TYPE_OUTLINE as fn, TYPE_COPPER as hn, TYPE_SOLDERMASK as yn, TYPE_SILKSCREEN as bn, TYPE_SOLDERPASTE as Sn, SIDE_TOP as he, SIDE_BOTTOM as ee } from "@tracespace/identify-layers";
+import * as Fe from "./tracespace-parser.js";
+import { GERBER as un, DRILL as cn, UNITS as le, COORDINATE_FORMAT as Z } from "./tracespace-parser.js";
+import * as ie from "./tracespace-plotter.js";
+import { LINE as $, IMAGE_REGION as me, IMAGE_PATH as se, BoundingBox as B } from "./tracespace-plotter.js";
+import * as j from "./tracespace-renderer.js";
+import { sizeToViewBox as pn, renderGraphic as dn } from "./tracespace-renderer.js";
+import { random as fe } from "./tracespace-xml-id.js";
+import { identifyLayers as gn, TYPE_DRILL as ze, SIDE_ALL as mn, TYPE_OUTLINE as fn, TYPE_COPPER as hn, TYPE_SOLDERMASK as yn, TYPE_SILKSCREEN as bn, TYPE_SOLDERPASTE as Sn, SIDE_TOP as he, SIDE_BOTTOM as ee } from "./tracespace-identify-layers.js";
 class V {
   /**
    * @constructor

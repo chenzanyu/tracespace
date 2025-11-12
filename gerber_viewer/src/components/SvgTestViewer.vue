@@ -175,18 +175,33 @@ function resetBoard() {
 }
 
 function updateBoardPreview(side) {
-  if (side === 'top' && baseTopEl) {
-    const clone = deepClone(baseTopEl)
-    applyBoardColorsLocal(clone, boardColors.top)
-    topSvg.value = legacyStringifySvg(clone)
+  if (side === 'top') {
+    if (baseTopEl) {
+      const clone = deepClone(baseTopEl)
+      applyBoardColorsLocal(clone, boardColors.top)
+      normalizeBoardSvgProps(clone)
+      topSvg.value = legacyStringifySvg(clone)
+    } else {
+      topSvg.value = ''
+    }
   }
-  if (side === 'bottom' && baseBottomEl) {
-    const clone = deepClone(baseBottomEl)
-    applyBoardColorsLocal(clone, boardColors.bottom)
-    bottomSvg.value = legacyStringifySvg(clone)
+  if (side === 'bottom') {
+    if (baseBottomEl) {
+      const clone = deepClone(baseBottomEl)
+      applyBoardColorsLocal(clone, boardColors.bottom)
+      normalizeBoardSvgProps(clone)
+      bottomSvg.value = legacyStringifySvg(clone)
+    } else {
+      bottomSvg.value = ''
+    }
   }
-  if (side === 'top' && !baseTopEl) topSvg.value = ''
-  if (side === 'bottom' && !baseBottomEl) bottomSvg.value = ''
+}
+
+function normalizeBoardSvgProps(node) {
+  if (!node || node.type !== 'element') return
+  node.properties = node.properties || {}
+  node.properties.preserveAspectRatio = 'xMidYMid meet'
+  if (node.properties.style) delete node.properties.style
 }
 
 watch(

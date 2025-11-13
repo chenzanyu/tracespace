@@ -8,16 +8,13 @@
     <!-- 预览阶段 -->
     <div v-else class="h-full flex relative">
       <!-- 图层侧栏 -->
-      <aside
-        v-show="isLayerPanelOpen"
-        class="w-80 shrink-0 border-r border-gray-800 bg-gradient-to-b from-gray-900 to-gray-800 flex flex-col"
-      >
+      <aside v-show="isLayerPanelOpen"
+        class="w-80 shrink-0 border-r border-gray-800 bg-gradient-to-b from-gray-900 to-gray-800 flex flex-col">
         <div class="p-4 flex items-center gap-2 border-b border-gray-800">
           <h3 class="text-sm font-semibold flex-1">图层列表</h3>
           <button
             class="text-sm text-gray-100 hover:text-white px-3 py-1.5 rounded-md border border-white/20 bg-white/5"
-            @click="collapseLayerPanel"
-          >
+            @click="collapseLayerPanel">
             折叠
           </button>
         </div>
@@ -30,17 +27,17 @@
             </label>
           </div>
           <div class="space-y-2">
-            <div v-for="layer in orderedLayers" :key="layer.id" class="py-2 border-b border-gray-800 flex items-center gap-2">
+            <div v-for="layer in orderedLayers" :key="layer.id"
+              class="py-2 border-b border-gray-800 flex items-center gap-2">
               <button
                 class="w-8 h-8 shrink-0 flex items-center justify-center rounded border border-gray-600 hover:bg-gray-700"
-                :title="layer.visible ? '隐藏' : '显示'"
-                @click="layer.visible=!layer.visible"
-              >
+                :title="layer.visible ? '隐藏' : '显示'" @click="layer.visible = !layer.visible">
                 <span :class="layer.visible ? 'pi pi-eye' : 'pi pi-eye-slash'" />
               </button>
               <div class="flex-1 min-w-0">
                 <div class="text-xs truncate">{{ displayLayerName(layer) }}</div>
-                <div v-if="showFilenames" class="text-[10px] text-gray-400 truncate mt-1" :title="layer.filename">{{ layer.filename }}</div>
+                <div v-if="showFilenames" class="text-[10px] text-gray-400 truncate mt-1" :title="layer.filename">{{
+                  layer.filename }}</div>
               </div>
               <input class="w-10 h-6" type="color" v-model="layer.color" />
             </div>
@@ -52,94 +49,81 @@
       <section class="flex-1 relative overflow-hidden bg-gradient-to-br from-[#0f1b2d] to-[#050b16]">
         <!-- 顶部按钮 -->
         <div class="absolute top-4 left-4 z-40 flex flex-wrap gap-2">
-          <button
-            v-if="!isLayerPanelOpen"
-            class="px-3 py-2 rounded-md bg-gray-900/80 text-white text-sm border border-white/30 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition flex items-center gap-2"
-            @click="openLayerPanel"
-          >
-            图层列表
-          </button>
-          <button
-            class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white uppercase text-[11px] tracking-wide border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
-            title="重置视图"
-            @click="resetCompositeSize"
-          >
-            <img :src="resetIcon" alt="reset" class="w-6 h-6" />
-          </button>
-          <button
-            class="px-2.5 py-2 rounded-md uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition"
-            :class="measurementActive ? 'bg-[#0092b8] text-white border-[#3fd3ff] drop-shadow-[0_0_12px_rgba(0,146,184,0.8)]' : 'bg-gray-900/80 text-white border-white/30 hover:bg-gray-800'"
-            title="尺寸测量"
-            @click="toggleMeasurementMode"
-            :disabled="activeView !== 'layers'"
-          >
-            <img :src="measureIcon" alt="measurement" class="w-6 h-6" />
-          </button>
-          <button
-            class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
-            title="设置"
-            @click="openSettings"
-          >
-            <span class="pi pi-cog text-lg"></span>
-          </button>
+          <template v-if="activeView === 'layers'">
+            <button v-if="!isLayerPanelOpen"
+              class="px-3 py-2 rounded-md bg-gray-900/80 text-white text-sm border border-white/30 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition flex items-center gap-2"
+              @click="openLayerPanel">
+              图层列表
+            </button>
+            <button
+              class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+              title="设置" @click="openSettings">
+              <span class="pi pi-cog text-lg"></span>
+            </button>
+            <button
+              class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white uppercase text-[11px] tracking-wide border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+              title="重置视图" @click="resetCompositeSize">
+              <img :src="resetIcon" alt="reset layers view" class="w-6 h-6" />
+            </button>
+            <button
+              class="px-2.5 py-2 rounded-md uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition"
+              :class="measurementActive ? 'bg-[#0092b8] text-white border-[#3fd3ff] drop-shadow-[0_0_12px_rgba(0,146,184,0.8)]' : 'bg-gray-900/80 text-white border-white/30 hover:bg-gray-800'"
+              title="尺寸测量" @click="toggleMeasurementMode" :disabled="activeView !== 'layers'">
+              <img :src="measureIcon" alt="measurement" class="w-6 h-6" />
+            </button>
+          </template>
+          <template v-else-if="activeView === '3d'">
+            <button
+              class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white uppercase text-[11px] tracking-wide border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+              title="重置 3D 视图" @click="resetPcb3dView">
+              <img :src="resetIcon" alt="reset 3d view" class="w-6 h-6" />
+            </button>
+          </template>
         </div>
 
         <!-- 视图切换 -->
         <div class="absolute top-4 right-4 z-40">
           <div class="inline-flex overflow-hidden rounded-full border-2 border-[#0092b8] bg-white shadow">
-            <button
-              v-for="mode in viewOptions"
-              :key="mode.value"
+            <button v-for="mode in viewOptions" :key="mode.value"
               class="px-5 py-2 text-sm font-semibold uppercase tracking-wide transition-colors focus:outline-none"
-              :class="activeView===mode.value ? 'bg-[#0092b8] text-white' : 'bg-white text-[#0092b8]'"
-              @click="setActiveView(mode.value)"
-            >
+              :class="activeView === mode.value ? 'bg-[#0092b8] text-white' : 'bg-white text-[#0092b8]'"
+              @click="setActiveView(mode.value)">
               {{ mode.label }}
             </button>
           </div>
         </div>
 
         <!-- 层叠视图 -->
-        <LayerStackPreview
-          v-show="activeView==='layers'"
-          :ordered-layers="orderedLayers"
-          :fm-result="fmRef"
-          :board-view-box="boardViewBox"
-          :board-width-mm="boardWidthMm"
-          :board-height-mm="boardHeightMm"
-          :measurement-active="measurementActive"
-          :recenter-signal="recenterSignal"
-          :active="activeView==='layers'"
-          @exit-measurement="measurementActive = false"
-        />
+        <LayerStackPreview v-show="activeView === 'layers'" :ordered-layers="orderedLayers" :fm-result="fmRef"
+          :board-view-box="boardViewBox" :board-width-mm="boardWidthMm" :board-height-mm="boardHeightMm"
+          :measurement-active="measurementActive" :recenter-signal="recenterSignal" :active="activeView === 'layers'"
+          @exit-measurement="measurementActive = false" />
 
         <!-- 3D 视图 -->
-        <Pcb3dPreview
-          v-show="activeView==='3d'"
-          :top-svg="topSvg"
-          :bottom-svg="bottomSvg"
-          :thickness="boardThickness"
-          :active="activeView==='3d'"
-        />
+        <Pcb3dPreview ref="pcb3dRef" v-show="activeView === '3d'" :top-svg="topSvg" :bottom-svg="bottomSvg"
+          :thickness="boardThickness" :active="activeView === '3d'" borderColor="#e8e8e8" :fitPadding="1.55" />
       </section>
     </div>
 
     <!-- 设置弹窗 -->
     <div v-if="isSettingsOpen" class="fixed inset-0 z-50 flex items-center justify-center">
-      <div class="absolute inset-0 bg-black/50" @click="isSettingsOpen=false"></div>
-      <div class="relative bg-gray-900 text-gray-100 w-[720px] max-w-[95vw] max-h-[80vh] rounded-lg border border-gray-700 shadow-lg overflow-hidden">
+      <div class="absolute inset-0 bg-black/50" @click="isSettingsOpen = false"></div>
+      <div
+        class="relative bg-gray-900 text-gray-100 w-[720px] max-w-[95vw] max-h-[80vh] rounded-lg border border-gray-700 shadow-lg overflow-hidden">
         <div class="px-4 py-3 border-b border-gray-700 flex items-center justify-between">
           <div class="font-semibold">图层设置</div>
-          <button class="px-2 py-1 border rounded" @click="isSettingsOpen=false">关闭</button>
+          <button class="px-2 py-1 border rounded" @click="isSettingsOpen = false">关闭</button>
         </div>
         <div class="p-4 overflow-auto max-h-[60vh] space-y-3">
-          <div v-for="item in editableLayers" :key="item.id" class="border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div v-for="item in editableLayers" :key="item.id"
+            class="border border-gray-700 rounded p-3 flex items-center gap-3">
             <div class="flex-1 min-w-0">
               <div class="text-xs font-medium truncate">{{ item.filename }}</div>
             </div>
             <div class="flex items-center gap-2">
               <label class="text-xs text-gray-300">type</label>
-              <select v-model="item.type" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs" @change="item.side = coerceSideForType(item.type, item.side)">
+              <select v-model="item.type" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+                @change="item.side = coerceSideForType(item.type, item.side)">
                 <option value="copper">copper</option>
                 <option value="soldermask">soldermask</option>
                 <option value="silkscreen">silkscreen</option>
@@ -152,13 +136,14 @@
             <div class="flex items-center gap-2">
               <label class="text-xs text-gray-300">side</label>
               <select v-model="item.side" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs">
-                <option v-for="opt in allowedSides(item.type)" :key="(opt ?? 'na')" :value="opt">{{ opt ?? 'n/a' }}</option>
+                <option v-for="opt in allowedSides(item.type)" :key="(opt ?? 'na')" :value="opt">{{ opt ?? 'n/a' }}
+                </option>
               </select>
             </div>
           </div>
         </div>
         <div class="p-3 border-t border-gray-700 flex items-center justify-end gap-2">
-          <button class="px-3 py-1 border rounded" @click="isSettingsOpen=false">取消</button>
+          <button class="px-3 py-1 border rounded" @click="isSettingsOpen = false">取消</button>
           <button class="px-3 py-1 border rounded bg-cyan-600 text-white" @click="applySettings">保存</button>
         </div>
       </div>
@@ -198,6 +183,7 @@ const fmRef = ref(null)
 const boardViewBox = ref([0, 0, 0, 0])
 const boardWidthMm = ref(0)
 const boardHeightMm = ref(0)
+const pcb3dRef = ref(null)
 const topSvg = ref('')
 const bottomSvg = ref('')
 const boardThickness = ref(0.016)
@@ -233,6 +219,11 @@ const toggleMeasurementMode = () => {
 
 const resetCompositeSize = () => {
   recenterSignal.value += 1
+}
+
+const resetPcb3dView = async () => {
+  if (activeView.value !== '3d') return
+  await pcb3dRef.value?.resetView?.()
 }
 
 // 上传处理
@@ -414,5 +405,4 @@ const applySettings = async () => {
 }
 </script>
 
-<style scoped>
-</style>
+<style scoped></style>

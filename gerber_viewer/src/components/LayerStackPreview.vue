@@ -53,7 +53,7 @@ const props = defineProps({
   active: { type: Boolean, default: true },
 })
 
-const emit = defineEmits(['exit-measurement'])
+const emit = defineEmits(['exit-measurement', 'loading-change'])
 
 const compositeContainer = ref(null)
 const viewScale = ref(1)
@@ -112,6 +112,13 @@ let pixiCanvas = null
 let pixiInitPromise = null
 let compositeUpdateToken = 0
 let resizeObserver = null
+let compositeLoading = false
+
+const setCompositeLoading = (state) => {
+  if (compositeLoading === state) return
+  compositeLoading = state
+  emit('loading-change', state)
+}
 
 const fmData = computed(() => unref(props.fmResult))
 
@@ -246,89 +253,94 @@ const updateComposite = async ({ recenter = false } = {}) => {
   if (!props.active) return
   compositeUpdateToken += 1
   const token = compositeUpdateToken
+  setCompositeLoading(true)
   const fm = getFm()
   console.time('[composite] ensurePixiApp')
   const app = await ensurePixiApp()
   console.timeEnd('[composite] ensurePixiApp')
-  if (!app || token !== compositeUpdateToken) return
-  if (!pixiRoot) return
-  resizePixiToHost()
-  console.time('[composite] rebuildPixi')
-  if (!fm) {
-    console.timeEnd('[composite] rebuildPixi')
-    console.warn('[LayerStackPreview] skip render: fmResult missing')
-    resetLayerDisplays(false)
-    if (recenter) fitToContainer(true)
-    else applyViewTransform()
-    return
-  }
-  const viewBox = getCompositeViewBox()
-  const unitsToPx = getUnitsToPx()
-  console.log('[LayerStackPreview] render context', { viewBox, unitsToPx })
-  const ctx = { viewBox, unitsToPx }
-  const plotTrees = fm.plotResult?.plotTreesById ?? {}
-  const stackingOrder = props.orderedLayers
-    .map((layer, index) => ({ layer, index }))
-    .sort((a, b) => {
-      const weightA = Number.isFinite(a.layer?.weight) ? a.layer.weight : 100
-      const weightB = Number.isFinite(b.layer?.weight) ? b.layer.weight : 100
-      if (weightB !== weightA) return weightB - weightA
-      return b.index - a.index
-    })
-  let zIndex = 0
-  const nextActiveIds = new Set()
-  const stats = { reused: 0, rebuilt: 0, removed: 0 }
-  for (const { layer } of stackingOrder) {
-    nextActiveIds.add(layer.id)
-    const visible = layer.visible !== false
-    const tree = plotTrees[layer.id]
+  try {
+    if (!app || token !== compositeUpdateToken) return
+    if (!pixiRoot) return
+    resizePixiToHost()
+    console.time('[composite] rebuildPixi')
+    if (!fm) {
+      console.timeEnd('[composite] rebuildPixi')
+      console.warn('[LayerStackPreview] skip render: fmResult missing')
+      resetLayerDisplays(false)
+      if (recenter) fitToContainer(true)
+      else applyViewTransform()
+      return
+    }
+    const viewBox = getCompositeViewBox()
+    const unitsToPx = getUnitsToPx()
+    console.log('[LayerStackPreview] render context', { viewBox, unitsToPx })
+    const ctx = { viewBox, unitsToPx }
+    const plotTrees = fm.plotResult?.plotTreesById ?? {}
+    const stackingOrder = props.orderedLayers
+      .map((layer, index) => ({ layer, index }))
+      .sort((a, b) => {
+        const weightA = Number.isFinite(a.layer?.weight) ? a.layer.weight : 100
+        const weightB = Number.isFinite(b.layer?.weight) ? b.layer.weight : 100
+        if (weightB !== weightA) return weightB - weightA
+        return b.index - a.index
+      })
+    let zIndex = 0
+    const nextActiveIds = new Set()
+    const stats = { reused: 0, rebuilt: 0, removed: 0 }
+    for (const { layer } of stackingOrder) {
+      nextActiveIds.add(layer.id)
+      const visible = layer.visible !== false
+      const tree = plotTrees[layer.id]
     if (!tree) continue
     const colorValue = parseHexColor(layer.color)
     const layerOpacity = typeof layer.opacity === 'number' ? layer.opacity : 1
-    const cached = layerDisplayCache.get(layer.id)
-    const needsRebuild = !cached || cached.tree !== tree || cached.color !== colorValue || cached.opacity !== layerOpacity
-    if (needsRebuild) {
-      disposeLayerDisplay(layer.id, cached)
-      const display = createLayerDisplay(tree, ctx, colorValue, layerOpacity)
-      if (!display) continue
-      display.eventMode = 'none'
-      layerDisplayCache.set(layer.id, { display, tree, color: colorValue, opacity: layerOpacity })
-      stats.rebuilt += 1
-    } else {
-      stats.reused += 1
+      const cached = layerDisplayCache.get(layer.id)
+      const needsRebuild = !cached || cached.tree !== tree || cached.color !== colorValue || cached.opacity !== layerOpacity
+      if (needsRebuild) {
+        disposeLayerDisplay(layer.id, cached)
+        const display = createLayerDisplay(tree, ctx, colorValue, layerOpacity)
+        if (!display) continue
+        display.eventMode = 'none'
+        layerDisplayCache.set(layer.id, { display, tree, color: colorValue, opacity: layerOpacity })
+        stats.rebuilt += 1
+      } else {
+        stats.reused += 1
+      }
+      const entry = layerDisplayCache.get(layer.id)
+      if (!entry?.display) continue
+      entry.tree = tree
+      entry.color = colorValue
+      entry.opacity = layerOpacity
+      entry.display.zIndex = zIndex++
+      entry.display.visible = visible
+      if (entry.display.parent !== pixiRoot) pixiRoot.addChild(entry.display)
     }
-    const entry = layerDisplayCache.get(layer.id)
-    if (!entry?.display) continue
-    entry.tree = tree
-    entry.color = colorValue
-    entry.opacity = layerOpacity
-    entry.display.zIndex = zIndex++
-    entry.display.visible = visible
-    if (entry.display.parent !== pixiRoot) pixiRoot.addChild(entry.display)
+    for (const [layerId, entry] of layerDisplayCache.entries()) {
+      if (nextActiveIds.has(layerId)) continue
+      disposeLayerDisplay(layerId, entry)
+      layerDisplayCache.delete(layerId)
+      stats.removed += 1
+    }
+    pixiRoot.sortDirty = true
+    console.timeEnd('[composite] rebuildPixi')
+    if (recenter) fitToContainer(true)
+    else applyViewTransform()
+    const end = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
+    const rendererInfo = app?.renderer?.info ? { ...app.renderer.info } : null
+    const jsHeap = typeof performance !== 'undefined' && performance.memory ? performance.memory.usedJSHeapSize : null
+    console.log('[composite] stats', {
+      token,
+      durationMs: Number((end - updateStart).toFixed(2)),
+      pixiChildren: pixiRoot.children.length,
+      reusedDisplays: stats.reused,
+      rebuiltDisplays: stats.rebuilt,
+      removedDisplays: stats.removed,
+      rendererInfo,
+      jsHeap,
+    })
+  } finally {
+    if (token === compositeUpdateToken) setCompositeLoading(false)
   }
-  for (const [layerId, entry] of layerDisplayCache.entries()) {
-    if (nextActiveIds.has(layerId)) continue
-    disposeLayerDisplay(layerId, entry)
-    layerDisplayCache.delete(layerId)
-    stats.removed += 1
-  }
-  pixiRoot.sortDirty = true
-  console.timeEnd('[composite] rebuildPixi')
-  if (recenter) fitToContainer(true)
-  else applyViewTransform()
-  const end = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
-  const rendererInfo = app?.renderer?.info ? { ...app.renderer.info } : null
-  const jsHeap = typeof performance !== 'undefined' && performance.memory ? performance.memory.usedJSHeapSize : null
-  console.log('[composite] stats', {
-    token,
-    durationMs: Number((end - updateStart).toFixed(2)),
-    pixiChildren: pixiRoot.children.length,
-    reusedDisplays: stats.reused,
-    rebuiltDisplays: stats.rebuilt,
-    removedDisplays: stats.removed,
-    rendererInfo,
-    jsHeap,
-  })
 }
 
 const getActiveContainer = () => compositeContainer.value
@@ -502,15 +514,15 @@ watch(() => props.recenterSignal, () => {
 })
 
 watch(() => props.active, async (active) => {
-  if (!active && props.measurementActive) {
-    exitMeasurementMode(true)
+  if (!active) {
+    if (props.measurementActive) exitMeasurementMode(true)
+    setCompositeLoading(false)
+    return
   }
-  if (active) {
-    await nextTick()
-    resizePixiToHost()
-    fitToContainer(true)
-    updateComposite({ recenter: true })
-  }
+  await nextTick()
+  resizePixiToHost()
+  fitToContainer(true)
+  updateComposite({ recenter: true })
 })
 
 onMounted(() => {

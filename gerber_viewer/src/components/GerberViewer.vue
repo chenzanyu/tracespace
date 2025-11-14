@@ -97,11 +97,12 @@
         <LayerStackPreview v-show="activeView === 'layers'" :ordered-layers="orderedLayers" :fm-result="fmRef"
           :board-view-box="boardViewBox" :board-width-mm="boardWidthMm" :board-height-mm="boardHeightMm"
           :measurement-active="measurementActive" :recenter-signal="recenterSignal" :active="activeView === 'layers'"
-          @exit-measurement="measurementActive = false" />
+          @exit-measurement="measurementActive = false" @loading-change="handleLayerPreviewLoading" />
 
         <!-- 3D 视图 -->
         <Pcb3dPreview ref="pcb3dRef" v-show="activeView === '3d'" :top-svg="topSvg" :bottom-svg="bottomSvg"
-          :thickness="boardThickness" :active="activeView === '3d'" borderColor="#e8e8e8" :fitPadding="1.55" />
+          :thickness="boardThickness" :active="activeView === '3d'" borderColor="#e8e8e8" :fitPadding="1.55"
+          @loading-change="handlePcb3dLoading" />
       </section>
     </div>
 
@@ -148,6 +149,15 @@
         </div>
       </div>
     </div>
+
+    <div v-if="showLoadingOverlay"
+      class="fixed inset-0 z-[80] flex flex-col items-center justify-center gap-6 bg-black/60 backdrop-blur-sm text-white">
+      <div class="loading-spinner"></div>
+      <div class="text-center space-y-1">
+        <p class="text-sm tracking-wide uppercase text-white/70">loading</p>
+        <p class="text-lg font-semibold">{{ loadingMessage }}</p>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -178,6 +188,9 @@ const recenterSignal = ref(0)
 const isLayerPanelOpen = ref(false)
 const layerPanelTransitionEnabled = ref(true)
 const showFilenames = ref(false)
+const isLayerLoading = ref(false)
+const isLayerRenderLoading = ref(false)
+const isPcb3dLoading = ref(false)
 const orderedLayers = reactive([])
 const memoryLayers = ref([])
 const fmRef = ref(null)
@@ -197,6 +210,8 @@ const layerPanelVisible = computed(() => activeView.value === 'layers' && isLaye
 const topControlsOffset = computed(() => ({
   left: layerPanelVisible.value ? 'calc(20rem + 1rem)' : '1rem',
 }))
+const showLoadingOverlay = computed(() => isLayerLoading.value || isLayerRenderLoading.value || isPcb3dLoading.value)
+const loadingMessage = computed(() => '加载中')
 
 watch(fmRef, (val) => {
   console.log('[GerberViewer] fmRef updated', { hasFm: Boolean(val) })
@@ -224,6 +239,8 @@ const setActiveView = (mode) => {
 
 const openLayerPanel = () => { isLayerPanelOpen.value = true }
 const collapseLayerPanel = () => { isLayerPanelOpen.value = false }
+const handlePcb3dLoading = (loading) => { isPcb3dLoading.value = loading }
+const handleLayerPreviewLoading = (loading) => { isLayerRenderLoading.value = loading }
 
 const toggleMeasurementMode = () => {
   if (activeView.value !== 'layers') return
@@ -241,59 +258,67 @@ const resetPcb3dView = async () => {
 
 // 上传处理
 const handleUploadFile = async (file) => {
-  const formData = new FormData()
-  formData.append('UploadFile', file, file.name)
-  console.time('[upload] api')
-  const res = await axios.post(
-    'http://10.168.8.251:5004/api/PCBParse/Parse?Mode=0',
-    formData,
-    { headers: { 'Content-Type': 'multipart/form-data', accept: '*/*' } },
-  )
-  console.timeEnd('[upload] api')
-  const result = res.data.Data
-  memoryLayers.value = result.Items || []
-  if (typeof result.Thickness === 'number') boardThickness.value = result.Thickness
+  isLayerLoading.value = true
+  try {
+    const formData = new FormData()
+    formData.append('UploadFile', file, file.name)
+    console.time('[upload] api')
+    const res = await axios.post(
+      'http://10.168.8.251:5004/api/PCBParse/Parse?Mode=0',
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data', accept: '*/*' } },
+    )
+    console.timeEnd('[upload] api')
+    const result = res.data.Data
+    memoryLayers.value = result.Items || []
+    if (typeof result.Thickness === 'number') boardThickness.value = result.Thickness
 
-  const legacyBoardPromise = (async () => {
-    console.time('[upload] legacyFromMemoryLayers')
-    try {
-      return await refreshLegacyBoardRenders(memoryLayers.value)
-    } finally {
-      console.timeEnd('[upload] legacyFromMemoryLayers')
+    const legacyBoardPromise = (async () => {
+      console.time('[upload] legacyFromMemoryLayers')
+      try {
+        return await refreshLegacyBoardRenders(memoryLayers.value)
+      } finally {
+        console.timeEnd('[upload] legacyFromMemoryLayers')
+      }
+    })()
+
+    console.time('[upload] fromMemoryLayers')
+    const fm = await fromMemoryLayers(memoryLayers.value)
+    console.timeEnd('[upload] fromMemoryLayers')
+    fmRef.value = fm
+    boardViewBox.value = fm.renderLayersResult.boardShapeRender.viewBox
+    console.time('[upload] buildOrderedLayers')
+    orderedLayers.splice(0)
+    for (const layer of fm.renderLayersResult.layers) {
+      orderedLayers.push({
+        id: layer.id,
+        side: layer.side,
+        type: layer.type,
+        weight: orderLayerWeight(layer.side, layer.type),
+        color: randomHexColor(),
+        visible: true,
+        filename: layer.filename,
+        opacity: typeof layer.opacity === 'number' ? layer.opacity : 1,
+      })
     }
-  })()
-
-  console.time('[upload] fromMemoryLayers')
-  const fm = await fromMemoryLayers(memoryLayers.value)
-  console.timeEnd('[upload] fromMemoryLayers')
-  fmRef.value = fm
-  boardViewBox.value = fm.renderLayersResult.boardShapeRender.viewBox
-  console.time('[upload] buildOrderedLayers')
-  orderedLayers.splice(0)
-  for (const layer of fm.renderLayersResult.layers) {
-    orderedLayers.push({
-      id: layer.id,
-      side: layer.side,
-      type: layer.type,
-      weight: orderLayerWeight(layer.side, layer.type),
-      color: randomHexColor(),
-      visible: true,
-      filename: layer.filename,
-      opacity: typeof layer.opacity === 'number' ? layer.opacity : 1,
+    orderedLayers.sort((a, b) => a.weight - b.weight)
+    console.timeEnd('[upload] buildOrderedLayers')
+    console.log('[upload] layers ready', {
+      count: orderedLayers.length,
+      boardViewBox: boardViewBox.value,
+      boardWidthMm: boardWidthMm.value,
+      boardHeightMm: boardHeightMm.value,
     })
+    currentStatusIndex.value = 1
+    isLayerPanelOpen.value = false
+    await legacyBoardPromise
+    recenterSignal.value += 1
+  } catch (error) {
+    console.error('[GerberViewer] handleUploadFile failed', error)
+    throw error
+  } finally {
+    isLayerLoading.value = false
   }
-  orderedLayers.sort((a, b) => a.weight - b.weight)
-  console.timeEnd('[upload] buildOrderedLayers')
-  console.log('[upload] layers ready', {
-    count: orderedLayers.length,
-    boardViewBox: boardViewBox.value,
-    boardWidthMm: boardWidthMm.value,
-    boardHeightMm: boardHeightMm.value,
-  })
-  currentStatusIndex.value = 1
-  isLayerPanelOpen.value = false
-  await legacyBoardPromise
-  recenterSignal.value += 1
 }
 
 // 旧版渲染 & 颜色
@@ -382,6 +407,7 @@ const coerceSideForType = (type, side) => {
 }
 
 const applySettings = async () => {
+  isLayerLoading.value = true
   const list = (memoryLayers.value || []).map((x) => ({ ...x }))
   for (const entry of editableLayers) entry.side = coerceSideForType(entry.type, entry.side)
   const keyFor = (t, s) => {
@@ -419,12 +445,12 @@ const applySettings = async () => {
         side: layer.side,
         type: layer.type,
         weight: orderLayerWeight(layer.side, layer.type),
-      color: kv.color,
-      visible: kv.visible,
-      opacity: typeof kv.opacity === 'number' ? kv.opacity : 1,
-      filename: layer.filename,
-    })
-  }
+        color: kv.color,
+        visible: kv.visible,
+        opacity: typeof kv.opacity === 'number' ? kv.opacity : 1,
+        filename: layer.filename,
+      })
+    }
     orderedLayers.sort((a, b) => a.weight - b.weight)
     await legacyBoardPromise
     recenterSignal.value += 1
@@ -432,6 +458,8 @@ const applySettings = async () => {
     isSettingsOpen.value = false
   } catch (error) {
     console.error('[GerberViewer] applySettings failed', error)
+  } finally {
+    isLayerLoading.value = false
   }
 }
 </script>
@@ -446,5 +474,24 @@ const applySettings = async () => {
 .layer-panel-fade-leave-to {
   opacity: 0;
   transform: translateX(-12px);
+}
+
+.loading-spinner {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  border: 4px solid rgba(255, 255, 255, 0.15);
+  border-top-color: #3fd3ff;
+  border-right-color: #3fd3ff;
+  animation: viewer-spin 0.9s linear infinite;
+}
+
+@keyframes viewer-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
 }
 </style>

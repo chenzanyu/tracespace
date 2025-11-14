@@ -264,7 +264,7 @@ const handleUploadFile = async (file) => {
     formData.append('UploadFile', file, file.name)
     console.time('[upload] api')
     const res = await axios.post(
-      'http://10.168.8.251:5004/api/PCBParse/Parse?Mode=0',
+      'http://localhost:5004/api/PCBParse/Parse?Mode=0',
       formData,
       { headers: { 'Content-Type': 'multipart/form-data', accept: '*/*' } },
     )

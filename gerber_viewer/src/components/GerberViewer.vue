@@ -230,19 +230,32 @@ const resetPcb3dView = async () => {
 const handleUploadFile = async (file) => {
   const formData = new FormData()
   formData.append('UploadFile', file, file.name)
+  console.time('[upload] api')
   const res = await axios.post(
     'http://10.168.8.251:5004/api/PCBParse/Parse?Mode=0',
     formData,
     { headers: { 'Content-Type': 'multipart/form-data', accept: '*/*' } },
   )
+  console.timeEnd('[upload] api')
   const result = res.data.Data
   memoryLayers.value = result.Items || []
   if (typeof result.Thickness === 'number') boardThickness.value = result.Thickness
 
-  const legacyBoardPromise = refreshLegacyBoardRenders(memoryLayers.value)
+  const legacyBoardPromise = (async () => {
+    console.time('[upload] legacyFromMemoryLayers')
+    try {
+      return await refreshLegacyBoardRenders(memoryLayers.value)
+    } finally {
+      console.timeEnd('[upload] legacyFromMemoryLayers')
+    }
+  })()
+
+  console.time('[upload] fromMemoryLayers')
   const fm = await fromMemoryLayers(memoryLayers.value)
+  console.timeEnd('[upload] fromMemoryLayers')
   fmRef.value = fm
   boardViewBox.value = fm.renderLayersResult.boardShapeRender.viewBox
+  console.time('[upload] buildOrderedLayers')
   orderedLayers.splice(0)
   for (const layer of fm.renderLayersResult.layers) {
     orderedLayers.push({
@@ -254,10 +267,16 @@ const handleUploadFile = async (file) => {
       visible: true,
       filename: layer.filename,
       opacity: typeof layer.opacity === 'number' ? layer.opacity : 1,
-      plotTree: fm.plotResult?.plotTreesById?.[layer.id],
     })
   }
   orderedLayers.sort((a, b) => a.weight - b.weight)
+  console.timeEnd('[upload] buildOrderedLayers')
+  console.log('[upload] layers ready', {
+    count: orderedLayers.length,
+    boardViewBox: boardViewBox.value,
+    boardWidthMm: boardWidthMm.value,
+    boardHeightMm: boardHeightMm.value,
+  })
   currentStatusIndex.value = 1
   isLayerPanelOpen.value = false
   await legacyBoardPromise
@@ -387,13 +406,12 @@ const applySettings = async () => {
         side: layer.side,
         type: layer.type,
         weight: orderLayerWeight(layer.side, layer.type),
-        color: kv.color,
-        visible: kv.visible,
-        opacity: typeof kv.opacity === 'number' ? kv.opacity : 1,
-        filename: layer.filename,
-        plotTree: fm.plotResult?.plotTreesById?.[layer.id],
-      })
-    }
+      color: kv.color,
+      visible: kv.visible,
+      opacity: typeof kv.opacity === 'number' ? kv.opacity : 1,
+      filename: layer.filename,
+    })
+  }
     orderedLayers.sort((a, b) => a.weight - b.weight)
     await legacyBoardPromise
     recenterSignal.value += 1

@@ -194,45 +194,69 @@ const ensurePixiApp = async () => {
   return pixiInitPromise
 }
 
-const destroyPixi = () => {
-  const app = pixiApp.value
-  if (app) {
-    try { app.destroy(true) } catch (err) { console.warn('销毁 Pixi 应用失败', err) }
+const destroyPixi = () => {
+  const app = pixiApp.value
+  if (app) {
+    try { app.destroy(true) } catch (err) { console.warn('销毁 Pixi 应用失败', err) }
+  }
+  if (pixiCanvas?.parentNode) pixiCanvas.parentNode.removeChild(pixiCanvas)
+  resetLayerDisplays()
+  pixiApp.value = null
+  pixiRoot = null
+  pixiCanvas = null
+  pixiInitPromise = null
+}
+
+const layerDisplayCache = new Map()
+
+const disposeLayerDisplay = (layerId, entry, { destroy = true } = {}) => {
+  if (!entry) return
+  try {
+    if (entry.display?.parent) entry.display.parent.removeChild(entry.display)
+  } catch (error) {
+    console.warn('[LayerStackPreview] detach display failed', { layerId, error })
   }
-  if (pixiCanvas?.parentNode) pixiCanvas.parentNode.removeChild(pixiCanvas)
-  pixiApp.value = null
-  pixiRoot = null
-  pixiCanvas = null
-  pixiInitPromise = null
+  if (destroy && entry.display) {
+    try {
+      entry.display.destroy({ children: true })
+    } catch (error) {
+      console.warn('[LayerStackPreview] destroy display failed', { layerId, error })
+    }
+  }
+}
+
+const resetLayerDisplays = (destroy = true) => {
+  for (const [layerId, entry] of layerDisplayCache.entries()) {
+    disposeLayerDisplay(layerId, entry, { destroy })
+    layerDisplayCache.delete(layerId)
+  }
+  pixiRoot?.removeChildren()
 }
 
 const updateComposite = async ({ recenter = false } = {}) => {
+  const updateStart = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
   console.log('[LayerStackPreview] updateComposite triggered', {
     active: props.active,
     recenter,
     layers: props.orderedLayers.length,
     hasFm: Boolean(getFm()),
+    tokenPreview: compositeUpdateToken + 1,
   })
   if (!props.active) return
   compositeUpdateToken += 1
   const token = compositeUpdateToken
   const fm = getFm()
+  console.time('[composite] ensurePixiApp')
   const app = await ensurePixiApp()
+  console.timeEnd('[composite] ensurePixiApp')
   if (!app || token !== compositeUpdateToken) return
   if (!pixiRoot) return
   resizePixiToHost()
-  const removed = pixiRoot.removeChildren()
-  for (const child of removed) {
-    if (typeof child?.destroy === 'function') {
-      try {
-        child.destroy({ children: true })
-      } catch (error) {
-        console.warn('[LayerStackPreview] destroy display object failed', error)
-      }
-    }
-  }
+  console.time('[composite] rebuildPixi')
   if (!fm) {
+    console.timeEnd('[composite] rebuildPixi')
     console.warn('[LayerStackPreview] skip render: fmResult missing')
+    resetLayerDisplays(false)
     if (recenter) fitToContainer(true)
     else applyViewTransform()
     return
@@ -251,20 +275,59 @@ const updateComposite = async ({ recenter = false } = {}) => {
       return b.index - a.index
     })
   let zIndex = 0
+  const nextActiveIds = new Set()
+  const stats = { reused: 0, rebuilt: 0, removed: 0 }
   for (const { layer } of stackingOrder) {
-    if (!layer.visible) continue
-    const tree = layer.plotTree ?? plotTrees[layer.id]
+    nextActiveIds.add(layer.id)
+    const visible = layer.visible !== false
+    const tree = plotTrees[layer.id]
     if (!tree) continue
-    layer.plotTree = tree
     const colorValue = parseHexColor(layer.color)
     const layerOpacity = typeof layer.opacity === 'number' ? layer.opacity : 1
-    const display = createLayerDisplay(tree, ctx, colorValue, layerOpacity)
-    if (!display) continue
-    display.zIndex = zIndex++
-    pixiRoot.addChild(display)
+    const cached = layerDisplayCache.get(layer.id)
+    const needsRebuild = !cached || cached.tree !== tree || cached.color !== colorValue || cached.opacity !== layerOpacity
+    if (needsRebuild) {
+      disposeLayerDisplay(layer.id, cached)
+      const display = createLayerDisplay(tree, ctx, colorValue, layerOpacity)
+      if (!display) continue
+      display.eventMode = 'none'
+      layerDisplayCache.set(layer.id, { display, tree, color: colorValue, opacity: layerOpacity })
+      stats.rebuilt += 1
+    } else {
+      stats.reused += 1
+    }
+    const entry = layerDisplayCache.get(layer.id)
+    if (!entry?.display) continue
+    entry.tree = tree
+    entry.color = colorValue
+    entry.opacity = layerOpacity
+    entry.display.zIndex = zIndex++
+    entry.display.visible = visible
+    if (entry.display.parent !== pixiRoot) pixiRoot.addChild(entry.display)
   }
+  for (const [layerId, entry] of layerDisplayCache.entries()) {
+    if (nextActiveIds.has(layerId)) continue
+    disposeLayerDisplay(layerId, entry)
+    layerDisplayCache.delete(layerId)
+    stats.removed += 1
+  }
+  pixiRoot.sortDirty = true
+  console.timeEnd('[composite] rebuildPixi')
   if (recenter) fitToContainer(true)
   else applyViewTransform()
+  const end = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
+  const rendererInfo = app?.renderer?.info ? { ...app.renderer.info } : null
+  const jsHeap = typeof performance !== 'undefined' && performance.memory ? performance.memory.usedJSHeapSize : null
+  console.log('[composite] stats', {
+    token,
+    durationMs: Number((end - updateStart).toFixed(2)),
+    pixiChildren: pixiRoot.children.length,
+    reusedDisplays: stats.reused,
+    rebuiltDisplays: stats.rebuilt,
+    removedDisplays: stats.removed,
+    rendererInfo,
+    jsHeap,
+  })
 }
 
 const getActiveContainer = () => compositeContainer.value
@@ -390,11 +453,25 @@ watch(() => props.measurementActive, (active) => {
   }
 })
 
-watch(() => props.orderedLayers, () => {
+const layerSignatureSource = () => {
+  const fm = getFm()
+  const plotTrees = fm?.plotResult?.plotTreesById ?? {}
+  return props.orderedLayers.map((layer, index) => ({
+    id: layer.id,
+    visible: layer.visible !== false,
+    color: layer.color,
+    opacity: typeof layer.opacity === 'number' ? layer.opacity : 1,
+    weight: Number.isFinite(layer.weight) ? layer.weight : 100,
+    order: index,
+    treeRef: plotTrees[layer.id],
+  }))
+}
+
+watch(layerSignatureSource, () => {
   console.log('[LayerStackPreview] orderedLayers changed')
   if (!props.active) return
   updateComposite()
-}, { deep: true })
+})
 
 watch(fmData, () => {
   console.log('[LayerStackPreview] fmResult changed', { hasFm: Boolean(fmData.value) })

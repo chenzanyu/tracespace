@@ -7,48 +7,48 @@
 
     <!-- 预览阶段 -->
     <div v-else class="h-full flex relative">
-      <!-- 图层侧栏 -->
-      <aside v-show="isLayerPanelOpen"
-        class="w-80 shrink-0 border-r border-gray-800 bg-gradient-to-b from-gray-900 to-gray-800 flex flex-col">
-        <div class="p-4 flex items-center gap-2 border-b border-gray-800">
-          <h3 class="text-sm font-semibold flex-1">图层列表</h3>
-          <button
-            class="text-sm text-gray-100 hover:text-white px-3 py-1.5 rounded-md border border-white/20 bg-white/5"
-            @click="collapseLayerPanel">
-            折叠
-          </button>
-        </div>
-        <div class="p-4 flex flex-col flex-1 overflow-y-auto space-y-4">
-          <div class="flex items-center gap-2 text-xs text-gray-300 flex-wrap">
-            <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(true)">全部显示</button>
-            <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(false)">全部隐藏</button>
-            <label class="flex items-center gap-1 select-none cursor-pointer ml-auto">
-              <input type="checkbox" v-model="showFilenames" /> 显示文件名
-            </label>
-          </div>
-          <div class="space-y-2">
-            <div v-for="layer in orderedLayers" :key="layer.id"
-              class="py-2 border-b border-gray-800 flex items-center gap-2">
-              <button
-                class="w-8 h-8 shrink-0 flex items-center justify-center rounded border border-gray-600 hover:bg-gray-700"
-                :title="layer.visible ? '隐藏' : '显示'" @click="layer.visible = !layer.visible">
-                <span :class="layer.visible ? 'pi pi-eye' : 'pi pi-eye-slash'" />
-              </button>
-              <div class="flex-1 min-w-0">
-                <div class="text-xs truncate">{{ displayLayerName(layer) }}</div>
-                <div v-if="showFilenames" class="text-[10px] text-gray-400 truncate mt-1" :title="layer.filename">{{
-                  layer.filename }}</div>
-              </div>
-              <input class="w-10 h-6" type="color" v-model="layer.color" />
-            </div>
-          </div>
-        </div>
-      </aside>
-
       <!-- 预览画布 -->
       <section class="flex-1 relative overflow-hidden bg-gradient-to-br from-[#0f1b2d] to-[#050b16]">
+        <transition name="layer-panel-fade" :css="layerPanelTransitionEnabled">
+          <aside v-if="layerPanelVisible"
+            class="absolute inset-y-0 left-0 w-80 border-r border-gray-800 bg-gradient-to-b from-gray-900 to-gray-800 flex flex-col z-30 shadow-[0_20px_40px_rgba(0,0,0,0.55)]">
+            <div class="p-4 flex items-center gap-2 border-b border-gray-800">
+              <h3 class="text-sm font-semibold flex-1">图层列表</h3>
+              <button
+                class="text-sm text-gray-100 hover:text-white px-3 py-1.5 rounded-md border border-white/20 bg-white/5"
+                @click="collapseLayerPanel">
+                折叠
+              </button>
+            </div>
+            <div class="p-4 flex flex-col flex-1 overflow-y-auto space-y-4">
+              <div class="flex items-center gap-2 text-xs text-gray-300 flex-wrap">
+                <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(true)">全部显示</button>
+                <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(false)">全部隐藏</button>
+                <label class="flex items-center gap-1 select-none cursor-pointer ml-auto">
+                  <input type="checkbox" v-model="showFilenames" /> 显示文件名
+                </label>
+              </div>
+              <div class="space-y-2">
+                <div v-for="layer in orderedLayers" :key="layer.id"
+                  class="py-2 border-b border-gray-800 flex items-center gap-2">
+                  <button
+                    class="w-8 h-8 shrink-0 flex items-center justify-center rounded border border-gray-600 hover:bg-gray-700"
+                    :title="layer.visible ? '隐藏' : '显示'" @click="layer.visible = !layer.visible">
+                    <span :class="layer.visible ? 'pi pi-eye' : 'pi pi-eye-slash'" />
+                  </button>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs truncate">{{ displayLayerName(layer) }}</div>
+                    <div v-if="showFilenames" class="text-[10px] text-gray-400 truncate mt-1" :title="layer.filename">{{
+                      layer.filename }}</div>
+                  </div>
+                  <input class="w-10 h-6" type="color" v-model="layer.color" />
+                </div>
+              </div>
+            </div>
+          </aside>
+        </transition>
         <!-- 顶部按钮 -->
-        <div class="absolute top-4 left-4 z-40 flex flex-wrap gap-2">
+        <div class="absolute top-4 z-40 flex flex-wrap gap-2" :style="topControlsOffset">
           <template v-if="activeView === 'layers'">
             <button v-if="!isLayerPanelOpen"
               class="px-3 py-2 rounded-md bg-gray-900/80 text-white text-sm border border-white/30 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition flex items-center gap-2"
@@ -158,7 +158,7 @@
  * - 调用 LayerStackPreview（Pixi）与 Pcb3dPreview（Three）渲染
  * - 负责旧版 tracespace 结果到新版组件的数据转换
  */
-import { ref, reactive, nextTick, watch } from 'vue'
+import { ref, reactive, nextTick, watch, computed } from 'vue'
 import axios from 'axios'
 import { fromMemoryLayers } from '@tracespace/core'
 import { fromMemoryLayers as legacyFromMemoryLayers, stringifySvg as legacyStringifySvg } from '../libs/tracespace_svg/tracespace-core'
@@ -176,6 +176,7 @@ const activeView = ref('layers')
 const measurementActive = ref(false)
 const recenterSignal = ref(0)
 const isLayerPanelOpen = ref(false)
+const layerPanelTransitionEnabled = ref(true)
 const showFilenames = ref(false)
 const orderedLayers = reactive([])
 const memoryLayers = ref([])
@@ -192,6 +193,11 @@ const viewOptions = [
   { label: '3D', value: '3d' },
 ]
 
+const layerPanelVisible = computed(() => activeView.value === 'layers' && isLayerPanelOpen.value)
+const topControlsOffset = computed(() => ({
+  left: layerPanelVisible.value ? 'calc(20rem + 1rem)' : '1rem',
+}))
+
 watch(fmRef, (val) => {
   console.log('[GerberViewer] fmRef updated', { hasFm: Boolean(val) })
 })
@@ -205,8 +211,15 @@ let baseBottomEl = null
 let legacyBoardUpdateToken = 0
 
 const setActiveView = (mode) => {
-  activeView.value = mode
+  if (mode === activeView.value) return
   if (mode !== 'layers' && measurementActive.value) measurementActive.value = false
+  const transitionsDisabled = (activeView.value === 'layers' && mode !== 'layers')
+    || (activeView.value !== 'layers' && mode === 'layers')
+  if (transitionsDisabled) layerPanelTransitionEnabled.value = false
+  activeView.value = mode
+  if (transitionsDisabled) {
+    nextTick(() => { layerPanelTransitionEnabled.value = true })
+  }
 }
 
 const openLayerPanel = () => { isLayerPanelOpen.value = true }
@@ -423,4 +436,15 @@ const applySettings = async () => {
 }
 </script>
 
-<style scoped></style>
+<style scoped>
+.layer-panel-fade-enter-active,
+.layer-panel-fade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.layer-panel-fade-enter-from,
+.layer-panel-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-12px);
+}
+</style>

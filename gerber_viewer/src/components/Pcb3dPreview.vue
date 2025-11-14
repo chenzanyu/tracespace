@@ -7,7 +7,7 @@
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount, ref, watch, nextTick, defineExpose } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watch, nextTick, defineExpose, defineEmits } from 'vue'
 import * as THREE from 'three'
 import { SRGBColorSpace } from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
@@ -27,6 +27,8 @@ const props = defineProps({
   active: { type: Boolean, default: true },
 })
 
+const emit = defineEmits(['loading-change'])
+
 const container = ref(null)
 let renderer = null
 let camera = null
@@ -41,6 +43,20 @@ let stopCount = 0
 let ro = null
 let pendingResize = false
 let spinTimer = 0
+let refreshQueued = false
+let refreshForce = false
+let loadingDepth = 0
+
+const pushLoading = () => {
+  loadingDepth += 1
+  if (loadingDepth === 1) emit('loading-change', true)
+}
+
+const popLoading = () => {
+  if (loadingDepth === 0) return
+  loadingDepth -= 1
+  if (loadingDepth === 0) emit('loading-change', false)
+}
 
 const renderScene = () => { if (renderer && scene && camera) renderer.render(scene, camera) }
 
@@ -277,7 +293,7 @@ const smoothRefitToBox = () => {
   startLoop()
 }
 
-const commitRendererSize = () => {
+const commitRendererSize = ({ refit = true } = {}) => {
   if (!container.value || !renderer || !camera) return
   const rect = container.value.getBoundingClientRect()
   const w = Math.max(1, Math.round(rect.width))
@@ -285,7 +301,7 @@ const commitRendererSize = () => {
   renderer.setSize(w, h, false)
   camera.aspect = w / h
   camera.updateProjectionMatrix()
-  if (geometryBox) smoothRefitToBox()
+  if (refit && geometryBox) smoothRefitToBox()
   controls?.target.set(0, 0, 0)
   requestRender()
 }
@@ -374,27 +390,41 @@ const destroyThree = () => {
   camera = null
   controls = null
   geometryBox = null
+  refreshQueued = false
+  refreshForce = false
+  loadingDepth = 0
+  emit('loading-change', false)
 }
 
 const refreshPreview = async (force = false) => {
-  if (!props.active || !renderer || !scene || !camera) return
-  if (!props.topSvg || !props.bottomSvg) {
-    if (mesh && scene) {
-      scene.remove(mesh)
-      mesh.geometry?.dispose?.()
-      mesh = null
-    }
-    geometryBox = null
-    disposeTextures()
-    requestRender()
+  if (!renderer || !scene || !camera || !container.value || !props.active) {
+    refreshQueued = true
+    refreshForce = refreshForce || force
     return
   }
+  const shouldForce = force || refreshForce
+  refreshQueued = false
+  refreshForce = false
+  pushLoading()
   try {
-    const updated = await rasterizeAndUpdateTextures(force)
+    if (!props.topSvg || !props.bottomSvg) {
+      if (mesh && scene) {
+        scene.remove(mesh)
+        mesh.geometry?.dispose?.()
+        mesh = null
+      }
+      geometryBox = null
+      disposeTextures()
+      requestRender()
+      return
+    }
+    const updated = await rasterizeAndUpdateTextures(shouldForce)
     if (updated) rebuildGeometry()
     else requestRender()
   } catch (error) {
     console.error('[Pcb3dPreview] rasterize failed', error)
+  } finally {
+    popLoading()
   }
 }
 
@@ -448,8 +478,9 @@ watch(() => props.active, async (isActive) => {
     return
   }
   await nextTick()
-  commitRendererSize()
-  await refreshPreview(true)
+  commitRendererSize({ refit: false })
+  requestRender()
+  if (refreshQueued || refreshForce) await refreshPreview()
 })
 
 onMounted(async () => {

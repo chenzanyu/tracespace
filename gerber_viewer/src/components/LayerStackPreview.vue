@@ -111,6 +111,7 @@ let pixiRoot = null
 let pixiCanvas = null
 let pixiInitPromise = null
 let compositeUpdateToken = 0
+let resizeObserver = null
 
 const fmData = computed(() => unref(props.fmResult))
 
@@ -443,6 +444,23 @@ const handleResize = () => {
   fitToContainer(true)
 }
 
+const observeContainerResize = () => {
+  if (typeof window === 'undefined' || typeof window.ResizeObserver === 'undefined') return
+  if (!compositeContainer.value) return
+  if (!resizeObserver) {
+    resizeObserver = new window.ResizeObserver(() => {
+      resizePixiToHost()
+      if (props.active) fitToContainer(true)
+    })
+  }
+  resizeObserver.observe(compositeContainer.value)
+}
+
+watch(compositeContainer, (next, prev) => {
+  if (resizeObserver && prev) resizeObserver.unobserve(prev)
+  if (next) observeContainerResize()
+})
+
 watch(() => props.measurementActive, (active) => {
   if (!active) {
     exitMeasurementMode()
@@ -501,6 +519,7 @@ onMounted(() => {
     layers: props.orderedLayers.length,
   })
   nextTick(() => {
+    observeContainerResize()
     resizePixiToHost()
     fitToContainer(true)
     updateComposite({ recenter: true })
@@ -510,6 +529,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (typeof window !== 'undefined') window.removeEventListener('resize', handleResize)
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
   destroyPixi()
 })
 </script>

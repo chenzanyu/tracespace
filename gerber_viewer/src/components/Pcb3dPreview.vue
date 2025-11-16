@@ -12,6 +12,7 @@ import * as THREE from 'three'
 import { SRGBColorSpace } from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { CanvasGeometry } from '../libs/3d/CanvasGeometry'
+const createGeometryWorker = () => new Worker(new URL('../workers/canvasGeometry.worker.js', import.meta.url), { type: 'module' })
 
 const props = defineProps({
   topSvg: { type: String, required: true },
@@ -46,6 +47,11 @@ let spinTimer = 0
 let refreshQueued = false
 let refreshForce = false
 let loadingDepth = 0
+let geometryWorker = null
+const geometryWorkerJobs = new Map()
+let geometryWorkerSeq = 0
+let geometryBuildToken = 0
+let geometryWorkerFailed = false
 
 const pushLoading = () => {
   loadingDepth += 1
@@ -131,6 +137,214 @@ const disposeTextures = () => {
   bottomTexture = null
 }
 
+const handleGeometryWorkerMessage = (event) => {
+  const { id, success, payload, message } = event.data || {}
+  if (!id) return
+  const job = geometryWorkerJobs.get(id)
+  if (!job) return
+  geometryWorkerJobs.delete(id)
+  if (!success) {
+    job.reject(new Error(message || 'geometry worker failed'))
+    return
+  }
+  job.resolve(payload)
+}
+
+const failAllGeometryJobs = (error) => {
+  geometryWorkerJobs.forEach(({ reject }) => reject(error))
+  geometryWorkerJobs.clear()
+}
+
+const ensureGeometryWorker = () => {
+  if (geometryWorkerFailed) return null
+  if (geometryWorker) return geometryWorker
+  try {
+    geometryWorker = createGeometryWorker()
+    geometryWorker.onmessage = handleGeometryWorkerMessage
+    geometryWorker.onerror = (err) => {
+      failAllGeometryJobs(err instanceof Error ? err : new Error('geometry worker error'))
+      geometryWorker?.terminate()
+      geometryWorker = null
+      geometryWorkerFailed = true
+    }
+    return geometryWorker
+  } catch (error) {
+    geometryWorkerFailed = true
+    console.warn('[Pcb3dPreview] geometry worker unavailable', error)
+    return null
+  }
+}
+
+const terminateGeometryWorker = () => {
+  if (!geometryWorker && geometryWorkerJobs.size === 0) return
+  failAllGeometryJobs(new Error('geometry worker terminated'))
+  geometryWorker?.terminate?.()
+  geometryWorker = null
+}
+
+const createTextureFromImage = (image, { repeatX = 1 } = {}) => {
+  if (!image) return null
+  const isCanvasLike = typeof image.getContext === 'function'
+  const texture = isCanvasLike ? new THREE.CanvasTexture(image) : new THREE.Texture(image)
+  setupTextureParams(texture, { repeatX })
+  texture.needsUpdate = true
+  return texture
+}
+
+// 从当前 top 纹理重新抓取像素数据（用于 Worker 同步回退）
+const captureGeometrySourceFromTexture = () => {
+  const image = topTexture?.image
+  if (!image) return null
+  const width = image.width || image.videoWidth || image.naturalWidth || image.displayWidth || image.clientWidth || 0
+  const height = image.height || image.videoHeight || image.naturalHeight || image.displayHeight || image.clientHeight || 0
+  if (!width || !height) return null
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.drawImage(image, 0, 0, width, height)
+    const imageData = ctx.getImageData(0, 0, width, height)
+    return { width, height, data: imageData.data.buffer, canvas }
+  } catch (error) {
+    console.warn('[Pcb3dPreview] captureGeometrySource failed', error)
+    return null
+  }
+}
+
+// 将 geometrySource 转成 canvas，供同步构建或者作为纹理复用
+const ensureCanvasFromSource = (source) => {
+  if (!source) return null
+  if (source.canvas && typeof source.canvas.getContext === 'function') return source.canvas
+  const { width, height } = source
+  if (!width || !height) return null
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  if (source.bitmap && typeof ctx.drawImage === 'function') {
+    ctx.drawImage(source.bitmap, 0, 0, width, height)
+  } else if (source.data) {
+    const buffer = source.data instanceof ArrayBuffer
+      ? source.data
+      : ArrayBuffer.isView(source.data)
+        ? source.data.buffer
+        : null
+    if (!buffer) return null
+    const array = new Uint8ClampedArray(buffer)
+    const imageData = new ImageData(array, width, height)
+    ctx.putImageData(imageData, 0, 0)
+  } else {
+    return null
+  }
+  return canvas
+}
+
+const bufferGeometryFromWorkerPayload = (payload) => {
+  const geometry = new THREE.BufferGeometry()
+  if (!payload) return geometry
+  const castArray = (value) => {
+    if (value instanceof Float32Array) return value
+    if (ArrayBuffer.isView(value)) return new Float32Array(value.buffer, value.byteOffset, value.length)
+    if (value instanceof ArrayBuffer) return new Float32Array(value)
+    return new Float32Array()
+  }
+  const positions = castArray(payload.positions)
+  const normals = castArray(payload.normals)
+  const uvs = castArray(payload.uvs)
+  if (positions.length) geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  if (normals.length) geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
+  if (uvs.length) geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
+  geometry.clearGroups()
+  if (Array.isArray(payload.groups)) {
+    for (const group of payload.groups) {
+      geometry.addGroup(group.start || 0, group.count || 0, group.materialIndex || 0)
+    }
+  }
+  if (payload.boundingBox?.min && payload.boundingBox?.max) {
+    geometry.boundingBox = new THREE.Box3(
+      new THREE.Vector3().fromArray(payload.boundingBox.min),
+      new THREE.Vector3().fromArray(payload.boundingBox.max),
+    )
+  } else {
+    geometry.computeBoundingBox()
+  }
+  if (!geometry.getAttribute('normal')) {
+    geometry.computeVertexNormals()
+  }
+  return geometry
+}
+
+const buildGeometryViaWorker = (source) => {
+  const worker = ensureGeometryWorker()
+  if (!worker) return Promise.reject(new Error('geometry worker unavailable'))
+  const { width, height } = source || {}
+  const buffer = source?.data instanceof ArrayBuffer
+    ? source.data
+    : ArrayBuffer.isView(source?.data)
+      ? source.data.buffer
+      : null
+  if (!width || !height || !buffer || buffer.byteLength === 0) {
+    return Promise.reject(new Error('missing image data for geometry worker'))
+  }
+  const jobId = ++geometryWorkerSeq
+  const options = {
+    height: props.thickness,
+    solid: true,
+    offset: 3,
+    steps: 10,
+    material: 0,
+    extrudeMaterial: 2,
+  }
+  return new Promise((resolve, reject) => {
+    geometryWorkerJobs.set(jobId, { resolve, reject })
+    try {
+      worker.postMessage(
+        { id: jobId, image: { width, height, data: buffer }, options },
+        [buffer],
+      )
+      source.data = null
+    } catch (error) {
+      geometryWorkerJobs.delete(jobId)
+      reject(error)
+    }
+  })
+}
+
+const buildGeometrySynchronously = (source) => {
+  const canvas = ensureCanvasFromSource(source)
+  if (!canvas) return null
+  const geometry = new CanvasGeometry(canvas, {
+    height: props.thickness,
+    solid: true,
+    offset: 3,
+    steps: 10,
+    material: 0,
+    extrudeMaterial: 2,
+  })
+  geometry.computeBoundingBox()
+  if (!geometry.getAttribute('normal')) geometry.computeVertexNormals()
+  return geometry
+}
+
+const runGeometryBuild = async (source) => {
+  if (!source) return null
+  try {
+    const payload = await buildGeometryViaWorker(source)
+    return bufferGeometryFromWorkerPayload(payload)
+  } catch (error) {
+    console.warn('[Pcb3dPreview] geometry worker failed, using sync fallback', error)
+    const message = error?.message || ''
+    if (message.includes('geometry worker unavailable') || message.includes('OffscreenCanvas')) {
+      geometryWorkerFailed = true
+    }
+    return buildGeometrySynchronously(source)
+  }
+}
+
+// 兼容性最好的主线程 SVG -> Canvas 实现（用 <img> + drawImage）
 const loadSvgStringToCanvas = (svgString, size) => new Promise((resolve, reject) => {
   if (!svgString) {
     reject(new Error('SVG source missing'))
@@ -170,28 +384,37 @@ const loadSvgStringToCanvas = (svgString, size) => new Promise((resolve, reject)
   img.src = url
 })
 
-const rasterizeAndUpdateTextures = async (force = false) => {
-  if (!props.topSvg || !props.bottomSvg) return false
-  const targetRes = getTargetRasterRes()
-  if (!force && currentRasterRes && targetRes <= currentRasterRes * 1.15) return false
+// 包装上色/边框后返回 canvas + RGBA buffer，供纹理与 Worker 共用
+const rasterizeSvgOnMainThread = async (svgString, targetRes, { borderColor, applyBorder }) => {
+  const canvasObj = await loadSvgStringToCanvas(svgString, targetRes)
+  if (applyBorder) {
+    canvasObj.context.save()
+    canvasObj.context.fillStyle = borderColor
+    canvasObj.context.fillRect(0, Math.max(0, canvasObj.height - 1), 1, 1)
+    canvasObj.context.restore()
+  }
+  const imageData = canvasObj.context.getImageData(0, 0, canvasObj.width, canvasObj.height)
+  return {
+    canvas: canvasObj.canvas,
+    width: canvasObj.width,
+    height: canvasObj.height,
+    data: imageData.data.buffer,
+  }
+}
 
-  const [topCanvasObj, bottomCanvasObj] = await Promise.all([
-    loadSvgStringToCanvas(props.topSvg, targetRes),
-    loadSvgStringToCanvas(props.bottomSvg, targetRes),
+const rasterizeAndUpdateTextures = async (force = false) => {
+  if (!props.topSvg || !props.bottomSvg) return { updated: false }
+  const targetRes = getTargetRasterRes()
+  if (!force && currentRasterRes && targetRes <= currentRasterRes * 1.15) return { updated: false }
+
+  const [topResult, bottomResult] = await Promise.all([
+    rasterizeSvgOnMainThread(props.topSvg, targetRes, { borderColor: props.borderColor, applyBorder: true }),
+    rasterizeSvgOnMainThread(props.bottomSvg, targetRes, { borderColor: props.borderColor, applyBorder: false }),
   ])
 
-  topCanvasObj.context.save()
-  topCanvasObj.context.fillStyle = props.borderColor
-  topCanvasObj.context.fillRect(0, Math.max(0, topCanvasObj.height - 1), 1, 1)
-  topCanvasObj.context.restore()
-
   disposeTextures()
-
-  topTexture = new THREE.CanvasTexture(topCanvasObj.canvas)
-  setupTextureParams(topTexture, { repeatX: 1 })
-
-  bottomTexture = new THREE.CanvasTexture(bottomCanvasObj.canvas)
-  setupTextureParams(bottomTexture, { repeatX: -1 })
+  topTexture = createTextureFromImage(topResult.canvas, { repeatX: 1 })
+  bottomTexture = createTextureFromImage(bottomResult.canvas, { repeatX: -1 })
 
   if (!topMaterial || !bottomMaterial) {
     topMaterial = new THREE.MeshBasicMaterial({
@@ -223,36 +446,48 @@ const rasterizeAndUpdateTextures = async (force = false) => {
 
   currentRasterRes = targetRes
   requestRender()
-  return true
+  const geometrySource = {
+    width: topResult.width,
+    height: topResult.height,
+    data: topResult.data,
+    canvas: topResult.canvas,
+  }
+  return { updated: true, geometrySource }
 }
 
-const rebuildGeometry = () => {
-  if (!topTexture?.image || !scene) return
-  if (mesh) {
-    scene.remove(mesh)
-    mesh.geometry?.dispose?.()
-    mesh = null
+const rebuildGeometry = async (geometrySource = null, { onMeshReady } = {}) => {
+  if (!scene || !topMaterial || !bottomMaterial || !sideMaterial) return
+  const source = geometrySource || captureGeometrySourceFromTexture()
+  if (!source?.data) return
+  const token = ++geometryBuildToken
+  try {
+    const geometry = await runGeometryBuild(source)
+    if (!geometry) return
+    const beforeBox = geometry.boundingBox ? geometry.boundingBox.clone() : null
+    if (beforeBox) {
+      const center = new THREE.Vector3()
+      beforeBox.getCenter(center)
+      geometry.translate(-center.x, -center.y, -center.z)
+    }
+    geometry.computeBoundingBox()
+    if (token !== geometryBuildToken) {
+      geometry.dispose?.()
+      return
+    }
+    if (mesh) {
+      scene.remove(mesh)
+      mesh.geometry?.dispose?.()
+      mesh = null
+    }
+    geometryBox = geometry.boundingBox?.clone() || null
+    mesh = new THREE.Mesh(geometry, [topMaterial, bottomMaterial, sideMaterial])
+    scene.add(mesh)
+    onMeshReady?.()
+    smoothRefitToBox()
+    requestRender()
+  } catch (error) {
+    console.error('[Pcb3dPreview] rebuildGeometry failed', error)
   }
-  const geometry = new CanvasGeometry(topTexture.image, {
-    height: props.thickness,
-    solid: true,
-    offset: 3,
-    steps: 10,
-    material: 0,
-    extrudeMaterial: 2,
-  })
-  geometry.computeBoundingBox()
-  const preBox = geometry.boundingBox.clone()
-  const center = new THREE.Vector3()
-  preBox.getCenter(center)
-  geometry.translate(-center.x, -center.y, -center.z)
-  geometry.computeBoundingBox()
-  geometryBox = geometry.boundingBox.clone()
-
-  mesh = new THREE.Mesh(geometry, [topMaterial, bottomMaterial, sideMaterial])
-  scene.add(mesh)
-  smoothRefitToBox()
-  requestRender()
 }
 
 const applyBackground = () => {
@@ -360,7 +595,13 @@ const initThree = async () => {
       clearTimeout(spinTimer)
       spinTimer = window.setTimeout(() => {
         stopLoopSoon()
-        rasterizeAndUpdateTextures().then(() => requestRender())
+        rasterizeAndUpdateTextures()
+          .then((result) => {
+            if (result?.updated) return rebuildGeometry(result.geometrySource)
+            return null
+          })
+          .catch((error) => { console.error('[Pcb3dPreview] resize rasterize failed', error) })
+          .finally(() => requestRender())
       }, 180)
     })
     ro.observe(container.value)
@@ -378,6 +619,8 @@ const destroyThree = () => {
   sideMaterial?.dispose?.()
   sideMaterial = null
   renderer?.dispose?.()
+  terminateGeometryWorker()
+  terminateRasterWorker()
   if (mesh) {
     mesh.geometry?.dispose?.()
     mesh = null
@@ -406,6 +649,13 @@ const refreshPreview = async (force = false) => {
   refreshQueued = false
   refreshForce = false
   pushLoading()
+  let loadingCleared = false
+  const resolveLoading = () => {
+    if (!loadingCleared) {
+      loadingCleared = true
+      popLoading()
+    }
+  }
   try {
     if (!props.topSvg || !props.bottomSvg) {
       if (mesh && scene) {
@@ -416,15 +666,21 @@ const refreshPreview = async (force = false) => {
       geometryBox = null
       disposeTextures()
       requestRender()
+      resolveLoading()
       return
     }
-    const updated = await rasterizeAndUpdateTextures(shouldForce)
-    if (updated) rebuildGeometry()
-    else requestRender()
+    const rasterResult = await rasterizeAndUpdateTextures(shouldForce)
+    if (rasterResult?.updated) {
+      await rebuildGeometry(rasterResult.geometrySource, { onMeshReady: resolveLoading })
+    } else {
+      requestRender()
+      resolveLoading()
+    }
   } catch (error) {
     console.error('[Pcb3dPreview] rasterize failed', error)
+    resolveLoading()
   } finally {
-    popLoading()
+    resolveLoading()
   }
 }
 
@@ -456,8 +712,8 @@ watch(() => props.borderColor, async () => {
   await refreshPreview(true)
 })
 
-watch(() => props.thickness, () => {
-  rebuildGeometry()
+watch(() => props.thickness, async () => {
+  await refreshPreview(true)
 })
 
 watch(() => props.backgroundColor, () => {

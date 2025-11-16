@@ -9,7 +9,7 @@ import * as THREE from 'three';
 export class CanvasGeometry extends THREE.BufferGeometry {
   constructor(canvas, options = {}) {
     super();
-    if (!canvas || canvas.nodeName !== 'CANVAS') return;
+    if (!canvas || typeof canvas.getContext !== 'function') return;
 
     const steps = options.steps !== undefined ? (parseInt(options.steps) > 0 ? parseInt(options.steps) : 1)  : 1;
     let z = options.height !== undefined ? (options.height > 0 ? options.height:0.1) : 0.1;

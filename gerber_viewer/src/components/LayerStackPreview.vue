@@ -55,6 +55,17 @@ const props = defineProps({
 
 const emit = defineEmits(['exit-measurement', 'loading-change'])
 
+const enablePerfLogs = import.meta.env?.DEV ?? false
+const perfLabel = (phase) => `[perf][LayerStack] ${phase}`
+const startPerf = (phase) => {
+  if (!enablePerfLogs) return () => {}
+  console.time(perfLabel(phase))
+  return () => console.timeEnd(perfLabel(phase))
+}
+const logPerf = (phase, payload) => {
+  if (enablePerfLogs) console.log(perfLabel(phase), payload)
+}
+
 const compositeContainer = ref(null)
 const viewScale = ref(1)
 const viewTranslate = reactive({ x: 0, y: 0 })
@@ -121,10 +132,6 @@ const setCompositeLoading = (state) => {
 }
 
 const fmData = computed(() => unref(props.fmResult))
-
-watch(fmData, (val) => {
-  console.log('[LayerStackPreview] fmResult updated', { hasFm: Boolean(val) })
-}, { immediate: true })
 
 const getFm = () => fmData.value
 
@@ -243,7 +250,7 @@ const resetLayerDisplays = (destroy = true) => {
 
 const updateComposite = async ({ recenter = false } = {}) => {
   const updateStart = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
-  console.log('[LayerStackPreview] updateComposite triggered', {
+  logPerf('updateComposite', {
     active: props.active,
     recenter,
     layers: props.orderedLayers.length,
@@ -255,16 +262,16 @@ const updateComposite = async ({ recenter = false } = {}) => {
   const token = compositeUpdateToken
   setCompositeLoading(true)
   const fm = getFm()
-  console.time('[composite] ensurePixiApp')
+  const endEnsure = startPerf('ensurePixiApp')
   const app = await ensurePixiApp()
-  console.timeEnd('[composite] ensurePixiApp')
+  endEnsure()
   try {
     if (!app || token !== compositeUpdateToken) return
     if (!pixiRoot) return
     resizePixiToHost()
-    console.time('[composite] rebuildPixi')
+    const endRebuild = startPerf('rebuildPixi')
     if (!fm) {
-      console.timeEnd('[composite] rebuildPixi')
+      endRebuild()
       console.warn('[LayerStackPreview] skip render: fmResult missing')
       resetLayerDisplays(false)
       if (recenter) fitToContainer(true)
@@ -273,7 +280,7 @@ const updateComposite = async ({ recenter = false } = {}) => {
     }
     const viewBox = getCompositeViewBox()
     const unitsToPx = getUnitsToPx()
-    console.log('[LayerStackPreview] render context', { viewBox, unitsToPx })
+    logPerf('render-context', { viewBox, unitsToPx })
     const ctx = { viewBox, unitsToPx }
     const plotTrees = fm.plotResult?.plotTreesById ?? {}
     const stackingOrder = props.orderedLayers
@@ -322,13 +329,13 @@ const updateComposite = async ({ recenter = false } = {}) => {
       stats.removed += 1
     }
     pixiRoot.sortDirty = true
-    console.timeEnd('[composite] rebuildPixi')
+    endRebuild()
     if (recenter) fitToContainer(true)
     else applyViewTransform()
     const end = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
     const rendererInfo = app?.renderer?.info ? { ...app.renderer.info } : null
     const jsHeap = typeof performance !== 'undefined' && performance.memory ? performance.memory.usedJSHeapSize : null
-    console.log('[composite] stats', {
+    logPerf('stats', {
       token,
       durationMs: Number((end - updateStart).toFixed(2)),
       pixiChildren: pixiRoot.children.length,
@@ -498,13 +505,11 @@ const layerSignatureSource = () => {
 }
 
 watch(layerSignatureSource, () => {
-  console.log('[LayerStackPreview] orderedLayers changed')
   if (!props.active) return
   updateComposite()
 })
 
 watch(fmData, () => {
-  console.log('[LayerStackPreview] fmResult changed', { hasFm: Boolean(fmData.value) })
   if (!props.active) return
   updateComposite({ recenter: true })
 })
@@ -526,10 +531,6 @@ watch(() => props.active, async (active) => {
 })
 
 onMounted(() => {
-  console.log('[LayerStackPreview] mounted', {
-    hasFm: Boolean(getFm()),
-    layers: props.orderedLayers.length,
-  })
   nextTick(() => {
     observeContainerResize()
     resizePixiToHost()

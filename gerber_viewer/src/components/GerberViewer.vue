@@ -206,16 +206,36 @@ const viewOptions = [
   { label: '3D', value: '3d' },
 ]
 
+const enablePerfLogs = import.meta.env?.DEV ?? false
+const perfLabel = (phase) => `[perf][GerberViewer] ${phase}`
+const runPerfSync = (phase, fn) => {
+  if (!enablePerfLogs) return fn()
+  console.time(perfLabel(phase))
+  try {
+    return fn()
+  } finally {
+    console.timeEnd(perfLabel(phase))
+  }
+}
+const runPerfAsync = async (phase, fn) => {
+  if (!enablePerfLogs) return fn()
+  console.time(perfLabel(phase))
+  try {
+    return await fn()
+  } finally {
+    console.timeEnd(perfLabel(phase))
+  }
+}
+const logPerf = (phase, payload) => {
+  if (enablePerfLogs) console.log(perfLabel(phase), payload)
+}
+
 const layerPanelVisible = computed(() => activeView.value === 'layers' && isLayerPanelOpen.value)
 const topControlsOffset = computed(() => ({
   left: layerPanelVisible.value ? 'calc(20rem + 1rem)' : '1rem',
 }))
 const showLoadingOverlay = computed(() => isLayerLoading.value || isLayerRenderLoading.value || isPcb3dLoading.value)
 const loadingMessage = computed(() => '加载中')
-
-watch(fmRef, (val) => {
-  console.log('[GerberViewer] fmRef updated', { hasFm: Boolean(val) })
-})
 
 // 设置面板
 const isSettingsOpen = ref(false)
@@ -262,24 +282,22 @@ const handleUploadFile = async (file) => {
   try {
     const formData = new FormData()
     formData.append('UploadFile', file, file.name)
-    console.time('[upload] api')
-    const res = await axios.post(
-      'http://localhost:5004/api/PCBParse/Parse?Mode=0',
-      formData,
-      { headers: { 'Content-Type': 'multipart/form-data', accept: '*/*' } },
+    const res = await runPerfAsync('upload:api', () =>
+      axios.post(
+        'http://localhost:5004/api/PCBParse/Parse?Mode=0',
+        formData,
+        { headers: { 'Content-Type': 'multipart/form-data', accept: '*/*' } },
+      )
     )
-    console.timeEnd('[upload] api')
     const result = res.data.Data
     memoryLayers.value = result.Items || []
     if (typeof result.Thickness === 'number') boardThickness.value = result.Thickness
 
-    console.time('[upload] hybridPipeline')
-    const pipeline = runHybridPipeline(memoryLayers.value)
-    console.timeEnd('[upload] hybridPipeline')
-    console.time('[upload] buildOrderedLayers')
-    applyModernResult(pipeline.modern)
-    console.timeEnd('[upload] buildOrderedLayers')
-    console.log('[upload] layers ready', {
+    const pipeline = runPerfSync('upload:hybridPipeline', () =>
+      runHybridPipeline(memoryLayers.value)
+    )
+    runPerfSync('upload:buildOrderedLayers', () => applyModernResult(pipeline.modern))
+    logPerf('upload:layers-ready', {
       count: orderedLayers.length,
       boardViewBox: boardViewBox.value,
       boardWidthMm: boardWidthMm.value,
@@ -435,9 +453,9 @@ const applySettings = async () => {
     if (target) { target.type = entry.type; target.side = entry.side }
   }
   try {
-    console.time('[settings] hybridPipeline')
-    const pipeline = runHybridPipeline(list)
-    console.timeEnd('[settings] hybridPipeline')
+    const pipeline = runPerfSync('settings:hybridPipeline', () =>
+      runHybridPipeline(list)
+    )
     applyModernResult(pipeline.modern, { preserveVisuals: true })
     applyLegacyBoardRenders(pipeline.legacy)
     recenterSignal.value += 1

@@ -11,6 +11,8 @@
   "dependencies": {
     "vue": "^3.5.22",
     "@tracespace/core": "workspace:*",
+    "@tracespace/hybrid-core": "workspace:*",
+    "@tracespace/legacy-core": "workspace:*",
     "@tracespace/parser": "workspace:*",
     "@tracespace/plotter": "workspace:*",
     "@tracespace/renderer": "workspace:*",

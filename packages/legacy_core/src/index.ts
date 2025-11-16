@@ -1,16 +1,16 @@
-import { s } from 'hastscript'
+﻿import { s } from 'hastscript'
 
 import * as parser from '@tracespace/parser'
 import { UNITS as P_UNITS, COORDINATE_FORMAT as P_COORDFMT } from '@tracespace/parser'
-import * as plotter from '@tracespace/plotter'
-import * as renderer from '@tracespace/renderer'
+import * as plotter from '@tracespace/legacy-plotter'
+import * as renderer from '@tracespace/legacy-renderer'
 import { random as randomId } from '@tracespace/xml-id'
 import { SIDE_TOP, SIDE_BOTTOM } from '@tracespace/identify-layers'
 
 import type { GerberTree } from '@tracespace/parser'
-import type { ImageTree } from '@tracespace/plotter'
+import type { ImageTree } from '@tracespace/legacy-plotter'
 import type { GerberType, GerberSide } from '@tracespace/identify-layers'
-import type { SvgElement, ViewBox } from '@tracespace/renderer'
+import type { SvgElement, ViewBox } from '@tracespace/legacy-renderer'
 
 import { readFile } from './read-file'
 import { determineLayerTypes } from './determine-layer-types'
@@ -304,40 +304,16 @@ export interface ParsedMemoryLayer {
   opacity?: number
 }
 
-export interface FromMemoryLayersResult {
-  plotResult: PlotResult
-  renderLayersResult: RenderLayersResult
-  renderBoardResult: RenderBoardResult
-  compositeViewBox: ViewBox
-  compositeWidthMm: string
-  compositeHeightMm: string
-  unitMeta: {
-    units: 'mm' | 'in'
-    mmPerUnit: number
-    unitsPerMm: number
-  }
-}
-
-const timingLabelFor = (phase: string): string =>
-  `[tracespace][stack-preview] ${phase}`
-
-const measurePhase = <T>(phase: string, fn: () => T): T => {
-  const label = timingLabelFor(phase)
-  console.time(label)
-  try {
-    return fn()
-  } finally {
-    console.timeEnd(label)
-  }
-}
-
 /**
  * 从内存层列表（字符串/二进制）构建 renderLayersResult & renderBoardResult
  */
 export async function fromMemoryLayers(
   layersInput: MemoryLayerInput[],
   options: MemoryRenderOptions = {}
-): Promise<FromMemoryLayersResult> {
+): Promise<{
+  renderLayersResult: RenderLayersResult
+  renderBoardResult: RenderBoardResult
+}> {
   // 辅助将可能的二进制转换为字符串（若需要）
   const toString = (v: string | Uint8Array | ArrayBuffer): string => {
     if (typeof v === 'string') return v
@@ -383,23 +359,21 @@ export async function fromMemoryLayers(
   // 解析并构造与 read() 输出一致的数据结构
   const parsedLayers: ParsedMemoryLayer[] = []
 
-  measurePhase('parse', () => {
-    for (const layer of layersInput) {
-      const id = randomId()
-      const contents = toString(layer.gerber)
-      const parseTree = parser.parse(contents) as GerberTree
+  for (const layer of layersInput) {
+    const id = randomId()
+    const contents = toString(layer.gerber)
+    const parseTree = parser.parse(contents) as GerberTree
 
-      parsedLayers.push({
-        id,
-        filename: layer.filename,
-        type: normalizeType(layer.type),
-        side: normalizeSide(layer.side),
-        parseTree,
-        color: layer.color,
-        opacity: layer.opacity,
-      })
-    }
-  })
+    parsedLayers.push({
+      id,
+      filename: layer.filename,
+      type: normalizeType(layer.type),
+      side: normalizeSide(layer.side),
+      parseTree,
+      color: layer.color,
+      opacity: layer.opacity,
+    })
+  }
 
   return fromParsedLayers(parsedLayers, options)
 }
@@ -407,7 +381,10 @@ export async function fromMemoryLayers(
 export function fromParsedLayers(
   parsedLayers: ParsedMemoryLayer[],
   options: MemoryRenderOptions = {}
-): FromMemoryLayersResult {
+): {
+  renderLayersResult: RenderLayersResult
+  renderBoardResult: RenderBoardResult
+} {
   const layers: ReadResult['layers'] = parsedLayers.map((p) => ({
     id: p.id,
     filename: p.filename,
@@ -444,12 +421,8 @@ export function fromParsedLayers(
   }
 
   // === 绘图：生成 plotTrees 并自定义闭合容差 ===
-  const plotTreesById: PlotResult['plotTreesById'] = measurePhase(
-    'plot',
-    () =>
-      Object.fromEntries(
-        layers.map(l => [l.id, plotter.plot(parseTreesById[l.id])])
-      )
+  const plotTreesById: PlotResult['plotTreesById'] = Object.fromEntries(
+    layers.map(l => [l.id, plotter.plot(parseTreesById[l.id])])
   )
 
   // 从首个图确定文件单位（'mm' 或 'in'）
@@ -463,11 +436,7 @@ export function fromParsedLayers(
     ? mmToUnits(options.maxOutlineGapMm)
     : (fileUnits === 'mm' ? mmToUnits(0.5) : 0.02)
 
-  const boardShape = measurePhase(
-    'board-shape',
-    () => plotBoardShape(layers, plotTreesById, maxGapUnits)
-  )
-  const plotResult: PlotResult = { layers, plotTreesById, boardShape }
+  const boardShape = plotBoardShape(layers, plotTreesById, maxGapUnits)
   // Composite viewBox across all plotted layers (no board clipping)
   const allSize = plotter.BoundingBox.sum(
     Object.values(plotTreesById).map(t => t.size)
@@ -476,20 +445,11 @@ export function fromParsedLayers(
   const boardShapeRender = renderBoardShape(boardShape)
 
   // === 分层渲染：强制使用相同 viewBox ===
-  const rendersById: RenderLayersResult['rendersById'] = measurePhase(
-    'render-layers',
-    () => {
-      const next: RenderLayersResult['rendersById'] = {}
-      for (const {id} of layers) {
-        const svg = renderer.render(
-          plotTreesById[id],
-          boardShapeRender.viewBox
-        )
-        next[id] = svg
-      }
-      return next
-    }
-  )
+  const rendersById: RenderLayersResult['rendersById'] = {}
+  for (const {id} of layers) {
+    const svg = renderer.render(plotTreesById[id], boardShapeRender.viewBox)
+    rendersById[id] = svg
+  }
 
   let renderLayersResult: RenderLayersResult = {
     layers,
@@ -590,20 +550,6 @@ export function fromParsedLayers(
   const compositeWidthMm = `${unitsToMm(compositeViewBox[2])}mm`
   const compositeHeightMm = `${unitsToMm(compositeViewBox[3])}mm`
 
-  const mmPerUnit = unitsToMm(1) || 1
-  const unitsPerMm = 1 / mmPerUnit
-
-  return {
-    plotResult,
-    renderLayersResult,
-    renderBoardResult,
-    compositeViewBox,
-    compositeWidthMm,
-    compositeHeightMm,
-    unitMeta: {
-      units: fileUnits,
-      mmPerUnit,
-      unitsPerMm,
-    },
-  }
+  return { renderLayersResult, renderBoardResult, compositeViewBox, compositeWidthMm, compositeHeightMm }
 }
+

@@ -1,0 +1,47 @@
+{
+  "name": "@tracespace/hybrid-core",
+  "publishConfig": {
+    "access": "public"
+  },
+  "version": "0.0.0",
+  "description": "Bridge modern tracespace pipeline with the legacy renderer while reusing parsed Gerber data.",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    "types": "./lib/index.d.ts",
+    "source": "./src/index.ts",
+    "import": "./dist/tracespace-hybrid-core.js",
+    "require": "./dist/tracespace-hybrid-core.umd.cjs"
+  },
+  "files": [
+    "dist",
+    "lib",
+    "src"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tracespace/tracespace.git",
+    "directory": "packages/hybrid-core"
+  },
+  "scripts": {
+    "build": "vite build"
+  },
+  "keywords": [
+    "pcb",
+    "gerber",
+    "tracespace",
+    "legacy"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@tracespace/core": "workspace:*",
+    "@tracespace/legacy-core": "workspace:*",
+    "@tracespace/parser": "workspace:*",
+    "@tracespace/xml-id": "workspace:*",
+    "@tracespace/identify-layers": "workspace:*"
+  },
+  "devDependencies": {
+    "vite-plugin-dts": "^4.0.4"
+  }
+}

@@ -170,8 +170,8 @@
  */
 import { ref, reactive, nextTick, watch, computed } from 'vue'
 import axios from 'axios'
-import { fromMemoryLayers } from '@tracespace/core'
-import { fromMemoryLayers as legacyFromMemoryLayers, stringifySvg as legacyStringifySvg } from '../libs/tracespace_svg/tracespace-core'
+import { runHybridPipeline } from '@tracespace/hybrid-core'
+import { stringifySvg as legacyStringifySvg } from '@tracespace/legacy-core'
 import UploadPanel from './UploadPanel.vue'
 import LayerStackPreview from './LayerStackPreview.vue'
 import Pcb3dPreview from './Pcb3dPreview.vue'
@@ -273,35 +273,11 @@ const handleUploadFile = async (file) => {
     memoryLayers.value = result.Items || []
     if (typeof result.Thickness === 'number') boardThickness.value = result.Thickness
 
-    const legacyBoardPromise = (async () => {
-      console.time('[upload] legacyFromMemoryLayers')
-      try {
-        return await refreshLegacyBoardRenders(memoryLayers.value)
-      } finally {
-        console.timeEnd('[upload] legacyFromMemoryLayers')
-      }
-    })()
-
-    console.time('[upload] fromMemoryLayers')
-    const fm = await fromMemoryLayers(memoryLayers.value)
-    console.timeEnd('[upload] fromMemoryLayers')
-    fmRef.value = fm
-    boardViewBox.value = fm.renderLayersResult.boardShapeRender.viewBox
+    console.time('[upload] hybridPipeline')
+    const pipeline = runHybridPipeline(memoryLayers.value)
+    console.timeEnd('[upload] hybridPipeline')
     console.time('[upload] buildOrderedLayers')
-    orderedLayers.splice(0)
-    for (const layer of fm.renderLayersResult.layers) {
-      orderedLayers.push({
-        id: layer.id,
-        side: layer.side,
-        type: layer.type,
-        weight: orderLayerWeight(layer.side, layer.type),
-        color: randomHexColor(),
-        visible: true,
-        filename: layer.filename,
-        opacity: typeof layer.opacity === 'number' ? layer.opacity : 1,
-      })
-    }
-    orderedLayers.sort((a, b) => a.weight - b.weight)
+    applyModernResult(pipeline.modern)
     console.timeEnd('[upload] buildOrderedLayers')
     console.log('[upload] layers ready', {
       count: orderedLayers.length,
@@ -311,7 +287,7 @@ const handleUploadFile = async (file) => {
     })
     currentStatusIndex.value = 1
     isLayerPanelOpen.value = false
-    await legacyBoardPromise
+    applyLegacyBoardRenders(pipeline.legacy)
     recenterSignal.value += 1
   } catch (error) {
     console.error('[GerberViewer] handleUploadFile failed', error)
@@ -333,35 +309,6 @@ const updateBoardDimensionsFromBase = () => {
   const heightAttr = baseTopEl?.properties?.height ?? baseBottomEl?.properties?.height
   boardWidthMm.value = parseDim(widthAttr, fallbackWidth)
   boardHeightMm.value = parseDim(heightAttr, fallbackHeight)
-}
-
-const refreshLegacyBoardRenders = async (layers) => {
-  const token = ++legacyBoardUpdateToken
-  if (!Array.isArray(layers) || layers.length === 0) {
-    baseTopEl = null
-    baseBottomEl = null
-    topSvg.value = ''
-    bottomSvg.value = ''
-    boardWidthMm.value = 0
-    boardHeightMm.value = 0
-    return
-  }
-  try {
-    const legacyResult = await legacyFromMemoryLayers(layers)
-    if (token !== legacyBoardUpdateToken) return
-    const { renderBoardResult, renderLayersResult } = legacyResult || {}
-    baseTopEl = renderBoardResult?.top ?? null
-    baseBottomEl = renderBoardResult?.bottom ?? null
-    if (renderLayersResult?.boardShapeRender?.viewBox) {
-      boardViewBox.value = renderLayersResult.boardShapeRender.viewBox
-    }
-    updateBoardDimensionsFromBase()
-    if (baseTopEl) topSvg.value = legacyStringifySvg(baseTopEl)
-    if (baseBottomEl) bottomSvg.value = legacyStringifySvg(baseBottomEl)
-  } catch (error) {
-    if (token !== legacyBoardUpdateToken) return
-    console.error('[GerberViewer] legacy board render failed', error)
-  }
 }
 
 // 工具
@@ -406,6 +353,62 @@ const coerceSideForType = (type, side) => {
   return opts[0]
 }
 
+const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
+  if (!fm) return
+  fmRef.value = fm
+  boardViewBox.value = fm.renderLayersResult.boardShapeRender.viewBox
+  const keep = preserveVisuals
+    ? new Map(orderedLayers.map((layer) => [layer.filename, { color: layer.color, visible: layer.visible, opacity: layer.opacity }]))
+    : null
+  orderedLayers.splice(0)
+  for (const layer of fm.renderLayersResult.layers) {
+    const retained = keep?.get(layer.filename)
+    const color = retained?.color ?? randomHexColor()
+    const visible = retained?.visible ?? true
+    const opacity = typeof retained?.opacity === 'number' ? retained.opacity : 1
+    orderedLayers.push({
+      id: layer.id,
+      side: layer.side,
+      type: layer.type,
+      weight: orderLayerWeight(layer.side, layer.type),
+      color,
+      visible,
+      opacity,
+      filename: layer.filename,
+    })
+  }
+  orderedLayers.sort((a, b) => a.weight - b.weight)
+}
+
+const commitLegacyBoardResult = (legacyResult, token) => {
+  if (token !== legacyBoardUpdateToken) return
+  if (!legacyResult) {
+    baseTopEl = null
+    baseBottomEl = null
+    topSvg.value = ''
+    bottomSvg.value = ''
+    boardWidthMm.value = 0
+    boardHeightMm.value = 0
+    return
+  }
+  const { renderBoardResult, renderLayersResult } = legacyResult || {}
+  baseTopEl = renderBoardResult?.top ?? null
+  baseBottomEl = renderBoardResult?.bottom ?? null
+  if (renderLayersResult?.boardShapeRender?.viewBox) {
+    boardViewBox.value = renderLayersResult.boardShapeRender.viewBox
+  }
+  updateBoardDimensionsFromBase()
+  if (baseTopEl) topSvg.value = legacyStringifySvg(baseTopEl)
+  else topSvg.value = ''
+  if (baseBottomEl) bottomSvg.value = legacyStringifySvg(baseBottomEl)
+  else bottomSvg.value = ''
+}
+
+const applyLegacyBoardRenders = (legacyResult) => {
+  const token = ++legacyBoardUpdateToken
+  commitLegacyBoardResult(legacyResult, token)
+}
+
 const applySettings = async () => {
   isLayerLoading.value = true
   const list = (memoryLayers.value || []).map((x) => ({ ...x }))
@@ -431,28 +434,12 @@ const applySettings = async () => {
     const target = list.find((it) => it.filename === entry.filename)
     if (target) { target.type = entry.type; target.side = entry.side }
   }
-  const legacyBoardPromise = refreshLegacyBoardRenders(list)
   try {
-    const fm = await fromMemoryLayers(list)
-    fmRef.value = fm
-    boardViewBox.value = fm.renderLayersResult.boardShapeRender.viewBox
-    const keep = new Map(orderedLayers.map((layer) => [layer.filename, { color: layer.color, visible: layer.visible, opacity: layer.opacity }]))
-    orderedLayers.splice(0)
-    for (const layer of fm.renderLayersResult.layers) {
-      const kv = keep.get(layer.filename) || { color: randomHexColor(), visible: true, opacity: 1 }
-      orderedLayers.push({
-        id: layer.id,
-        side: layer.side,
-        type: layer.type,
-        weight: orderLayerWeight(layer.side, layer.type),
-        color: kv.color,
-        visible: kv.visible,
-        opacity: typeof kv.opacity === 'number' ? kv.opacity : 1,
-        filename: layer.filename,
-      })
-    }
-    orderedLayers.sort((a, b) => a.weight - b.weight)
-    await legacyBoardPromise
+    console.time('[settings] hybridPipeline')
+    const pipeline = runHybridPipeline(list)
+    console.timeEnd('[settings] hybridPipeline')
+    applyModernResult(pipeline.modern, { preserveVisuals: true })
+    applyLegacyBoardRenders(pipeline.legacy)
     recenterSignal.value += 1
     memoryLayers.value = list
     isSettingsOpen.value = false

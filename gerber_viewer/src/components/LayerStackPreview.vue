@@ -17,12 +17,12 @@
       </div>
       <div
         v-if="measurementRect"
-        class="absolute border border-cyan-400 bg-cyan-400/10"
+        class="absolute rounded-sm"
         :style="measurementRect.style"
       ></div>
       <div
         v-if="measurementValues && measurementRect"
-        class="absolute text-[15px] font-semibold text-white bg-[#04111f]/95 px-4 py-3 border border-cyan-300 shadow-[0_0_16px_rgba(0,255,255,0.8)] tracking-wide"
+        class="absolute text-[15px] font-semibold text-white bg-[#04111f]/95 px-4 py-3 border border-cyan-300 shadow-[0_0_16px_rgba(0,255,255,0.8)] tracking-wide text-right"
         :style="measurementLabelStyle"
       >
         DX: {{ measurementValues.dx.toFixed(2) }}mm<br />
@@ -76,6 +76,9 @@ const crosshair = reactive({ x: 0, y: 0, visible: false })
 
 const PIXELS_PER_MM = 96 / 25.4
 const measurementOverlayVisible = computed(() => props.active && props.measurementActive)
+const measurementRectFill = 'rgba(63, 211, 255, 0.22)'
+const measurementRectBorder = '#3fd3ff'
+
 const measurementRect = computed(() => {
   if (!measurementOverlayVisible.value || !measurementStart.value || !measurementEnd.value) return null
   const left = Math.min(measurementStart.value.x, measurementEnd.value.x)
@@ -88,6 +91,10 @@ const measurementRect = computed(() => {
       top: `${top}px`,
       width: `${width}px`,
       height: `${height}px`,
+      borderWidth: '2px',
+      borderStyle: 'dashed',
+      borderColor: measurementRectBorder,
+      backgroundColor: measurementRectFill,
     },
     left,
     top,
@@ -140,6 +147,25 @@ const getUnitsToPx = () => {
   const mmPerUnit = getFm()?.unitMeta?.mmPerUnit ?? 1
   return mmPerUnit * PIXELS_PER_MM
 }
+
+const compositeSizeMm = computed(() => {
+  const viewBox = getCompositeViewBox()
+  const mmPerUnit = getFm()?.unitMeta?.mmPerUnit ?? 1
+  const widthUnits = Array.isArray(viewBox) ? Number(viewBox[2]) || 0 : 0
+  const heightUnits = Array.isArray(viewBox) ? Number(viewBox[3]) || 0 : 0
+  if (widthUnits > 0 && heightUnits > 0) {
+    return {
+      width: widthUnits * mmPerUnit,
+      height: heightUnits * mmPerUnit,
+    }
+  }
+  const fallbackWidth = typeof props.boardWidthMm === 'number' ? props.boardWidthMm : 0
+  const fallbackHeight = typeof props.boardHeightMm === 'number' ? props.boardHeightMm : 0
+  return {
+    width: fallbackWidth,
+    height: fallbackHeight,
+  }
+})
 
 const applyViewTransform = () => {
   const app = pixiApp.value
@@ -356,9 +382,10 @@ const fitToContainer = (center = false) => {
   const el = getActiveContainer()
   if (!el) return
   const rect = el.getBoundingClientRect()
-  if (rect.width > 0 && rect.height > 0 && props.boardWidthMm > 0 && props.boardHeightMm > 0) {
-    const contentW = props.boardWidthMm * PIXELS_PER_MM
-    const contentH = props.boardHeightMm * PIXELS_PER_MM
+  const { width: boardWidthMm, height: boardHeightMm } = compositeSizeMm.value
+  if (rect.width > 0 && rect.height > 0 && boardWidthMm > 0 && boardHeightMm > 0) {
+    const contentW = boardWidthMm * PIXELS_PER_MM
+    const contentH = boardHeightMm * PIXELS_PER_MM
     const margin = 0.3
     const scaleX = (rect.width * (1 - margin)) / contentW
     const scaleY = (rect.height * (1 - margin)) / contentH
@@ -512,6 +539,11 @@ watch(layerSignatureSource, () => {
 watch(fmData, () => {
   if (!props.active) return
   updateComposite({ recenter: true })
+})
+
+watch(compositeSizeMm, () => {
+  if (!props.active) return
+  fitToContainer(true)
 })
 
 watch(() => props.recenterSignal, () => {

@@ -209,6 +209,19 @@ importers:
         specifier: ^7.1.7
         version: 7.1.12(@types/node@18.19.130)(jiti@2.6.1)(lightningcss@1.30.2)
 
+  hdi_calculator:
+    dependencies:
+      vue:
+        specifier: ^3.5.22
+        version: 3.5.22(typescript@5.8.2)
+    devDependencies:
+      '@vitejs/plugin-vue':
+        specifier: ^6.0.1
+        version: 6.0.1(vite@7.1.12(@types/node@18.19.130)(jiti@2.6.1)(lightningcss@1.30.2))(vue@3.5.22(typescript@5.8.2))
+      vite:
+        specifier: ^7.1.7
+        version: 7.1.12(@types/node@18.19.130)(jiti@2.6.1)(lightningcss@1.30.2)
+
   packages/cli:
     dependencies:
       '@tracespace/core':

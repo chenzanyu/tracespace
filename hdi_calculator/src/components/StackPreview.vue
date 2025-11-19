@@ -2,180 +2,209 @@
 import { computed } from 'vue'
 
 const props = defineProps({
-  visualLayers: {
-    type: Array,
-    required: true,
-  },
-  holes: {
-    type: Array,
-    required: true,
-  },
+  visualLayers: { type: Array, required: true },
+  holes: { type: Array, required: true },
+  activeHoleId: { type: Number, default: null },
+  colors: { 
+    type: Object, 
+    default: () => ({ copper: '#d68c04', pp: '#ffffb8', core: '#e0c855', drill: '#d68c04' }) 
+  }
 })
 
-const COPPER_HEIGHT = 16
-const DIELECTRIC_HEIGHT = 8
-const GAP = 5
-const VIEW_WIDTH = 320
+// --- 尺寸动态计算 ---
+// 当层数大于 8 层时，启用紧凑模式
+const isCompact = computed(() => props.visualLayers.length > 8)
 
-const layoutLayers = computed(() => {
-  let cursor = 6
-  return props.visualLayers.map(layer => {
-    const height = layer.type === 'copper' ? COPPER_HEIGHT : DIELECTRIC_HEIGHT
-    const positioned = { ...layer, y: cursor, height }
-    cursor += height + GAP
-    return positioned
-  })
-})
+// 根据是否紧凑模式返回高度
+const H_COPPER = computed(() => isCompact.value ? 12 : 16)
+const H_DIELECTRIC = computed(() => isCompact.value ? 28 : 40)
 
-const totalHeight = computed(() => {
-  if (layoutLayers.value.length === 0) return 140
-  const last = layoutLayers.value[layoutLayers.value.length - 1]
-  return last.y + last.height + GAP
-})
+const LAYER_WIDTH = 360    
+const PADDING_TOP = 0 // 设为0，让外部 padding 控制对齐
+const PADDING_LEFT = 10
+const TEXT_AREA_WIDTH = 160
 
-const copperCenters = computed(() => {
-  const centers = new Map()
-  layoutLayers.value.forEach(layer => {
-    if (layer.type === 'copper' && typeof layer.copperIndex === 'number') {
-      centers.set(layer.copperIndex, layer.y + layer.height / 2)
+// 1. 计算层坐标
+const renderedLayers = computed(() => {
+  let currentY = PADDING_TOP
+  return props.visualLayers.map((layer) => {
+    const height = layer.type === 'copper' ? H_COPPER.value : H_DIELECTRIC.value
+    
+    let fill = ''
+    if (layer.type === 'copper') fill = props.colors.copper
+    else fill = layer.material === 'Core' ? props.colors.core : props.colors.pp
+
+    const obj = {
+      ...layer,
+      y: currentY,
+      height,
+      bottomY: currentY + height,
+      midY: currentY + height / 2,
+      fill
     }
+    currentY += height
+    return obj
   })
-  return centers
 })
 
-const viaShapes = computed(() =>
-  props.holes
-    .map(hole => {
-      const startY = copperCenters.value.get(hole.startLayer)
-      const endY = copperCenters.value.get(hole.endLayer)
-      if (startY === undefined || endY === undefined) return null
-      const top = Math.min(startY, endY)
-      const bottom = Math.max(startY, endY)
-      const dynamicWidth = Math.max(7, Math.abs(startY - endY) / 6 + 5)
-      const centerX = 115
-      const topWidth = hole.type === 'through' ? dynamicWidth : dynamicWidth - 2
-      const bottomWidth = dynamicWidth + 4
-      const path = [
-        `M ${centerX - topWidth} ${top - 4}`,
-        `L ${centerX + topWidth} ${top - 4}`,
-        `L ${centerX + bottomWidth} ${bottom + 4}`,
-        `L ${centerX - bottomWidth} ${bottom + 4}`,
-        'Z',
-      ].join(' ')
-      return {
+// 2. SVG 尺寸
+const viewBoxWidth = computed(() => PADDING_LEFT + LAYER_WIDTH + TEXT_AREA_WIDTH)
+const viewBoxHeight = computed(() => {
+  const last = renderedLayers.value[renderedLayers.value.length - 1]
+  return last ? last.bottomY + 10 : 300
+})
+
+// 3. 钻孔渲染
+const renderedVias = computed(() => {
+  const groups = [] 
+  const processedIds = new Set()
+  const sortedHoles = [...props.holes].sort((a, b) => a.startLayer - b.startLayer)
+
+  sortedHoles.forEach(hole => {
+    if (processedIds.has(hole.id)) return
+    const group = [hole]
+    processedIds.add(hole.id)
+    let currentEnd = hole.endLayer
+    let found = true
+    while(found) {
+      const nextHole = sortedHoles.find(h => !processedIds.has(h.id) && h.startLayer === currentEnd && h.stacked)
+      if (nextHole) { group.push(nextHole); processedIds.add(nextHole.id); currentEnd = nextHole.endLayer }
+      else { found = false }
+    }
+    groups.push(group)
+  })
+
+  const vias = []
+  const contentCenterX = PADDING_LEFT + (LAYER_WIDTH / 2)
+  // 紧凑模式下稍微减小孔间距
+  const stepX = isCompact.value ? 30 : 36 
+  const startX = contentCenterX - ((groups.length - 1) * stepX) / 2
+
+  groups.forEach((group, groupIndex) => {
+    const xCenter = startX + groupIndex * stepX
+    
+    group.forEach(hole => {
+      const startObj = renderedLayers.value.find(l => l.copperIndex === hole.startLayer)
+      const endObj = renderedLayers.value.find(l => l.copperIndex === hole.endLayer)
+      if (!startObj || !endObj) return
+
+      const yTop = Math.min(startObj.y, endObj.y)
+      const yBottom = Math.max(startObj.bottomY, endObj.bottomY)
+
+      vias.push({
         id: hole.id,
-        path,
-        type: hole.type,
-        label: hole.name,
-        labelY: (top + bottom) / 2,
-      }
+        x: xCenter - 10, 
+        y: yTop,
+        width: 20,       
+        height: yBottom - yTop,
+        isActive: props.activeHoleId === hole.id,
+        label: hole.type === 'laser' ? 'L' : 'M',
+        fill: props.colors.drill 
+      })
     })
-    .filter(Boolean)
-)
+  })
+  return vias
+})
 </script>
 
 <template>
-  <div class="stack-preview">
-    <svg
-      class="stack-preview__svg"
-      :viewBox="`0 0 ${VIEW_WIDTH} ${totalHeight}`"
-      role="img"
-      aria-label="HDI layer preview"
-    >
-      <g v-for="layer in layoutLayers" :key="layer.id">
-        <rect
-          class="stack-preview__layer"
-          :class="'stack-preview__layer--' + layer.type"
-          x="20"
-          :y="layer.y"
-          width="150"
-          :height="layer.height"
-          rx="4"
-          ry="4"
-        />
-        <text
-          class="stack-preview__label"
-          :x="190"
-          :y="layer.y + layer.height / 2 + 4"
-        >
-          {{ layer.label }}
-        </text>
-      </g>
+  <svg 
+    :width="viewBoxWidth"
+    :height="viewBoxHeight"
+    :viewBox="`0 0 ${viewBoxWidth} ${viewBoxHeight}`" 
+    class="stackup-svg"
+  >
+    <!-- 1. 绘制层板 -->
+    <g v-for="layer in renderedLayers" :key="layer.id">
+      <rect
+        :x="PADDING_LEFT"
+        :y="layer.y"
+        :width="LAYER_WIDTH"
+        :height="layer.height"
+        :fill="layer.fill"
+        stroke="none"
+      />
+      
+      <g class="labels" transform="translate(8, 0)">
+        <text 
+          v-if="layer.type === 'copper'"
+          :x="PADDING_LEFT + LAYER_WIDTH" 
+          :y="layer.midY" 
+          dy="0.35em" 
+          class="label-copper"
+        >{{ layer.label }}</text>
 
-      <g v-for="via in viaShapes" :key="via.id">
-        <path
-          class="stack-preview__via"
-          :class="'stack-preview__via--' + via.type"
-          :d="via.path"
-        />
-        <text class="stack-preview__via-label" x="240" :y="via.labelY + 4">
-          {{ via.label }}
-        </text>
+        <text 
+          v-if="layer.type === 'dielectric'"
+          :x="PADDING_LEFT + LAYER_WIDTH" 
+          :y="layer.midY" 
+          dy="0.32em" 
+          class="label-material"
+          :class="layer.material"
+        >{{ layer.material }}</text>
       </g>
-    </svg>
-  </div>
+    </g>
+
+    <!-- 2. 绘制钻孔 -->
+    <g v-for="via in renderedVias" :key="via.id">
+      <rect
+        :x="via.x"
+        :y="via.y"
+        :width="via.width"
+        :height="via.height"
+        class="via-shape"
+        :class="{ active: via.isActive }"
+        :fill="via.fill"
+      />
+      <text
+        :x="via.x + via.width/2"
+        :y="via.y + via.height/2"
+        class="via-text"
+        dy="0.35em"
+      >
+        {{ via.label }}
+      </text>
+    </g>
+  </svg>
 </template>
 
 <style scoped>
-.stack-preview {
-  border-radius: 16px;
-  background: linear-gradient(135deg, #fff, #fdf2f8);
-  box-shadow: 0 20px 45px rgb(15 23 42 / 8%);
-  padding: 1.5rem;
+.stackup-svg {
+  display: block;
+  flex-shrink: 0; 
 }
 
-.stack-preview__svg {
-  width: 100%;
-  height: auto;
+.label-copper {
+  font-size: 15px; 
+  font-weight: 700; 
+  fill: #000000; 
+  font-family: sans-serif;
 }
 
-.stack-preview__layer {
-  stroke: rgb(100 116 139 / 30%);
-  stroke-width: 1;
+.label-material {
+  font-size: 13px; 
+  font-family: monospace;
+  font-weight: 600;
+}
+.label-material.Core { fill: #a08616; }
+.label-material.PP { fill: #afa309; }
+
+.via-shape {
+  stroke: #ffffff;
+  stroke-width: 1px;
+  transition: all 0.1s;
+}
+.via-shape.active {
+  fill: #dc2626 !important;
+  stroke: #fee2e2;
 }
 
-.stack-preview__layer--copper {
-  fill: #f97316;
-}
-
-.stack-preview__layer--dielectric {
-  fill: #fde047;
-}
-
-.stack-preview__label {
-  font-size: 0.82rem;
-  fill: #475569;
-}
-
-.stack-preview__via {
-  fill: #92400e;
-  opacity: 0.85;
-  stroke: #78350f;
-  stroke-width: 1;
-}
-
-.stack-preview__via--microvia,
-.stack-preview__via--stacked {
-  fill: #b45309;
-}
-
-.stack-preview__via--blind {
-  fill: #0ea5e9;
-  stroke: #0369a1;
-}
-
-.stack-preview__via--buried {
-  fill: #8b5cf6;
-  stroke: #6d28d9;
-}
-
-.stack-preview__via--through {
-  fill: #57534e;
-  stroke: #44403c;
-}
-
-.stack-preview__via-label {
-  font-size: 0.76rem;
-  fill: #1f2937;
+.via-text {
+  font-size: 11px; 
+  fill: white;
+  text-anchor: middle;
+  font-family: sans-serif;
+  font-weight: 700;
+  pointer-events: none;
 }
 </style>

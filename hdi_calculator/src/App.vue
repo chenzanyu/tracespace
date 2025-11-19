@@ -1,413 +1,341 @@
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import StackPreview from './components/StackPreview.vue'
 
-const MAX_LAYERS = 20
-const MIN_LAYERS = 4
+// --- 配置常量 ---
+const ALLOWED_LAYERS = [4, 6, 8, 10, 12]
 
-const defaultStacks = [
-  { name: '4L 原生 HDI (1+N+1)', layers: 6 },
-  { name: '6L 两阶 (2+N+2)', layers: 8 },
-  { name: '8L 三阶 (3+N+3)', layers: 10 },
-]
+// --- 显式颜色配置 ---
+const VIEW_COLORS = {
+  copper: '#d68c04',   // 铜层
+  pp: '#ffffb8',       // PP
+  core: '#e0c855',     // Core
+  drill: '#d68c04',    // 钻孔
+}
 
+// --- 状态管理 ---
 const layerForm = reactive({
-  totalLayers: 8,
-  prepregCount: 3,
-  dielectricType: 'FR-4',
+  totalLayers: 6, 
 })
 
 const holeForm = reactive({
-  name: 'Laser 1-2',
   startLayer: 1,
   endLayer: 2,
-  type: 'microvia',
-  stacked: true,
+  type: 'laser',
+  stacked: false,
 })
 
-let holeId = 1
+const activeHoleId = ref(null)
+const errorMessage = ref('')
+let nextHoleId = 1
+
+// 初始数据
 const holes = ref([
-  {
-    id: holeId++,
-    name: 'Laser 1-2',
-    type: 'microvia',
-    startLayer: 1,
-    endLayer: 2,
-    stacked: true,
-  },
-  {
-    id: holeId++,
-    name: 'Buried 3-6',
-    type: 'buried',
-    startLayer: 3,
-    endLayer: 6,
-    stacked: false,
-  },
+  { id: nextHoleId++, type: 'laser', startLayer: 1, endLayer: 2, stacked: true },
+  { id: nextHoleId++, type: 'mechanical', startLayer: 2, endLayer: 5, stacked: false },
 ])
 
-const copperLayers = computed(() =>
-  Array.from({ length: layerForm.totalLayers }, (_, index) => {
-    if (index === 0) return 'Top Copper'
-    if (index === layerForm.totalLayers - 1) return 'Bottom Copper'
-    return `Inner ${index}`
+// --- 核心算法：HDI 阶数计算 ---
+const hdiAnalysis = computed(() => {
+  const lasers = holes.value.filter(h => h.type === 'laser')
+  
+  // 1. 构建邻接表
+  const adj = new Map()
+  lasers.forEach(h => {
+    if (!adj.has(h.startLayer)) adj.set(h.startLayer, [])
+    if (!adj.has(h.endLayer)) adj.set(h.endLayer, [])
+    adj.get(h.startLayer).push(h.endLayer)
+    adj.get(h.endLayer).push(h.startLayer)
   })
-)
 
-const visualLayers = computed(() => {
-  const visuals = []
-  copperLayers.value.forEach((layerName, index) => {
-    visuals.push({
-      id: `${layerName}-copper`,
-      label: layerName,
-      type: 'copper',
-      copperIndex: index + 1,
+  // 2. DFS 寻找最长链路 (阶数)
+  const getDepth = (current, visitedEdges) => {
+    let maxD = 0
+    const neighbors = adj.get(current) || []
+    neighbors.forEach(next => {
+      const edgeId = current < next ? `${current}-${next}` : `${next}-${current}`
+      if (!visitedEdges.has(edgeId)) {
+        visitedEdges.add(edgeId)
+        maxD = Math.max(maxD, 1 + getDepth(next, visitedEdges))
+        visitedEdges.delete(edgeId)
+      }
     })
-    if (index < copperLayers.value.length - 1) {
-      visuals.push({
-        id: `${layerName}-dielectric`,
-        label: index % 2 === 0 ? 'PP' : 'Core',
+    return maxD
+  }
+
+  let maxChainLength = 0
+  for (const [startLayer] of adj) {
+    maxChainLength = Math.max(maxChainLength, getDepth(startLayer, new Set()))
+  }
+
+  // 3. 生成描述文本
+  let title = ''
+  let sub = ''
+
+  if (maxChainLength === 0) {
+    title = '通孔板 / 多层板'
+    sub = 'Standard Through-Hole'
+  } else {
+    // 标题
+    if (maxChainLength === 1) title = '一阶 HDI'
+    else if (maxChainLength === 2) title = '二阶 HDI'
+    else if (maxChainLength >= 3) title = `${maxChainLength}阶 HDI`
+    
+    // 描述改为 X+N+X 格式
+    // 这里假设对称结构，直接用 maxChainLength 作为阶数
+    sub = `${maxChainLength} + N + ${maxChainLength}`
+  }
+
+  return { title, sub }
+})
+
+// --- 视图层数据生成 ---
+const visualLayers = computed(() => {
+  const arr = []
+  const total = layerForm.totalLayers
+  for (let i = 1; i <= total; i++) {
+    arr.push({
+      id: `cu-${i}`,
+      label: i === 1 ? 'Top' : (i === total ? 'Bot' : `L${i}`),
+      type: 'copper',
+      copperIndex: i
+    })
+    if (i < total) {
+      const isCore = (i % 2 === 0) 
+      arr.push({
+        id: `d-${i}`,
+        label: '',
         type: 'dielectric',
+        material: isCore ? 'Core' : 'PP'
       })
     }
-  })
-  return visuals
+  }
+  return arr
 })
 
+// --- 交互与校验 ---
 const addHole = () => {
-  if (holeForm.startLayer >= holeForm.endLayer) return
-  holes.value.push({
-    id: holeId++,
-    name: holeForm.name,
-    type: holeForm.type,
-    startLayer: holeForm.startLayer,
-    endLayer: holeForm.endLayer,
-    stacked: holeForm.stacked,
+  errorMessage.value = ''
+  const { startLayer, endLayer, type, stacked } = holeForm
+  const total = layerForm.totalLayers
+
+  if (!startLayer || !endLayer) { errorMessage.value = '请输入层号'; return }
+  if (startLayer <= 0 || endLayer <= 0) { errorMessage.value = '层号需 > 0'; return }
+  if (startLayer > total || endLayer > total) { errorMessage.value = `层号不能 > ${total}`; return }
+  if (startLayer === endLayer) { errorMessage.value = '起止层不能相同'; return }
+
+  if (type === 'laser') {
+    if (Math.abs(startLayer - endLayer) !== 1) {
+      errorMessage.value = '激光孔只能连接相邻层 (如 L1-L2)'
+      return
+    }
+  }
+  
+  holes.value.push({ 
+    id: nextHoleId++, 
+    type, 
+    startLayer, 
+    endLayer, 
+    stacked 
   })
 }
 
-const removeHole = id => {
-  holes.value = holes.value.filter(hole => hole.id !== id)
+const removeHole = (id) => {
+  holes.value = holes.value.filter(h => h.id !== id)
 }
 
-const resetHoleForm = () => {
-  holeForm.name = 'Laser 1-2'
-  holeForm.startLayer = 1
-  holeForm.endLayer = 2
-  holeForm.type = 'microvia'
-  holeForm.stacked = true
+const clearAllHoles = () => {
+  holes.value = []
+  errorMessage.value = ''
 }
 
-const hdiLevel = computed(() => {
-  const microviaCount = holes.value.filter(
-    hole => hole.type === 'microvia'
-  ).length
-  if (microviaCount === 0) return '传统过孔板'
-  if (microviaCount <= 2) return '一阶 HDI'
-  if (microviaCount <= 4) return '二阶 HDI'
-  return '三阶及以上 HDI'
+watch(() => layerForm.totalLayers, (val) => {
+  holes.value = holes.value.filter(h => h.startLayer <= val && h.endLayer <= val)
+  errorMessage.value = ''
 })
-
-const holeOptions = [
-  { label: '激光过孔 (Microvia)', value: 'microvia' },
-  { label: '盲孔 (Blind Via)', value: 'blind' },
-  { label: '埋孔 (Buried Via)', value: 'buried' },
-  { label: '通孔 (Through)', value: 'through' },
-]
-
-const fillFromPreset = preset => {
-  layerForm.totalLayers = preset.layers
-  holeForm.startLayer = 1
-  holeForm.endLayer = Math.min(2, preset.layers)
-}
-
-const limitedLayers = computed(() =>
-  Math.min(Math.max(layerForm.totalLayers, MIN_LAYERS), MAX_LAYERS)
-)
+watch(holeForm, () => { if (errorMessage.value) errorMessage.value = '' })
 </script>
 
 <template>
-  <div class="page">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">HDI Stackup Assistant</p>
-        <h1>快速评估 HDI 阶数与钻孔结构</h1>
-        <p class="subtitle">
-          选择层数与过孔组合后，系统自动识别 HDI 阶数并生成堆叠图。
-        </p>
-        <div class="hero__buttons">
-          <button
-            v-for="preset in defaultStacks"
-            :key="preset.name"
-            class="ghost"
-            @click="fillFromPreset(preset)"
-          >
-            {{ preset.name }}
-          </button>
-        </div>
+  <div class="hdi-container">
+    <!-- 左侧设置面板 -->
+    <div class="panel-settings">
+      
+      <div class="result-card">
+        <div class="result-title">{{ hdiAnalysis.title }}</div>
+        <div class="result-sub">{{ hdiAnalysis.sub }}</div>
       </div>
 
-      <div class="hero__summary">
-        <p class="summary-title">当前判断</p>
-        <p class="summary-value">{{ hdiLevel }}</p>
-        <p class="summary-meta">
-          层数: {{ limitedLayers }} · 钻孔结构: {{ holes.length }} 组
-        </p>
+      <div class="control-group">
+        <label class="label-title">PCB 层数</label>
+        <select v-model.number="layerForm.totalLayers" class="input-select">
+          <option v-for="n in ALLOWED_LAYERS" :key="n" :value="n">{{ n }} 层板</option>
+        </select>
       </div>
-    </header>
 
-    <main class="layout">
-      <section class="panel">
-        <h2>层数设置</h2>
-
-        <div class="form-grid">
-          <label>
-            总层数
-            <input
-              v-model.number="layerForm.totalLayers"
-              type="number"
-              :min="MIN_LAYERS"
-              :max="MAX_LAYERS"
-            />
-          </label>
-
-          <label>
-            PP 张数
-            <input v-model.number="layerForm.prepregCount" type="number" min="1" />
-          </label>
-
-          <label>
-            介质类型
-            <select v-model="layerForm.dielectricType">
-              <option value="FR-4">FR-4</option>
-              <option value="BT">BT</option>
-              <option value="PI">PI</option>
-            </select>
-          </label>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>钻孔结构</h2>
-
-        <form
-          class="hole-form"
-          @submit.prevent="
-            addHole();
-            resetHoleForm();
-          "
-        >
-          <label>
-            名称
-            <input v-model="holeForm.name" />
-          </label>
-
-          <label>
-            起始层
-            <input v-model.number="holeForm.startLayer" type="number" min="1" />
-          </label>
-
-          <label>
-            终止层
-            <input v-model.number="holeForm.endLayer" type="number" :max="limitedLayers" />
-          </label>
-
-          <label>
-            类型
-            <select v-model="holeForm.type">
-              <option v-for="option in holeOptions" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
-
-          <label class="checkbox">
-            <input v-model="holeForm.stacked" type="checkbox" />
-            允许堆叠
-          </label>
-
-          <button type="submit">添加结构</button>
-        </form>
-
-        <div class="hole-list">
-          <article v-for="hole in holes" :key="hole.id" class="hole-card">
-            <div>
-              <p class="hole-card__title">{{ hole.name }}</p>
-              <p class="hole-card__meta">
-                {{ hole.startLayer }} → {{ hole.endLayer }}
-              </p>
-              <span class="pill" :class="hole.type">
-                {{ holeOptions.find(option => option.value === hole.type)?.label }}
-              </span>
-              <span v-if="hole.stacked" class="pill stacked">堆叠</span>
+      <div class="control-group">
+        <label class="label-title">添加钻孔</label>
+        <div class="add-box">
+          <select v-model="holeForm.type" class="input-select sm-mb">
+            <option value="laser">激光钻孔 (Laser)</option>
+            <option value="mechanical">机械钻孔 (Mech)</option>
+          </select>
+          
+          <div class="range-row">
+            <div class="input-wrapper">
+              <span>L</span>
+              <input type="number" v-model.number="holeForm.startLayer" min="1" class="input-num">
             </div>
-            <button class="ghost" @click="removeHole(hole.id)">删除</button>
-          </article>
+            <span class="arrow">➜</span>
+            <div class="input-wrapper">
+              <span>L</span>
+              <input type="number" v-model.number="holeForm.endLayer" :max="layerForm.totalLayers" class="input-num">
+            </div>
+            <button @click="addHole" class="btn-add">添加</button>
+          </div>
+
+          <div v-if="errorMessage" class="error-text">{{ errorMessage }}</div>
+
+          <label class="check-row">
+            <input type="checkbox" v-model="holeForm.stacked"> 
+            <span>允许堆叠 (Stacked)</span>
+          </label>
         </div>
-      </section>
+      </div>
 
-      <section class="panel panel--preview">
-        <h2>堆叠与过孔预览</h2>
+      <div class="list-header">
+        <label class="label-title">已添加 ({{ holes.length }})</label>
+        <button v-if="holes.length > 0" @click="clearAllHoles" class="btn-clear">清空</button>
+      </div>
+      
+      <!-- 列表优化：Grid 布局，一行两项 -->
+      <div class="hole-list">
+        <div 
+          v-for="h in holes" 
+          :key="h.id" 
+          class="hole-item"
+          @mouseenter="activeHoleId = h.id"
+          @mouseleave="activeHoleId = null"
+          :class="{ active: activeHoleId === h.id }"
+        >
+          <div class="hole-info">
+            <span class="badge" :class="h.type">{{ h.type === 'laser' ? 'L' : 'M' }}</span>
+            <span class="hole-text">{{ h.startLayer }}-{{ h.endLayer }}</span>
+            <span v-if="h.stacked" class="badge-stack">叠</span>
+          </div>
+          <button @click="removeHole(h.id)" class="btn-del">×</button>
+        </div>
+        <div v-if="holes.length === 0" class="empty-tip">无数据</div>
+      </div>
 
-        <StackPreview :visual-layers="visualLayers" :holes="holes" />
-      </section>
-    </main>
+    </div>
+
+    <!-- 右侧预览视图 -->
+    <div class="panel-preview">
+      <StackPreview 
+        :visual-layers="visualLayers" 
+        :holes="holes"
+        :active-hole-id="activeHoleId"
+        :colors="VIEW_COLORS" 
+      />
+    </div>
   </div>
 </template>
 
 <style scoped>
-.page {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 2.5rem 1.5rem 4rem;
-}
-
-.hero {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 2rem;
-  align-items: center;
-  margin-bottom: 2rem;
-}
-
-.hero__buttons {
+.hdi-container {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  margin-top: 1rem;
+  flex-direction: row;
+  height: 100vh;
+  background-color: #f8fafc;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #334155;
+  overflow: hidden;
 }
 
-.hero__summary {
-  background: linear-gradient(135deg, #f97316, #facc15);
-  color: #fff;
-  border-radius: 16px;
-  padding: 1.5rem;
-  min-width: 250px;
-  box-shadow: 0 20px 40px rgb(249 115 22 / 35%);
-}
-
-.summary-title {
-  text-transform: uppercase;
-  font-size: 0.8rem;
-  letter-spacing: 0.18em;
-  opacity: 0.85;
-}
-
-.summary-value {
-  font-size: 1.75rem;
-  margin: 0.5rem 0;
-  font-weight: 700;
-}
-
-.summary-meta {
-  opacity: 0.9;
-  font-size: 0.9rem;
-}
-
-.eyebrow {
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
-  font-size: 0.85rem;
-  color: #f97316;
-}
-
-h1 {
-  margin: 0.75rem 0;
-  font-size: 2.4rem;
-  color: #0f172a;
-}
-
-.subtitle {
-  color: #475569;
-  font-size: 1rem;
-  max-width: 620px;
-}
-
-.layout {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 1.5rem;
-}
-
-.panel {
-  background: rgb(255 255 255 / 90%);
-  border-radius: 18px;
-  padding: 1.5rem;
-  box-shadow: 0 15px 35px rgb(15 23 42 / 8%);
-}
-
-.panel--preview {
-  grid-column: 1 / -1;
-}
-
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 1.25rem;
-}
-
-.hole-form {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1.25rem;
-}
-
-.hole-list {
+/* 左侧面板 */
+.panel-settings {
+  width: 260px; /* 稍微加宽以容纳一行两列 */
+  background: #ffffff;
+  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 16px;
+  flex-shrink: 0;
 }
 
-.hole-card {
+.result-card {
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  padding: 12px;
+  text-align: center;
+}
+.result-title { color: #1e40af; font-weight: 700; font-size: 16px; margin-bottom: 4px; }
+.result-sub { color: #60a5fa; font-size: 13px; font-weight: 600; font-family: monospace; }
+
+.control-group { display: flex; flex-direction: column; gap: 5px; }
+.label-title { font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; }
+.input-select { width: 100%; padding: 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px; background: white; cursor: pointer; }
+
+.add-box { background: #f1f5f9; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; }
+.sm-mb { margin-bottom: 8px; }
+.range-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+
+/* 输入框宽度增加 */
+.input-wrapper { display: flex; align-items: center; background: white; border: 1px solid #cbd5e1; border-radius: 4px; overflow: hidden; flex: 1; }
+.input-wrapper span { background: #f8fafc; padding: 0 6px; font-size: 12px; color: #64748b; border-right: 1px solid #e2e8f0; line-height: 26px; }
+.input-num { border: none; width: 100%; text-align: center; font-size: 13px; outline: none; padding: 5px 0; min-width: 30px; }
+
+.arrow { font-size: 12px; color: #94a3b8; }
+.btn-add { background: #334155; color: white; border: none; padding: 0 12px; height: 28px; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer; }
+.check-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #475569; cursor: pointer; margin-top: 4px;}
+
+.error-text {
+  font-size: 11px; color: #ef4444; background: #fef2f2; padding: 4px 6px; border-radius: 4px; margin-bottom: 6px; border: 1px solid #fecaca;
+}
+
+.list-header { display: flex; justify-content: space-between; align-items: center; margin-top: 4px;}
+.btn-clear { background: none; border: none; color: #ef4444; font-size: 11px; cursor: pointer; }
+
+/* 列表 Grid 布局优化 */
+.hole-list {
+  flex: 1;
+  overflow-y: auto;
+  display: grid; /* 使用 Grid */
+  grid-template-columns: 1fr 1fr; /* 两列 */
+  gap: 8px; /* 间距 */
+  align-content: start;
+}
+
+.hole-item {
+  display: flex; justify-content: space-between; align-items: center; padding: 6px 8px;
+  background: white; border: 1px solid #e2e8f0; border-radius: 4px; cursor: pointer; transition: all 0.1s;
+  min-width: 0; /* 防止 flex 子项溢出 */
+}
+.hole-item:hover, .hole-item.active { border-color: #3b82f6; background: #eff6ff; }
+
+.hole-info { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.badge { font-size: 9px; padding: 1px 3px; border-radius: 3px; font-weight: 700; min-width: 12px; text-align: center; flex-shrink: 0; }
+.badge.laser { background: #ffedd5; color: #c2410c; }
+.badge.mechanical { background: #e0e7ff; color: #4338ca; }
+.hole-text { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.badge-stack { font-size: 9px; background: #cbd5e1; color: white; padding: 0 2px; border-radius: 2px; flex-shrink: 0; }
+
+.btn-del { background: none; border: none; color: #cbd5e1; font-size: 16px; cursor: pointer; padding: 0; margin-left: 2px; }
+.btn-del:hover { color: #ef4444; }
+
+.empty-tip { grid-column: 1 / -1; text-align: center; font-size: 11px; color: #cbd5e1; margin-top: 10px; }
+
+/* 右侧预览区 */
+.panel-preview {
+  flex: 1;
+  display: flex;
+  justify-content: flex-start;
+  align-items: flex-start;
+  /* 顶部内边距与左侧面板内容一致 (左侧有20px padding) */
+  padding: 20px 0 0 40px; 
+  overflow: auto;
   background: #f8fafc;
-  border-radius: 12px;
-  padding: 0.9rem;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-}
-
-.hole-card__title {
-  font-weight: 600;
-  margin: 0;
-  color: #0f172a;
-}
-
-.hole-card__meta {
-  margin: 0.25rem 0;
-  color: #475569;
-  font-size: 0.9rem;
-}
-
-.checkbox {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-weight: 600;
-}
-
-.ghost {
-  background: transparent;
-  border: 1px solid rgb(255 255 255 / 35%);
-  color: inherit;
-  padding: 0.4rem 0.8rem;
-  border-radius: 999px;
-  font-weight: 600;
-}
-
-.panel button.ghost {
-  border-color: #94a3b8;
-  color: #334155;
-}
-
-@media (max-width: 900px) {
-  .hero {
-    grid-template-columns: 1fr;
-  }
-
-  .hero__summary {
-    width: 100%;
-  }
 }
 </style>

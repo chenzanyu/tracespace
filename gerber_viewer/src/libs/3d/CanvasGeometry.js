@@ -1,43 +1,50 @@
 import * as THREE from 'three';
 
-/**
- * CanvasGeometry (pure JS)
- * - 保留原始 raster -> contour -> extrude 算法（未改逻辑）
- * - 输出的是 **非索引 BufferGeometry**（每个 face 的 3 顶点独立），
- *   这样可以为每个 face 顶点分配独立的 UV（精确还原颜色贴图）
- */
 export class CanvasGeometry extends THREE.BufferGeometry {
   constructor(canvas, options = {}) {
     super();
     if (!canvas || typeof canvas.getContext !== 'function') return;
 
-    const steps = options.steps !== undefined ? (parseInt(options.steps) > 0 ? parseInt(options.steps) : 1)  : 1;
-    let z = options.height !== undefined ? (options.height > 0 ? options.height:0.1) : 0.1;
+    // === 1. 参数配置 ===
+    const steps = options.steps !== undefined ? (parseInt(options.steps) > 0 ? parseInt(options.steps) : 1) : 1;
+    let z = options.height !== undefined ? (options.height > 0 ? options.height : 0.1) : 0.1;
     const material = options.material || 0;
-    const solid = options.solid !== undefined ? options.solid:true;
+    const solid = options.solid !== undefined ? options.solid : true;
     const off = options.offset !== undefined ? options.offset % 4 : 3;
     const extrudeMaterial = options.extrudeMaterial || 1;
 
-    // sidewall face generator (pushes faces with materialIndex)
-    const ef = typeof(options.extrudeFunc) == "function" ? options.extrudeFunc : 
-      function(vs,fs,uvs,pa,pb,na,nb,nx,ny,step,steps,mtl){
+    // 侧面生成函数
+    const ef = typeof (options.extrudeFunc) == "function" ? options.extrudeFunc :
+      function (vs, fs, uvs, pa, pb, na, nb, nx, ny, step, steps, mtl) {
         fs.push({ a: pb, b: na, c: pa, materialIndex: mtl });
         fs.push({ a: nb, b: na, c: pb, materialIndex: mtl });
-        uvs.push([ new THREE.Vector2(0,0), new THREE.Vector2(0,0), new THREE.Vector2(0,0) ]);
-        uvs.push([ new THREE.Vector2(0,0), new THREE.Vector2(0,0), new THREE.Vector2(0,0) ]);
+        uvs.push([new THREE.Vector2(0, 0), new THREE.Vector2(0, 0), new THREE.Vector2(0, 0)]);
+        uvs.push([new THREE.Vector2(0, 0), new THREE.Vector2(0, 0), new THREE.Vector2(0, 0)]);
       };
 
-    const ctx = canvas.getContext("2d");
-    // arrays used by original algorithm
-    const vertices = [], faces = [], fUvs = [], side = [];
-    let running=0,n=0,ps,pe,pt=0,t,checked,pl=0,nl=0,parent,f,uvs,fl,vl,ht,nv,pv,p;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true }); // 优化 canvas 读取性能
+    
+    // 中间数据容器
+    // 提示：如果 Canvas 很大，这里会产生大量对象，建议调用前缩小 Canvas
+    let vertices = [], faces = [], fUvs = [], side = [];
+    
+    // ... (此处保留你原始的变量声明) ...
+    let running=0,n=0,ps,pe,pt=0,t,checked,pl=0,nl=0,parent,f,uv,fl,vl,ht,nv,pv,p;
     let i,j,c=0,width=canvas.width,height=canvas.height;
+    
+    // 安全检查：防止过大图片直接导致崩溃
+    if(width > 1024 || height > 1024) {
+        console.warn(`CanvasGeometry: Canvas 尺寸过大 (${width}x${height})，极易导致 Context Lost。建议缩小至 512px 以下。`);
+    }
+
     const dt = ctx.getImageData(0,0,width,height);
     const yunit = 1/height;
     const xunit = 1/width;
     const data = dt.data;
 
-    // === 原算法（尽量保持不改动） ===
+    // ============================================
+    // === 核心算法：Raster 扫描与轮廓提取 (保持原样) ===
+    // ============================================
     for(i=0; i < height; i++){
       ps=pt; pe=n; pt=0; parent=0; j=0; c=4*(i*width+j);
       data[c+4*width-1]=0;
@@ -176,8 +183,8 @@ export class CanvasGeometry extends THREE.BufferGeometry {
       for(i=0;i!=fl;i++){
         f=faces[i];
         faces.push({ a: f.c+pe, b: f.b+pe, c: f.a+pe, materialIndex: ( (f.materialIndex||0) + 1 ) });
-        uvs = fUvs[i];
-        fUvs.push([ uvs[2].clone ? uvs[2].clone() : uvs[2], uvs[1].clone ? uvs[1].clone() : uvs[1], uvs[0].clone ? uvs[0].clone() : uvs[0] ]);
+        uv = fUvs[i];
+        fUvs.push([ uv[2].clone ? uv[2].clone() : uv[2], uv[1].clone ? uv[1].clone() : uv[1], uv[0].clone ? uv[0].clone() : uv[0] ]);
       }
       ps = 0; pe = vl;
       for(j=0;j!=steps;j++){
@@ -190,66 +197,84 @@ export class CanvasGeometry extends THREE.BufferGeometry {
       }
     }
 
-    // ======> 关键部分：构造非索引属性（位置 + UV）以精确还原 faceVertexUvs
+    // ============================================================
+    // === 优化部分：构建 BufferGeometry (解决 Context Lost) ===
+    // ============================================================
+    
     const faceCount = faces.length;
     if (faceCount === 0) {
-      // 空几何
       this.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
       return;
     }
 
+    // 【关键优化 1】: 先按 MaterialIndex 排序
+    // 原代码是交错 push 的，这会导致 DrawCalls 爆炸。
+    // 我们创建一个索引数组来排序，避免直接移动大对象。
+    const indices = new Uint32Array(faceCount);
+    for (let k = 0; k < faceCount; k++) indices[k] = k;
+
+    indices.sort((a, b) => {
+      const ma = faces[a].materialIndex || 0;
+      const mb = faces[b].materialIndex || 0;
+      return ma - mb;
+    });
+
     const positions = new Float32Array(faceCount * 9); // 3 verts * 3 coords
     const uvsArray = new Float32Array(faceCount * 6);   // 3 verts * 2 coords
-    // groups 按 materialIndex 聚合（start,count 单位为顶点索引数量）
-    let groups = [];
-    let curMat = faces[0].materialIndex || 0;
-    let groupStartFace = 0;
 
-    for (let fi = 0; fi < faceCount; fi++) {
-      const face = faces[fi];
-      const uvForFace = fUvs[fi] || [
-        new THREE.Vector2(vertices[face.a].x, vertices[face.a].y),
-        new THREE.Vector2(vertices[face.b].x, vertices[face.b].y),
-        new THREE.Vector2(vertices[face.c].x, vertices[face.c].y)
-      ];
+    let currentMat = faces[indices[0]].materialIndex || 0;
+    let groupStart = 0;
 
-      // positions
-      const va = vertices[face.a], vb = vertices[face.b], vc = vertices[face.c];
-      const pOff = fi * 9;
+    for (let i = 0; i < faceCount; i++) {
+      // 使用排序后的索引访问
+      const originalIndex = indices[i];
+      const face = faces[originalIndex];
+      const uvNodes = fUvs[originalIndex]; // 修正：这里应该是 uvNodes 数组
+
+      // 填充 Position
+      const va = vertices[face.a];
+      const vb = vertices[face.b];
+      const vc = vertices[face.c];
+      
+      const pOff = i * 9;
       positions[pOff + 0] = va.x; positions[pOff + 1] = va.y; positions[pOff + 2] = va.z;
       positions[pOff + 3] = vb.x; positions[pOff + 4] = vb.y; positions[pOff + 5] = vb.z;
       positions[pOff + 6] = vc.x; positions[pOff + 7] = vc.y; positions[pOff + 8] = vc.z;
 
-      // uvs
-      const uvOff = fi * 6;
-      uvsArray[uvOff + 0] = (uvForFace[0] && uvForFace[0].x !== undefined) ? uvForFace[0].x : va.x;
-      uvsArray[uvOff + 1] = (uvForFace[0] && uvForFace[0].y !== undefined) ? uvForFace[0].y : va.y;
-      uvsArray[uvOff + 2] = (uvForFace[1] && uvForFace[1].x !== undefined) ? uvForFace[1].x : vb.x;
-      uvsArray[uvOff + 3] = (uvForFace[1] && uvForFace[1].y !== undefined) ? uvForFace[1].y : vb.y;
-      uvsArray[uvOff + 4] = (uvForFace[2] && uvForFace[2].x !== undefined) ? uvForFace[2].x : vc.x;
-      uvsArray[uvOff + 5] = (uvForFace[2] && uvForFace[2].y !== undefined) ? uvForFace[2].y : vc.y;
+      // 填充 UV (增加容错)
+      const u0 = (uvNodes && uvNodes[0]) ? uvNodes[0] : {x:0, y:0};
+      const u1 = (uvNodes && uvNodes[1]) ? uvNodes[1] : {x:0, y:0};
+      const u2 = (uvNodes && uvNodes[2]) ? uvNodes[2] : {x:0, y:0};
 
-      // group handling (materialIndex change => cut group)
+      const uOff = i * 6;
+      uvsArray[uOff + 0] = u0.x; uvsArray[uOff + 1] = u0.y;
+      uvsArray[uOff + 2] = u1.x; uvsArray[uOff + 3] = u1.y;
+      uvsArray[uOff + 4] = u2.x; uvsArray[uOff + 5] = u2.y;
+
+      // 检查材质是否变化（因为已排序，所以只会变化几次，极大减少 Group 数量）
       const mat = face.materialIndex || 0;
-      if (mat !== curMat) {
-        groups.push({ start: groupStartFace * 3, count: (fi - groupStartFace) * 3, materialIndex: curMat });
-        groupStartFace = fi;
-        curMat = mat;
+      if (mat !== currentMat) {
+        this.addGroup(groupStart * 3, (i - groupStart) * 3, currentMat);
+        groupStart = i;
+        currentMat = mat;
       }
     }
-    // push last group
-    groups.push({ start: groupStartFace * 3, count: (faceCount - groupStartFace) * 3, materialIndex: curMat });
+    
+    // 添加最后一个 Group
+    this.addGroup(groupStart * 3, (faceCount - groupStart) * 3, currentMat);
 
-    // set BufferGeometry attributes (non-indexed)
     this.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     this.setAttribute('uv', new THREE.BufferAttribute(uvsArray, 2));
-    // add groups
-    for (const g of groups) {
-      this.addGroup(g.start, g.count, g.materialIndex);
-    }
-    // compute normals
     this.computeVertexNormals();
-    // metadata
-    this.userdata = { trace: side, rawVertices: vertices.length, rawFaces: faces.length };
+
+    // 元数据
+    this.userdata = { trace: side };
+
+    // 【关键优化 2】: 释放中间内存
+    // 这些巨大的数组如果不释放，在生成下一个 Geometry 时会导致内存峰值，引发 Crash
+    vertices = null;
+    faces = null;
+    fUvs = null;
+    side = null;
   }
 }

@@ -12,6 +12,7 @@ import * as THREE from 'three'
 import { SRGBColorSpace } from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { CanvasGeometry } from '../libs/3d/CanvasGeometry'
+import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 const createGeometryWorker = () => new Worker(new URL('../workers/canvasGeometry.worker.js', import.meta.url), { type: 'module' })
 
 const props = defineProps({
@@ -22,6 +23,8 @@ const props = defineProps({
   backgroundColor: { type: String, default: '#0f1220' },
   containerWidth: { type: String, default: '100%' },
   containerHeight: { type: String, default: '100%' },
+  displayWidth: { type: Number, default: 0 },
+  displayHeight: { type: Number, default: 0 },
   resolution: { type: Number, default: 2400 },
   fitPadding: { type: Number, default: 1.1 },
   fitLerpMs: { type: Number, default: 150 },
@@ -110,11 +113,23 @@ let topMaterial = null
 let bottomMaterial = null
 let sideMaterial = null
 
+const getHostSize = () => {
+  const rect = container.value?.getBoundingClientRect?.()
+  const measuredWidth = rect?.width ?? 0
+  const measuredHeight = rect?.height ?? 0
+  const fallbackWidth = Math.max(0, props.displayWidth || 0)
+  const fallbackHeight = Math.max(0, props.displayHeight || 0)
+  return {
+    width: measuredWidth > 0 ? measuredWidth : fallbackWidth,
+    height: measuredHeight > 0 ? measuredHeight : fallbackHeight,
+  }
+}
+
 const getTargetRasterRes = () => {
-  if (!container.value) return props.resolution
-  const rect = container.value.getBoundingClientRect()
+  const { width, height } = getHostSize()
   const dpr = window.devicePixelRatio || 1
-  return Math.max(props.resolution || 0, Math.ceil(Math.max(rect.width, rect.height) * dpr * 1.25))
+  const edge = Math.max(width, height, 1)
+  return Math.max(props.resolution || 0, Math.ceil(edge * dpr * 1.25))
 }
 
 const setupTextureParams = (tex, { repeatX = 1 } = {}) => {
@@ -135,6 +150,15 @@ const disposeTextures = () => {
   bottomTexture?.dispose?.()
   topTexture = null
   bottomTexture = null
+}
+const dataUrlToBlob = (dataUrl, mime = 'image/png') => {
+  const parts = dataUrl.split(',')
+  if (parts.length < 2) return null
+  const binary = atob(parts[1])
+  const len = binary.length
+  const array = new Uint8Array(len)
+  for (let i = 0; i < len; i++) array[i] = binary.charCodeAt(i)
+  return new Blob([array], { type: mime })
 }
 
 const handleGeometryWorkerMessage = (event) => {
@@ -513,10 +537,10 @@ const computeFitDistanceForBox = (box, width, height, padding = 1.1) => {
 }
 
 const smoothRefitToBox = () => {
-  if (!renderer || !camera || !geometryBox || !container.value) return
-  const rect = container.value.getBoundingClientRect()
-  const w = Math.max(1, Math.round(rect.width))
-  const h = Math.max(1, Math.round(rect.height))
+  if (!renderer || !camera || !geometryBox) return
+  const { width, height } = getHostSize()
+  const w = Math.max(1, Math.round(width || 0))
+  const h = Math.max(1, Math.round(height || 0))
   const targetZ = computeFitDistanceForBox(geometryBox, w, h, Math.max(0.0001, props.fitPadding))
   if (Math.abs(camera.position.z - targetZ) < 1e-6) return
   fitLerp.active = true
@@ -527,12 +551,59 @@ const smoothRefitToBox = () => {
   if (controls) controls.enabled = false
   startLoop()
 }
+const exportPngBlob = async () => {
+  if (!renderer || !scene || !camera) throw new Error('Renderer unavailable')
+  controls?.update()
+  renderer.render(scene, camera)
+  const canvas = renderer.domElement
+  if (!canvas) throw new Error('Canvas unavailable')
+  const mime = 'image/png'
+  return new Promise((resolve, reject) => {
+    if (canvas.toBlob) {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob)
+        else reject(new Error('PNG blob empty'))
+      }, mime)
+    } else {
+      try {
+        const blob = dataUrlToBlob(canvas.toDataURL(mime), mime)
+        if (!blob) throw new Error('PNG dataURL failed')
+        resolve(blob)
+      } catch (error) {
+        reject(error)
+      }
+    }
+  })
+}
+const exportGltfBlob = async () => {
+  if (!mesh) throw new Error('Mesh unavailable')
+  const exporter = new GLTFExporter()
+  return new Promise((resolve, reject) => {
+    try {
+      exporter.parse(
+        mesh,
+        (result) => {
+          if (result instanceof ArrayBuffer) {
+            resolve(new Blob([result], { type: 'model/gltf-binary' }))
+            return
+          }
+          const json = typeof result === 'string' ? result : JSON.stringify(result)
+          resolve(new Blob([json], { type: 'model/gltf+json' }))
+        },
+        (error) => reject(error),
+        { binary: true, embedImages: true },
+      )
+    } catch (error) {
+      reject(error)
+    }
+  })
+}
 
 const commitRendererSize = ({ refit = true } = {}) => {
-  if (!container.value || !renderer || !camera) return
-  const rect = container.value.getBoundingClientRect()
-  const w = Math.max(1, Math.round(rect.width))
-  const h = Math.max(1, Math.round(rect.height))
+  if (!renderer || !camera) return
+  const { width, height } = getHostSize()
+  const w = Math.max(1, Math.round(width || 0))
+  const h = Math.max(1, Math.round(height || 0))
   renderer.setSize(w, h, false)
   camera.aspect = w / h
   camera.updateProjectionMatrix()
@@ -595,13 +666,9 @@ const initThree = async () => {
       clearTimeout(spinTimer)
       spinTimer = window.setTimeout(() => {
         stopLoopSoon()
-        rasterizeAndUpdateTextures()
-          .then((result) => {
-            if (result?.updated) return rebuildGeometry(result.geometrySource)
-            return null
-          })
-          .catch((error) => { console.error('[Pcb3dPreview] resize rasterize failed', error) })
-          .finally(() => requestRender())
+        commitRendererSize()
+        smoothRefitToBox()
+        requestRender()
       }, 180)
     })
     ro.observe(container.value)
@@ -640,7 +707,7 @@ const destroyThree = () => {
 }
 
 const refreshPreview = async (force = false) => {
-  if (!renderer || !scene || !camera || !container.value || !props.active) {
+  if (!renderer || !scene || !camera || !container.value) {
     refreshQueued = true
     refreshForce = refreshForce || force
     return
@@ -697,6 +764,12 @@ defineExpose({
     smoothRefitToBox()
     requestRender()
   },
+  async exportPng() {
+    return exportPngBlob()
+  },
+  async exportGltf() {
+    return exportGltfBlob()
+  },
 })
 
 watch(() => [props.topSvg, props.bottomSvg], async () => {
@@ -724,6 +797,13 @@ watch(() => props.backgroundColor, () => {
 watch(() => props.fitPadding, () => { smoothRefitToBox() })
 watch(() => props.fitLerpMs, () => { /* 下次拟合会使用新的过渡时长 */ })
 
+watch(() => [props.displayWidth, props.displayHeight], () => {
+  if (!renderer || !camera) return
+  pendingResize = true
+  commitRendererSize()
+  requestRender()
+})
+
 watch(() => [props.containerWidth, props.containerHeight], () => {
   requestRender()
 })
@@ -736,7 +816,11 @@ watch(() => props.active, async (isActive) => {
   await nextTick()
   commitRendererSize({ refit: false })
   requestRender()
-  if (refreshQueued || refreshForce) await refreshPreview()
+  if (refreshQueued || refreshForce) {
+    await refreshPreview()
+  } else if (geometryBox) {
+    smoothRefitToBox()
+  }
 })
 
 onMounted(async () => {

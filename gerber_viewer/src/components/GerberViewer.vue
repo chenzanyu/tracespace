@@ -8,7 +8,10 @@
     <!-- 预览阶段 -->
     <div v-else class="h-full flex relative">
       <!-- 预览画布 -->
-      <section class="flex-1 relative overflow-hidden bg-gradient-to-br from-[#0f1b2d] to-[#050b16]">
+      <section
+        ref="previewAreaRef"
+        class="flex-1 relative overflow-hidden bg-gradient-to-br from-[#0f1b2d] to-[#050b16]"
+      >
         <transition name="layer-panel-fade" :css="layerPanelTransitionEnabled">
           <aside v-if="layerPanelVisible"
             class="absolute inset-y-0 left-0 w-80 border-r border-gray-800 bg-gradient-to-b from-gray-900 to-gray-800 flex flex-col z-30 shadow-[0_20px_40px_rgba(0,0,0,0.55)]">
@@ -78,6 +81,24 @@
               title="重置 3D 视图" @click="resetPcb3dView">
               <img :src="resetIcon" alt="reset 3d view" class="w-6 h-6" />
             </button>
+            <div class="relative">
+              <button
+                class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+                title="下载 3D 模型" @click.stop="toggleDownloadMenu">
+                <span class="pi pi-download"></span>
+              </button>
+              <div
+                v-if="downloadMenuOpen"
+                class="absolute mt-2 w-44 rounded-md border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50"
+              >
+                <button class="block w-full text-left px-3 py-2 hover:bg-gray-800" @click.stop="downloadPcbAsset('gltf')">
+                  下载 glTF 模型
+                </button>
+                <button class="block w-full text-left px-3 py-2 hover:bg-gray-800" @click.stop="downloadPcbAsset('svg')">
+                  下载 SVG（顶/底）
+                </button>
+              </div>
+            </div>
           </template>
         </div>
 
@@ -100,8 +121,19 @@
           @exit-measurement="measurementActive = false" @loading-change="handleLayerPreviewLoading" />
 
         <!-- 3D 视图 -->
-        <Pcb3dPreview ref="pcb3dRef" v-show="activeView === '3d'" :top-svg="topSvg" :bottom-svg="bottomSvg"
-          :thickness="boardThickness" :active="activeView === '3d'" borderColor="#e8e8e8" :fitPadding="1.55"
+        <Pcb3dPreview
+          ref="pcb3dRef"
+          v-show="activeView === '3d'"
+          :top-svg="topSvg"
+          :bottom-svg="bottomSvg"
+          :thickness="boardThickness"
+          :active="activeView === '3d'"
+          :container-width="previewContainerWidth"
+          :container-height="previewContainerHeight"
+          :display-width="previewSize.width"
+          :display-height="previewSize.height"
+          borderColor="#e8e8e8"
+          :fitPadding="1.55"
           @loading-change="handlePcb3dLoading" />
       </section>
     </div>
@@ -168,7 +200,7 @@
  * - 调用 LayerStackPreview（Pixi）与 Pcb3dPreview（Three）渲染
  * - 负责旧版 tracespace 结果到新版组件的数据转换
  */
-import { ref, reactive, nextTick, watch, computed } from 'vue'
+import { ref, reactive, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
 import { runHybridPipeline } from '@tracespace/hybrid-core'
 import { stringifySvg as legacyStringifySvg } from '@tracespace/legacy-core'
@@ -205,6 +237,12 @@ const viewOptions = [
   { label: 'Layers', value: 'layers' },
   { label: '3D', value: '3d' },
 ]
+const downloadMenuOpen = ref(false)
+const previewAreaRef = ref(null)
+const previewSize = reactive({ width: 0, height: 0 })
+const previewContainerWidth = computed(() => (previewSize.width > 0 ? `${previewSize.width}px` : '100%'))
+const previewContainerHeight = computed(() => (previewSize.height > 0 ? `${previewSize.height}px` : '100%'))
+let previewResizeObserver = null
 
 const enablePerfLogs = import.meta.env?.DEV ?? false
 const perfLabel = (phase) => `[perf][GerberViewer] ${phase}`
@@ -228,6 +266,82 @@ const runPerfAsync = async (phase, fn) => {
 }
 const logPerf = (phase, payload) => {
   if (enablePerfLogs) console.log(perfLabel(phase), payload)
+}
+const triggerFileDownload = (blob, filename) => {
+  if (!blob) return
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+const stripXmlDeclaration = (svg) => {
+  if (typeof svg !== 'string') return ''
+  return svg.replace(/<\?xml[^>]*?>/gi, '').trim()
+}
+const toggleDownloadMenu = (event) => {
+  event?.stopPropagation?.()
+  downloadMenuOpen.value = !downloadMenuOpen.value
+}
+const handleGlobalClick = () => {
+  downloadMenuOpen.value = false
+}
+const downloadSvgPair = () => {
+  const targets = [
+    { data: topSvg.value, suffix: 'top' },
+    { data: bottomSvg.value, suffix: 'bottom' },
+  ]
+  let success = false
+  for (const target of targets) {
+    if (!target.data) continue
+    const sanitized = stripXmlDeclaration(target.data)
+    if (!sanitized) continue
+    const blob = new Blob([sanitized], { type: 'image/svg+xml;charset=utf-8' })
+    triggerFileDownload(blob, `pcb-${target.suffix}.svg`)
+    success = true
+  }
+  return success
+}
+const downloadPcbAsset = async (type) => {
+  try {
+    if (type === 'gltf') {
+      const blob = await pcb3dRef.value?.exportGltf?.()
+      if (!blob) throw new Error('glTF 导出失败')
+      triggerFileDownload(blob, 'pcb-preview.glb')
+      return
+    }
+    if (type === 'svg') {
+      if (!downloadSvgPair()) throw new Error('缺少 SVG 数据')
+      return
+    }
+    throw new Error(`未知导出类型: ${type}`)
+  } catch (error) {
+    console.error('[GerberViewer] 导出失败', error)
+  } finally {
+    downloadMenuOpen.value = false
+  }
+}
+const updatePreviewSize = () => {
+  const el = previewAreaRef.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  const width = Math.max(0, Math.round(rect.width || 0))
+  const height = Math.max(0, Math.round(rect.height || 0))
+  if (width !== previewSize.width || height !== previewSize.height) {
+    previewSize.width = width
+    previewSize.height = height
+  }
+}
+const observePreviewArea = () => {
+  if (typeof window === 'undefined' || typeof window.ResizeObserver === 'undefined') return
+  if (!previewAreaRef.value) return
+  if (!previewResizeObserver) {
+    previewResizeObserver = new window.ResizeObserver(() => { updatePreviewSize() })
+  }
+  previewResizeObserver.observe(previewAreaRef.value)
 }
 
 const layerPanelVisible = computed(() => activeView.value === 'layers' && isLayerPanelOpen.value)
@@ -255,6 +369,7 @@ const setActiveView = (mode) => {
   if (transitionsDisabled) {
     nextTick(() => { layerPanelTransitionEnabled.value = true })
   }
+  if (mode !== '3d') downloadMenuOpen.value = false
 }
 
 const openLayerPanel = () => { isLayerPanelOpen.value = true }
@@ -467,6 +582,28 @@ const applySettings = async () => {
     isLayerLoading.value = false
   }
 }
+
+onMounted(() => {
+  nextTick(() => {
+    updatePreviewSize()
+    observePreviewArea()
+  })
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', updatePreviewSize)
+    window.addEventListener('click', handleGlobalClick)
+  }
+})
+
+onBeforeUnmount(() => {
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('resize', updatePreviewSize)
+    window.removeEventListener('click', handleGlobalClick)
+  }
+  if (previewResizeObserver) {
+    previewResizeObserver.disconnect()
+    previewResizeObserver = null
+  }
+})
 </script>
 
 <style scoped>

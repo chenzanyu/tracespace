@@ -81,6 +81,13 @@
               title="重置 3D 视图" @click="resetPcb3dView">
               <img :src="resetIcon" alt="reset 3d view" class="w-6 h-6" />
             </button>
+            <button
+              class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+              :class="canExplode ? (explosionActive ? 'bg-white/90 text-[#0f1220]' : '') : 'opacity-50 cursor-not-allowed'"
+              title="展开 / 还原叠层" :disabled="!canExplode" @click="toggleExplosion"
+            >
+              <span class="pi pi-sitemap"></span>
+            </button>
             <div class="relative">
               <button
                 class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
@@ -103,7 +110,7 @@
         </div>
 
         <!-- 视图切换 -->
-        <div class="absolute top-4 right-4 z-40">
+        <div class="absolute top-4 right-4 z-40 flex flex-col items-end gap-2">
           <div class="inline-flex overflow-hidden rounded-full border-2 border-[#0092b8] bg-white shadow">
             <button v-for="mode in viewOptions" :key="mode.value"
               class="px-5 py-2 text-sm font-semibold uppercase tracking-wide transition-colors focus:outline-none"
@@ -132,6 +139,8 @@
           :container-height="previewContainerHeight"
           :display-width="previewSize.width"
           :display-height="previewSize.height"
+          :explosion-active="explosionActive"
+          :explosion-layers="explosionLayers"
           borderColor="#e8e8e8"
           :fitPadding="1.55"
           @loading-change="handlePcb3dLoading" />
@@ -237,6 +246,9 @@ const viewOptions = [
   { label: 'Layers', value: 'layers' },
   { label: '3D', value: '3d' },
 ]
+const explosionLayers = ref([])
+const explosionActive = ref(false)
+const canExplode = computed(() => explosionLayers.value.length > 0)
 const downloadMenuOpen = ref(false)
 const previewAreaRef = ref(null)
 const previewSize = reactive({ width: 0, height: 0 })
@@ -267,6 +279,7 @@ const runPerfAsync = async (phase, fn) => {
 const logPerf = (phase, payload) => {
   if (enablePerfLogs) console.log(perfLabel(phase), payload)
 }
+const explosionLayerTypes = new Set(['copper', 'soldermask', 'silkscreen', 'solderpaste', 'drill'])
 const triggerFileDownload = (blob, filename) => {
   if (!blob) return
   const url = URL.createObjectURL(blob)
@@ -288,6 +301,10 @@ const toggleDownloadMenu = (event) => {
 }
 const handleGlobalClick = () => {
   downloadMenuOpen.value = false
+}
+const toggleExplosion = () => {
+  if (!canExplode.value) return
+  explosionActive.value = !explosionActive.value
 }
 const downloadSvgPair = () => {
   const targets = [
@@ -369,7 +386,10 @@ const setActiveView = (mode) => {
   if (transitionsDisabled) {
     nextTick(() => { layerPanelTransitionEnabled.value = true })
   }
-  if (mode !== '3d') downloadMenuOpen.value = false
+  if (mode !== '3d') {
+    downloadMenuOpen.value = false
+    explosionActive.value = false
+  }
 }
 
 const openLayerPanel = () => { isLayerPanelOpen.value = true }
@@ -513,6 +533,29 @@ const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
   orderedLayers.sort((a, b) => a.weight - b.weight)
 }
 
+const updateExplosionLayersFromLegacy = (renderLayersResult) => {
+  if (!renderLayersResult) {
+    explosionLayers.value = []
+    explosionActive.value = false
+    return
+  }
+  const entries = []
+  const rendersById = renderLayersResult.rendersById || {}
+  for (const layer of renderLayersResult.layers || []) {
+    if (!layer?.type || !explosionLayerTypes.has(layer.type)) continue
+    const node = rendersById[layer.id]
+    if (!node) continue
+    entries.push({
+      id: layer.id,
+      type: layer.type,
+      side: layer.side || null,
+      svg: legacyStringifySvg(node),
+    })
+  }
+  explosionLayers.value = entries
+  explosionActive.value = false
+}
+
 const commitLegacyBoardResult = (legacyResult, token) => {
   if (token !== legacyBoardUpdateToken) return
   if (!legacyResult) {
@@ -522,6 +565,8 @@ const commitLegacyBoardResult = (legacyResult, token) => {
     bottomSvg.value = ''
     boardWidthMm.value = 0
     boardHeightMm.value = 0
+    explosionLayers.value = []
+    explosionActive.value = false
     return
   }
   const { renderBoardResult, renderLayersResult } = legacyResult || {}
@@ -535,6 +580,7 @@ const commitLegacyBoardResult = (legacyResult, token) => {
   else topSvg.value = ''
   if (baseBottomEl) bottomSvg.value = legacyStringifySvg(baseBottomEl)
   else bottomSvg.value = ''
+  updateExplosionLayersFromLegacy(renderLayersResult)
 }
 
 const applyLegacyBoardRenders = (legacyResult) => {

@@ -25,6 +25,8 @@ const props = defineProps({
   containerHeight: { type: String, default: '100%' },
   displayWidth: { type: Number, default: 0 },
   displayHeight: { type: Number, default: 0 },
+  explosionActive: { type: Boolean, default: false },
+  explosionLayers: { type: Array, default: () => [] },
   resolution: { type: Number, default: 2400 },
   fitPadding: { type: Number, default: 1.1 },
   fitLerpMs: { type: Number, default: 150 },
@@ -55,6 +57,26 @@ const geometryWorkerJobs = new Map()
 let geometryWorkerSeq = 0
 let geometryBuildToken = 0
 let geometryWorkerFailed = false
+let lastFrameTime = 0
+let explosionGroup = null
+let explosionPlaneGeometry = null
+let explosionMeshes = []
+let explosionBuildToken = 0
+let explosionRebuildScheduled = false
+let coreMesh = null
+let coreMaterial = null
+const explosionState = { progress: 0, target: 0 }
+const explosionLayerSequence = [
+  { type: 'drill', side: 'bottom', offsetIndex: -5, opacity: 0.7, color: '#dcdcdc' },
+  { type: 'solderpaste', side: 'bottom', offsetIndex: -4, opacity: 0.65, color: '#b4b8c0' },
+  { type: 'silkscreen', side: 'bottom', offsetIndex: -3, opacity: 0.95, color: '#ffffff' },
+  { type: 'soldermask', side: 'bottom', offsetIndex: -2, opacity: 0.8, color: '#1c7a2a' },
+  { type: 'copper', side: 'bottom', offsetIndex: -1, opacity: 0.95, color: '#f2c55b' },
+  { type: 'copper', side: 'top', offsetIndex: 1, opacity: 0.95, color: '#f2c55b' },
+  { type: 'soldermask', side: 'top', offsetIndex: 2, opacity: 0.8, color: '#1c7a2a' },
+  { type: 'silkscreen', side: 'top', offsetIndex: 3, opacity: 0.95, color: '#ffffff' },
+  { type: 'solderpaste', side: 'top', offsetIndex: 4, opacity: 0.65, color: '#b4b8c0' },
+]
 
 const pushLoading = () => {
   loadingDepth += 1
@@ -85,13 +107,15 @@ const fitLerp = { active: false, startZ: 0, targetZ: 0, startTime: 0, duration: 
 
 const animate = () => {
   if (!running) return
+  const frameTime = performance.now()
+  const delta = lastFrameTime ? frameTime - lastFrameTime : 16
+  lastFrameTime = frameTime
   if (pendingResize) {
     pendingResize = false
     commitRendererSize()
   }
   if (fitLerp.active && camera && controls) {
-    const now = performance.now()
-    const t = Math.min(1, (now - fitLerp.startTime) / Math.max(1, fitLerp.duration))
+    const t = Math.min(1, (frameTime - fitLerp.startTime) / Math.max(1, fitLerp.duration))
     const z = fitLerp.startZ + (fitLerp.targetZ - fitLerp.startZ) * t
     camera.position.set(0, 0, z)
     if (t >= 1) { fitLerp.active = false; controls.enabled = true }
@@ -100,8 +124,11 @@ const animate = () => {
   const prevTarget = controls ? controls.target.clone() : null
   controls?.update()
   renderScene()
+  updateExplosionAnimation(delta)
+  updateBaseMeshVisibility()
   const moved = (camera && prevCamPos && camera.position.distanceToSquared(prevCamPos) > 1e-10)
     || (controls && prevTarget && controls.target.distanceToSquared(prevTarget) > 1e-10)
+    || Math.abs(explosionState.progress - explosionState.target) > 1e-3
   if (!moved && !fitLerp.active) { stopLoopSoon(); return }
   rafId = requestAnimationFrame(animate)
 }
@@ -150,6 +177,295 @@ const disposeTextures = () => {
   bottomTexture?.dispose?.()
   topTexture = null
   bottomTexture = null
+}
+const clearExplosionGroup = () => {
+  if (explosionGroup && scene) scene.remove(explosionGroup)
+  explosionGroup = null
+  explosionMeshes.forEach(({ material, texture }) => {
+    texture?.dispose?.()
+    material?.dispose?.()
+  })
+  explosionMeshes = []
+  if (explosionPlaneGeometry) {
+    explosionPlaneGeometry.dispose()
+    explosionPlaneGeometry = null
+  }
+  explosionState.progress = 0
+  explosionState.target = 0
+  updateBaseMeshVisibility()
+}
+const disposeCoreMesh = () => {
+  if (coreMesh && scene) {
+    scene.remove(coreMesh)
+  }
+  if (coreMesh?.geometry) coreMesh.geometry.dispose()
+  if (coreMaterial) coreMaterial.dispose()
+  coreMesh = null
+  coreMaterial = null
+}
+const buildCoreMesh = (geometry) => {
+  disposeCoreMesh()
+  if (!scene || !geometry) return
+  try {
+    const thickness = Math.max(props.thickness || 0.016, 0.0005)
+    const topZ = thickness / 2
+    const bottomZ = -thickness / 2
+    const cloned = geometry.clone()
+    const position = cloned.getAttribute('position')
+    const array = position?.array
+    if (array) {
+      for (let i = 0; i < array.length; i += 3) {
+        array[i + 2] = THREE.MathUtils.clamp(array[i + 2], bottomZ, topZ)
+      }
+      position.needsUpdate = true
+    }
+    coreMaterial = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(props.borderColor || '#f5d398'),
+      transparent: true,
+      opacity: 0,
+      depthWrite: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    })
+    coreMesh = new THREE.Mesh(cloned, coreMaterial)
+    coreMesh.visible = false
+    scene.add(coreMesh)
+  } catch (error) {
+    console.warn('[Pcb3dPreview] buildCoreMesh failed', error)
+    disposeCoreMesh()
+  }
+}
+const prepareGeometryForExport = (geometry) => {
+  let cloned = geometry.clone()
+  if (cloned.index) cloned = cloned.toNonIndexed()
+  cloned.computeBoundingBox()
+  const bbox = cloned.boundingBox
+  const position = cloned.getAttribute('position')
+  const normals = cloned.getAttribute('normal')
+  const array = position?.array
+  if (!array) {
+    console.warn('[Pcb3dPreview] export: missing position attribute')
+    return cloned
+  }
+  const thickness = Math.max(props.thickness || 0.016, 0.0005)
+  const topZ = bbox?.max?.z ?? thickness / 2
+  const bottomZ = bbox?.min?.z ?? -thickness / 2
+  const snapGroup = (materialIndex, targetZ) => {
+    let applied = 0
+    for (const group of cloned.groups || []) {
+      if (group.materialIndex !== materialIndex) continue
+      const end = group.start + group.count
+      for (let idx = group.start; idx < end; idx++) {
+        const vertexIndex = idx * 3
+        array[vertexIndex + 2] = targetZ
+        applied++
+      }
+    }
+    return applied
+  }
+  const topApplied = snapGroup(0, topZ)
+  const bottomApplied = snapGroup(1, bottomZ)
+  if (!topApplied || !bottomApplied) {
+    console.warn('[Pcb3dPreview] export: group snap incomplete', { topApplied, bottomApplied })
+    if (normals) {
+      const nArray = normals.array
+      let normalApplied = 0
+      for (let i = 0; i < array.length; i += 3) {
+        const nz = nArray[i + 2]
+        if (nz >= 0.9) {
+          array[i + 2] = topZ
+          normalApplied++
+        } else if (nz <= -0.9) {
+          array[i + 2] = bottomZ
+          normalApplied++
+        }
+      }
+      if (!normalApplied) {
+        console.warn('[Pcb3dPreview] export: normal fall-back failed, using sign snap')
+        for (let i = 0; i < array.length; i += 3) {
+          const z = array[i + 2]
+          array[i + 2] = z >= 0 ? topZ : bottomZ
+        }
+      }
+    }
+  }
+  position.needsUpdate = true
+  cloned.computeBoundingBox()
+  cloned.computeVertexNormals()
+  return cloned
+}
+const cloneMeshForExport = (sourceMesh) => {
+  if (!sourceMesh) {
+    console.warn('[Pcb3dPreview] export: source mesh missing')
+    return null
+  }
+  if (!sourceMesh.geometry) {
+    console.warn('[Pcb3dPreview] export: source mesh missing geometry')
+    return null
+  }
+  const cloned = sourceMesh.clone()
+  cloned.geometry = prepareGeometryForExport(sourceMesh.geometry)
+  if (Array.isArray(sourceMesh.material)) {
+    cloned.material = sourceMesh.material.map((mat) => mat?.clone?.() || mat)
+  } else if (sourceMesh.material?.clone) {
+    cloned.material = sourceMesh.material.clone()
+  }
+  cloned.visible = true
+  return cloned
+}
+const updateBaseMeshVisibility = () => {
+  const t = THREE.MathUtils.clamp(explosionState.progress, 0, 1)
+  const baseOpacity = 1 - t
+  const ensureTransparent = (material) => {
+    if (!material) return
+    if (!material.transparent) material.transparent = true
+    material.opacity = baseOpacity
+  }
+  ensureTransparent(topMaterial)
+  ensureTransparent(bottomMaterial)
+  ensureTransparent(sideMaterial)
+  if (mesh) {
+    mesh.visible = baseOpacity > 0.02
+  }
+  if (coreMaterial && coreMesh) {
+    coreMaterial.opacity = Math.min(0.95, 0.25 + t * 0.65)
+    coreMesh.visible = t > 0.02
+  }
+}
+const requestExplosionRebuild = () => {
+  if (explosionRebuildScheduled) return
+  explosionRebuildScheduled = true
+  Promise.resolve().then(() => {
+    explosionRebuildScheduled = false
+    rebuildExplosionGroup().catch((error) => {
+      console.warn('[Pcb3dPreview] explosion rebuild failed', error)
+    })
+  })
+}
+const computeExplosionOffset = (index, zStep) => {
+  const dir = index >= 0 ? 1 : -1
+  const magnitude = Math.max(1, Math.abs(index))
+  const thickness = Math.max(props.thickness || 0.016, 0.001)
+  const topZ = geometryBox?.max?.z ?? thickness / 2
+  const bottomZ = geometryBox?.min?.z ?? -thickness / 2
+  const epsilon = Math.max(zStep * 0.02, 0.0005)
+  const originZ = dir > 0 ? topZ + epsilon : bottomZ - epsilon
+  const offset = new THREE.Vector3(0, 0, dir * zStep * magnitude)
+  const origin = new THREE.Vector3(0, 0, originZ)
+  return { offset, origin }
+}
+const applyExplosionTransforms = () => {
+  if (!explosionGroup) return
+  const visible = explosionState.progress > 0.01 || explosionState.target > 0
+  explosionMeshes.forEach(({ mesh, offset, origin }) => {
+    mesh.position.copy(origin)
+    mesh.position.addScaledVector(offset, explosionState.progress)
+    if (mesh.material) {
+      const baseOpacity = mesh.material.userData?.baseOpacity ?? mesh.material.opacity ?? 1
+      mesh.material.opacity = baseOpacity * Math.max(0.05, explosionState.progress)
+    }
+    mesh.visible = visible
+  })
+  explosionGroup.visible = visible
+  updateBaseMeshVisibility()
+}
+const updateExplosionAnimation = (deltaMs) => {
+  if (!explosionGroup) return
+  const epsilon = 1e-4
+  if (explosionState.target === 0) {
+    const direction = explosionState.progress < explosionState.target ? 1 : -1
+    const step = Math.min(1, (deltaMs || 16) / 300)
+    explosionState.progress = THREE.MathUtils.clamp(explosionState.progress + direction * step, 0, 1)
+  } else {
+    const deltaSeconds = Math.max(deltaMs || 16, 16) / 1000
+    const easing = 2.2
+    explosionState.progress = THREE.MathUtils.damp(
+      explosionState.progress,
+      explosionState.target,
+      easing,
+      deltaSeconds,
+    )
+  }
+  if (Math.abs(explosionState.progress - explosionState.target) <= epsilon) {
+    explosionState.progress = explosionState.target
+  }
+  applyExplosionTransforms()
+}
+const findExplosionLayerSource = (map, type, side) => {
+  if (type === 'core') return map.get('core|inner') || map.get('core|none')
+  const normalizedSide = side || 'none'
+  return map.get(`${type}|${normalizedSide}`) || map.get(`${type}|all`) || map.get(`${type}|none`)
+}
+const rebuildExplosionGroup = async () => {
+  explosionBuildToken += 1
+  const token = explosionBuildToken
+  clearExplosionGroup()
+  if (!scene || !geometryBox || !(props.explosionLayers || []).length) return
+  const width = geometryBox.max.x - geometryBox.min.x
+  const height = geometryBox.max.y - geometryBox.min.y
+  if (width <= 0 || height <= 0) return
+  const lookup = new Map()
+  for (const layer of props.explosionLayers || []) {
+    if (!layer?.type || !layer.svg) continue
+    const key = `${layer.type}|${layer.side || 'none'}`
+    if (!lookup.has(key)) lookup.set(key, layer)
+  }
+  const targetRes = currentRasterRes || getTargetRasterRes()
+  const tasks = explosionLayerSequence.map(async (seq) => {
+    const source = findExplosionLayerSource(lookup, seq.type, seq.side)
+    if (!source?.svg) return null
+    try {
+      const raster = await rasterizeSvgOnMainThread(
+        source.svg,
+        targetRes,
+        { borderColor: props.borderColor, applyBorder: false },
+      )
+      const ctx = raster.canvas.getContext('2d')
+      if (ctx) {
+        ctx.globalCompositeOperation = 'source-in'
+        ctx.fillStyle = seq.color || '#ffffff'
+        ctx.fillRect(0, 0, raster.canvas.width, raster.canvas.height)
+        ctx.globalCompositeOperation = 'source-over'
+      }
+      const texture = createTextureFromImage(raster.canvas, { repeatX: seq.side === 'bottom' ? -1 : 1 })
+      return { seq, texture }
+    } catch (error) {
+      console.warn('[Pcb3dPreview] explosion layer raster failed', error)
+      return null
+    }
+  })
+  const layerEntries = (await Promise.all(tasks)).filter(Boolean)
+  if (token !== explosionBuildToken || !layerEntries.length) {
+    layerEntries.forEach((entry) => entry?.texture?.dispose?.())
+    return
+  }
+  explosionPlaneGeometry = new THREE.PlaneGeometry(width, height)
+  explosionGroup = new THREE.Group()
+  const zStep = Math.max(props.thickness || 0.016, 0.002) * 3.2
+  let order = 30
+  explosionMeshes = layerEntries.map(({ seq, texture }) => {
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: seq.opacity ?? 0.6,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.NormalBlending,
+    })
+    material.userData = { baseOpacity: seq.opacity ?? 0.6 }
+    const mesh = new THREE.Mesh(explosionPlaneGeometry, material)
+    mesh.renderOrder = order++
+    mesh.visible = false
+    const { offset, origin } = computeExplosionOffset(seq.offsetIndex || 0, zStep)
+    explosionGroup.add(mesh)
+    return { mesh, material, texture, offset, origin }
+  })
+  scene.add(explosionGroup)
+  explosionState.progress = props.explosionActive ? 1 : 0
+  explosionState.target = props.explosionActive ? 1 : 0
+  applyExplosionTransforms()
+  requestRender()
 }
 const dataUrlToBlob = (dataUrl, mime = 'image/png') => {
   const parts = dataUrl.split(',')
@@ -444,7 +760,8 @@ const rasterizeAndUpdateTextures = async (force = false) => {
     topMaterial = new THREE.MeshBasicMaterial({
       map: topTexture,
       side: THREE.FrontSide,
-      transparent: false,
+      transparent: true,
+      opacity: 1,
       depthTest: true,
       depthWrite: true,
       polygonOffset: true,
@@ -454,7 +771,8 @@ const rasterizeAndUpdateTextures = async (force = false) => {
     bottomMaterial = new THREE.MeshBasicMaterial({
       map: bottomTexture,
       side: THREE.FrontSide,
-      transparent: false,
+      transparent: true,
+      opacity: 1,
       depthTest: true,
       depthWrite: true,
       polygonOffset: true,
@@ -463,8 +781,12 @@ const rasterizeAndUpdateTextures = async (force = false) => {
     })
   } else {
     topMaterial.map = topTexture
+    topMaterial.transparent = true
+    topMaterial.opacity = 1
     topMaterial.needsUpdate = true
     bottomMaterial.map = bottomTexture
+    bottomMaterial.transparent = true
+    bottomMaterial.opacity = 1
     bottomMaterial.needsUpdate = true
   }
 
@@ -503,9 +825,13 @@ const rebuildGeometry = async (geometrySource = null, { onMeshReady } = {}) => {
       mesh.geometry?.dispose?.()
       mesh = null
     }
+    disposeCoreMesh()
     geometryBox = geometry.boundingBox?.clone() || null
     mesh = new THREE.Mesh(geometry, [topMaterial, bottomMaterial, sideMaterial])
     scene.add(mesh)
+    buildCoreMesh(geometry)
+    updateBaseMeshVisibility()
+    requestExplosionRebuild()
     onMeshReady?.()
     smoothRefitToBox()
     requestRender()
@@ -576,12 +902,18 @@ const exportPngBlob = async () => {
   })
 }
 const exportGltfBlob = async () => {
-  if (!mesh) throw new Error('Mesh unavailable')
+  const baseMesh = mesh
+  if (!baseMesh) {
+    console.warn('[Pcb3dPreview] export: no primary mesh available', { explosionActive: props.explosionActive })
+    throw new Error('Mesh unavailable')
+  }
+  const targetMesh = cloneMeshForExport(baseMesh)
+  if (!targetMesh) throw new Error('Mesh unavailable')
   const exporter = new GLTFExporter()
   return new Promise((resolve, reject) => {
     try {
       exporter.parse(
-        mesh,
+        targetMesh,
         (result) => {
           if (result instanceof ArrayBuffer) {
             resolve(new Blob([result], { type: 'model/gltf-binary' }))
@@ -681,10 +1013,13 @@ const destroyThree = () => {
   clearTimeout(spinTimer)
   cancelAnimationFrame(rafId)
   stopLoopSoon()
+  lastFrameTime = 0
   controls?.dispose?.()
   disposeTextures()
   sideMaterial?.dispose?.()
   sideMaterial = null
+  disposeCoreMesh()
+  clearExplosionGroup()
   renderer?.dispose?.()
   terminateGeometryWorker()
   terminateRasterWorker()
@@ -731,6 +1066,8 @@ const refreshPreview = async (force = false) => {
         mesh = null
       }
       geometryBox = null
+      disposeCoreMesh()
+      clearExplosionGroup()
       disposeTextures()
       requestRender()
       resolveLoading()
@@ -782,6 +1119,7 @@ watch(() => props.resolution, async () => {
 
 watch(() => props.borderColor, async () => {
   sideMaterial?.color?.set(props.borderColor)
+  coreMaterial?.color?.set(props.borderColor || '#f5d398')
   await refreshPreview(true)
 })
 
@@ -796,6 +1134,17 @@ watch(() => props.backgroundColor, () => {
 
 watch(() => props.fitPadding, () => { smoothRefitToBox() })
 watch(() => props.fitLerpMs, () => { /* 下次拟合会使用新的过渡时长 */ })
+
+watch(() => props.explosionLayers, () => {
+  requestExplosionRebuild()
+}, { deep: true })
+
+watch(() => props.explosionActive, (isActive) => {
+  explosionState.target = isActive ? 1 : 0
+  if (isActive && !explosionMeshes.length) requestExplosionRebuild()
+  updateBaseMeshVisibility()
+  startLoop()
+})
 
 watch(() => [props.displayWidth, props.displayHeight], () => {
   if (!renderer || !camera) return

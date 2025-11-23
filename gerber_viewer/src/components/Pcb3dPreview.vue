@@ -65,6 +65,7 @@ let explosionBuildToken = 0
 let explosionRebuildScheduled = false
 let coreMesh = null
 let coreMaterial = null
+let exportGeometry = null
 const explosionState = { progress: 0, target: 0 }
 const explosionLayerSequence = [
   { type: 'drill', side: 'bottom', offsetIndex: -5, opacity: 0.7, color: '#dcdcdc' },
@@ -295,24 +296,29 @@ const prepareGeometryForExport = (geometry) => {
   cloned.computeVertexNormals()
   return cloned
 }
-const cloneMeshForExport = (sourceMesh) => {
-  if (!sourceMesh) {
-    console.warn('[Pcb3dPreview] export: source mesh missing')
-    return null
-  }
-  if (!sourceMesh.geometry) {
-    console.warn('[Pcb3dPreview] export: source mesh missing geometry')
-    return null
-  }
-  const cloned = sourceMesh.clone()
-  cloned.geometry = prepareGeometryForExport(sourceMesh.geometry)
-  if (Array.isArray(sourceMesh.material)) {
-    cloned.material = sourceMesh.material.map((mat) => mat?.clone?.() || mat)
-  } else if (sourceMesh.material?.clone) {
-    cloned.material = sourceMesh.material.clone()
-  }
-  cloned.visible = true
+const cloneMaterialForExport = (material) => {
+  if (!material) return null
+  const cloned = material.clone ? material.clone() : material
+  cloned.transparent = false
+  cloned.opacity = 1
   return cloned
+}
+const cloneMeshForExport = () => {
+  const baseGeometry = exportGeometry || mesh?.geometry
+  if (!baseGeometry) {
+    console.warn('[Pcb3dPreview] export: source geometry missing')
+    return null
+  }
+  if (!mesh) {
+    console.warn('[Pcb3dPreview] export: mesh reference missing')
+    return null
+  }
+  const preparedGeometry = prepareGeometryForExport(baseGeometry)
+  const baseMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+  const clonedMaterials = baseMaterials.map(cloneMaterialForExport)
+  const exportMesh = new THREE.Mesh(preparedGeometry, clonedMaterials)
+  exportMesh.visible = true
+  return exportMesh
 }
 const updateBaseMeshVisibility = () => {
   const t = THREE.MathUtils.clamp(explosionState.progress, 0, 1)
@@ -825,6 +831,8 @@ const rebuildGeometry = async (geometrySource = null, { onMeshReady } = {}) => {
       mesh.geometry?.dispose?.()
       mesh = null
     }
+    exportGeometry?.dispose?.()
+    exportGeometry = geometry.clone()
     disposeCoreMesh()
     geometryBox = geometry.boundingBox?.clone() || null
     mesh = new THREE.Mesh(geometry, [topMaterial, bottomMaterial, sideMaterial])
@@ -1019,6 +1027,8 @@ const destroyThree = () => {
   sideMaterial?.dispose?.()
   sideMaterial = null
   disposeCoreMesh()
+  exportGeometry?.dispose?.()
+  exportGeometry = null
   clearExplosionGroup()
   renderer?.dispose?.()
   terminateGeometryWorker()
@@ -1066,6 +1076,8 @@ const refreshPreview = async (force = false) => {
         mesh = null
       }
       geometryBox = null
+      exportGeometry?.dispose?.()
+      exportGeometry = null
       disposeCoreMesh()
       clearExplosionGroup()
       disposeTextures()

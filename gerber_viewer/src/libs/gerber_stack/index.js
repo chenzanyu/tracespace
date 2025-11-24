@@ -242,6 +242,7 @@ export function createLayerDisplay(tree, ctx, colorValue, opacity = 1) {
   const layerContainer = new Container()
   layerContainer.eventMode = 'none'
 
+  const chunks = []
   const createChunk = () => {
     const container = new Container({ isRenderGroup: true })
     container.eventMode = 'none'
@@ -258,18 +259,30 @@ export function createLayerDisplay(tree, ctx, colorValue, opacity = 1) {
     container.setMask({ mask, inverse: true })
 
     layerContainer.addChild(container)
-    return { container, solid, mask, hasClear: false }
+    const chunk = { container, solid, mask, hasClear: false }
+    chunks.push(chunk)
+    return chunk
   }
 
-  let chunk = null
-  for (const graphic of tree.children || []) {
+  let chunk = createChunk()
+  const graphics = tree.children || []
+
+  for (const graphic of graphics) {
     const isClear = graphic.polarity === CLEAR
-    const needsChunk = chunk === null || (!isClear && chunk.hasClear)
 
-    if (needsChunk) chunk = createChunk()
+    if (isClear) {
+      for (const target of chunks) {
+        drawGraphicRecursive(graphic, ctx, target, 'mask')
+        target.hasClear = true
+      }
+      continue
+    }
 
-    drawGraphicRecursive(graphic, ctx, chunk, isClear ? 'mask' : 'solid')
-    if (isClear) chunk.hasClear = true
+    if (chunk.hasClear) {
+      chunk = createChunk()
+    }
+
+    drawGraphicRecursive(graphic, ctx, chunk, 'solid')
   }
 
   return layerContainer

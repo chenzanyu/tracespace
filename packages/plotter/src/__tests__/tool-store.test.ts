@@ -114,4 +114,58 @@ describe('tool state store', () => {
       variableValues: [1, 2, 3],
     })
   })
+
+  it('should enforce the minimum diameter for inch circle tools', () => {
+    const toolDefinition: Parser.ToolDefinition = {
+      type: Parser.TOOL_DEFINITION,
+      code: '1',
+      shape: {type: Parser.CIRCLE, diameter: 0},
+      hole: undefined,
+    }
+
+    const subject = createToolStore()
+    const result = subject.use(toolDefinition)
+
+    expect(result).to.eql({
+      type: SIMPLE_TOOL,
+      shape: {type: Parser.CIRCLE, diameter: 0.001},
+      hole: undefined,
+    })
+  })
+
+  it('should enforce the minimum diameter for millimeter circle tools', () => {
+    const toolDefinition: Parser.ToolDefinition = {
+      type: Parser.TOOL_DEFINITION,
+      code: '1',
+      shape: {type: Parser.CIRCLE, diameter: 0},
+      hole: undefined,
+    }
+
+    const subject = createToolStore({units: Parser.MM})
+    const result = subject.use(toolDefinition)
+
+    expect(result).to.eql({
+      type: SIMPLE_TOOL,
+      shape: {type: Parser.CIRCLE, diameter: 0.0254},
+      hole: undefined,
+    })
+  })
+
+  it('should enforce the minimum diameter for circular holes', () => {
+    const toolDefinition: Parser.ToolDefinition = {
+      type: Parser.TOOL_DEFINITION,
+      code: '1',
+      shape: {type: Parser.CIRCLE, diameter: 2},
+      hole: {type: Parser.CIRCLE, diameter: 0},
+    }
+
+    const subject = createToolStore()
+    const result = subject.use(toolDefinition)
+
+    expect(result).to.eql({
+      type: SIMPLE_TOOL,
+      shape: {type: Parser.CIRCLE, diameter: 2},
+      hole: {type: Parser.CIRCLE, diameter: 0.001},
+    })
+  })
 })

@@ -16,7 +16,7 @@ export {TWO_PI, positionsEqual} from './coordinate-math'
 
 export function plot(tree: GerberTree): ImageTree {
   const plotOptions = getPlotOptions(tree)
-  const toolStore = createToolStore()
+  const toolStore = createToolStore(plotOptions)
   const locationStore = createLocationStore()
   const graphicPlotter = createGraphicPlotter(tree.filetype)
   const children = []

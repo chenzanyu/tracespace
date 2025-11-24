@@ -34,7 +34,9 @@ describe('creating a plot tree', () => {
     const {createLocationStore} = locationStoreCreator
     const {createGraphicPlotter} = graphicPlotterCreator
 
-    td.when(createToolStore(), {times: 1}).thenReturn(toolStore)
+    td.when(createToolStore(td.matchers.isA(Object)), {times: 1}).thenReturn(
+      toolStore
+    )
     td.when(createLocationStore(), {times: 1}).thenReturn(locationStore)
     td.when(createGraphicPlotter(Parser.GERBER), {times: 1}).thenReturn(
       graphicPlotter

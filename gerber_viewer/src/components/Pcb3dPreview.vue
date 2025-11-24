@@ -69,6 +69,11 @@ let coreMaterial = null
 let exportGeometry = null
 const boxSizeHelper = new THREE.Vector3()
 const explosionState = { progress: 0, target: 0 }
+const explosionAnimation = {
+  expandEasing: 2.2,
+  collapseEasing: 3.1,
+  minDeltaMs: 16,
+}
 const explosionLayerSequence = [
   { type: 'drill', side: 'bottom', offsetIndex: -5, opacity: 0.7, color: '#dcdcdc' },
   { type: 'solderpaste', side: 'bottom', offsetIndex: -4, opacity: 0.65, color: '#b4b8c0' },
@@ -409,20 +414,14 @@ const applyExplosionTransforms = () => {
 const updateExplosionAnimation = (deltaMs) => {
   if (!explosionGroup) return
   const epsilon = 1e-4
-  if (explosionState.target === 0) {
-    const direction = explosionState.progress < explosionState.target ? 1 : -1
-    const step = Math.min(1, (deltaMs || 16) / 300)
-    explosionState.progress = THREE.MathUtils.clamp(explosionState.progress + direction * step, 0, 1)
-  } else {
-    const deltaSeconds = Math.max(deltaMs || 16, 16) / 1000
-    const easing = 2.2
-    explosionState.progress = THREE.MathUtils.damp(
-      explosionState.progress,
-      explosionState.target,
-      easing,
-      deltaSeconds,
-    )
-  }
+  const deltaSeconds = Math.max(deltaMs || explosionAnimation.minDeltaMs, explosionAnimation.minDeltaMs) / 1000
+  const easing = explosionState.target === 0 ? explosionAnimation.collapseEasing : explosionAnimation.expandEasing
+  explosionState.progress = THREE.MathUtils.damp(
+    explosionState.progress,
+    explosionState.target,
+    easing,
+    deltaSeconds,
+  )
   if (Math.abs(explosionState.progress - explosionState.target) <= epsilon) {
     explosionState.progress = explosionState.target
   }

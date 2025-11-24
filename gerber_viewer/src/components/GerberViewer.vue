@@ -59,7 +59,7 @@
               图层列表
             </button>
             <button
-              class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+              class="px-3.5 py-2 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
               title="设置" @click="openSettings">
               <span class="pi pi-cog text-lg"></span>
             </button>
@@ -82,15 +82,19 @@
               <img :src="resetIcon" alt="reset 3d view" class="w-6 h-6" />
             </button>
             <button
-              class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
-              :class="canExplode ? (explosionActive ? 'bg-white/90 text-[#0f1220]' : '') : 'opacity-50 cursor-not-allowed'"
-              title="展开 / 还原叠层" :disabled="!canExplode" @click="toggleExplosion"
+              class="px-3.5 py-2 rounded-md uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition"
+              :class="canExplode
+                ? (explosionActive
+                  ? 'bg-[#0092b8] text-white border-[#3fd3ff] drop-shadow-[0_0_12px_rgba(0,146,184,0.8)]'
+                  : 'bg-gray-900/80 text-white border-white/30 hover:bg-gray-800')
+                : 'bg-gray-900/50 text-white border-white/10 opacity-60 cursor-not-allowed'"
+              title="展开/还原模型" :disabled="!canExplode" @click="toggleExplosion"
             >
-              <span class="pi pi-sitemap"></span>
+              <span class="pi pi-sitemap text-lg"></span>
             </button>
             <div class="relative">
               <button
-                class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+                class="px-3.5 py-3 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
                 title="下载 3D 模型" @click.stop="toggleDownloadMenu">
                 <span class="pi pi-download"></span>
               </button>
@@ -141,7 +145,8 @@
           :display-height="previewSize.height"
           :explosion-active="explosionActive"
           :explosion-layers="explosionLayers"
-          borderColor="#e8e8e8"
+          borderColor="#eae276"
+          core-color="#eae276"
           :fitPadding="1.55"
           @loading-change="handlePcb3dLoading" />
       </section>
@@ -255,6 +260,11 @@ const previewSize = reactive({ width: 0, height: 0 })
 const previewContainerWidth = computed(() => (previewSize.width > 0 ? `${previewSize.width}px` : '100%'))
 const previewContainerHeight = computed(() => (previewSize.height > 0 ? `${previewSize.height}px` : '100%'))
 let previewResizeObserver = null
+const boardOutlineColor = computed(() => {
+  const outlineLayer = orderedLayers.find((layer) => layer.type === 'outline')
+  if (outlineLayer?.color) return outlineLayer.color
+  return '#e8e8e8'
+})
 
 const enablePerfLogs = import.meta.env?.DEV ?? false
 const perfLabel = (phase) => `[perf][GerberViewer] ${phase}`

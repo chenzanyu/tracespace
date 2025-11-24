@@ -20,6 +20,7 @@ const props = defineProps({
   bottomSvg: { type: String, required: true },
   thickness: { type: Number, default: 0.016 },
   borderColor: { type: String, default: 'rgb(255, 235, 150)' },
+  coreColor: { type: String, default: 'rgb(234, 226, 118)' },
   backgroundColor: { type: String, default: '#0f1220' },
   containerWidth: { type: String, default: '100%' },
   containerHeight: { type: String, default: '100%' },
@@ -66,6 +67,7 @@ let explosionRebuildScheduled = false
 let coreMesh = null
 let coreMaterial = null
 let exportGeometry = null
+const boxSizeHelper = new THREE.Vector3()
 const explosionState = { progress: 0, target: 0 }
 const explosionLayerSequence = [
   { type: 'drill', side: 'bottom', offsetIndex: -5, opacity: 0.7, color: '#dcdcdc' },
@@ -78,6 +80,27 @@ const explosionLayerSequence = [
   { type: 'silkscreen', side: 'top', offsetIndex: 3, opacity: 0.95, color: '#ffffff' },
   { type: 'solderpaste', side: 'top', offsetIndex: 4, opacity: 0.65, color: '#b4b8c0' },
 ]
+const updateCameraDepthRange = (box = geometryBox) => {
+  if (!camera) return
+  const thickness = Math.max(props.thickness || 0.016, 0.0005)
+  if (box) box.getSize(boxSizeHelper)
+  else boxSizeHelper.set(thickness, thickness, thickness)
+  const diagonal = boxSizeHelper.length() || thickness
+  const radius = Math.max(thickness, diagonal / 2)
+  const near = Math.max(radius / 500, thickness * 0.5, 0.01)
+  const far = Math.max(radius * 20, near + thickness * 80)
+  const nearChanged = Math.abs((camera.near ?? 0) - near) > 1e-4
+  const farChanged = Math.abs((camera.far ?? 0) - far) > 1e-2
+  if (nearChanged || farChanged) {
+    camera.near = near
+    camera.far = far
+    camera.updateProjectionMatrix()
+  }
+  if (controls) {
+    controls.minDistance = Math.max(near * 1.1, radius / 25)
+    controls.maxDistance = Math.max(far * 0.9, controls.minDistance + radius * 2)
+  }
+}
 
 const pushLoading = () => {
   loadingDepth += 1
@@ -140,6 +163,13 @@ let bottomTexture = null
 let topMaterial = null
 let bottomMaterial = null
 let sideMaterial = null
+const resolveCoreColor = () => props.coreColor || props.borderColor || '#f5d398'
+const applyCoreMaterialColor = () => {
+  if (!coreMaterial) return
+  const color = resolveCoreColor()
+  coreMaterial.color?.set?.(color)
+  requestRender()
+}
 
 const getHostSize = () => {
   const rect = container.value?.getBoundingClientRect?.()
@@ -221,7 +251,7 @@ const buildCoreMesh = (geometry) => {
       position.needsUpdate = true
     }
     coreMaterial = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(props.borderColor || '#f5d398'),
+      color: new THREE.Color(resolveCoreColor()),
       transparent: true,
       opacity: 0,
       depthWrite: true,
@@ -355,8 +385,8 @@ const computeExplosionOffset = (index, zStep) => {
   const thickness = Math.max(props.thickness || 0.016, 0.001)
   const topZ = geometryBox?.max?.z ?? thickness / 2
   const bottomZ = geometryBox?.min?.z ?? -thickness / 2
-  const epsilon = Math.max(zStep * 0.02, 0.0005)
-  const originZ = dir > 0 ? topZ + epsilon : bottomZ - epsilon
+  const baseGap = Math.max(zStep * 0.12, thickness * 0.3, 0.005)
+  const originZ = dir > 0 ? topZ + baseGap : bottomZ - baseGap
   const offset = new THREE.Vector3(0, 0, dir * zStep * magnitude)
   const origin = new THREE.Vector3(0, 0, originZ)
   return { offset, origin }
@@ -406,6 +436,18 @@ const findExplosionLayerSource = (map, type, side) => {
 const rebuildExplosionGroup = async () => {
   explosionBuildToken += 1
   const token = explosionBuildToken
+  const prevProgress = THREE.MathUtils.clamp(
+    Number.isFinite(explosionState.progress) ? explosionState.progress : 0,
+    0,
+    1,
+  )
+  const prevTarget = THREE.MathUtils.clamp(
+    Number.isFinite(explosionState.target)
+      ? explosionState.target
+      : (props.explosionActive ? 1 : 0),
+    0,
+    1,
+  )
   clearExplosionGroup()
   if (!scene || !geometryBox || !(props.explosionLayers || []).length) return
   const width = geometryBox.max.x - geometryBox.min.x
@@ -468,8 +510,10 @@ const rebuildExplosionGroup = async () => {
     return { mesh, material, texture, offset, origin }
   })
   scene.add(explosionGroup)
-  explosionState.progress = props.explosionActive ? 1 : 0
-  explosionState.target = props.explosionActive ? 1 : 0
+  const nextTarget = props.explosionActive ? 1 : 0
+  const nextProgress = nextTarget === 0 ? 0 : (prevTarget === 0 ? 0 : prevProgress)
+  explosionState.progress = nextProgress
+  explosionState.target = nextTarget
   applyExplosionTransforms()
   requestRender()
 }
@@ -835,6 +879,7 @@ const rebuildGeometry = async (geometrySource = null, { onMeshReady } = {}) => {
     exportGeometry = geometry.clone()
     disposeCoreMesh()
     geometryBox = geometry.boundingBox?.clone() || null
+    updateCameraDepthRange(geometryBox)
     mesh = new THREE.Mesh(geometry, [topMaterial, bottomMaterial, sideMaterial])
     scene.add(mesh)
     buildCoreMesh(geometry)
@@ -1013,6 +1058,8 @@ const initThree = async () => {
     })
     ro.observe(container.value)
   }
+
+  updateCameraDepthRange(geometryBox)
 }
 
 const destroyThree = () => {
@@ -1076,6 +1123,7 @@ const refreshPreview = async (force = false) => {
         mesh = null
       }
       geometryBox = null
+      updateCameraDepthRange(null)
       exportGeometry?.dispose?.()
       exportGeometry = null
       disposeCoreMesh()
@@ -1131,11 +1179,15 @@ watch(() => props.resolution, async () => {
 
 watch(() => props.borderColor, async () => {
   sideMaterial?.color?.set(props.borderColor)
-  coreMaterial?.color?.set(props.borderColor || '#f5d398')
+  applyCoreMaterialColor()
   await refreshPreview(true)
+})
+watch(() => props.coreColor, () => {
+  applyCoreMaterialColor()
 })
 
 watch(() => props.thickness, async () => {
+  updateCameraDepthRange(geometryBox)
   await refreshPreview(true)
 })
 

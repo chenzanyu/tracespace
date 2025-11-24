@@ -419,28 +419,45 @@ export function fromParsedLayers(
     parsedLayers.map((p) => [p.id, p.parseTree])
   )
 
-  // If some layers are missing units/format, borrow from layers that have them
-  let commonUnits: any | undefined
-  let commonFormat: [number, number] | undefined
-  let commonZero: any | undefined
+  const metaGroupKey = (type?: GerberType): 'drill' | 'nonDrill' =>
+    type === 'drill' ? 'drill' : 'nonDrill'
+  const borrowedMeta: Record<'drill' | 'nonDrill', {
+    units?: any
+    format?: [number, number]
+    zeroSuppression?: any
+  }> = {
+    drill: {},
+    nonDrill: {},
+  }
+
   for (const p of parsedLayers) {
     const nodes = p.parseTree.children as any[]
+    const group = borrowedMeta[metaGroupKey(p.type)]
     for (const n of nodes) {
-      if (!commonUnits && n?.type === P_UNITS && n.units) commonUnits = n.units
-      if (!commonFormat && n?.type === P_COORDFMT && n.format) commonFormat = n.format
-      if (!commonZero && n?.type === P_COORDFMT && n.zeroSuppression) commonZero = n.zeroSuppression
+      if (!group.units && n?.type === P_UNITS && n.units) group.units = n.units
+      if (!group.format && n?.type === P_COORDFMT && n.format) group.format = n.format
+      if (!group.zeroSuppression && n?.type === P_COORDFMT && n.zeroSuppression) {
+        group.zeroSuppression = n.zeroSuppression
+      }
     }
   }
-  if (commonUnits || commonFormat || commonZero) {
-    for (const p of parsedLayers) {
-      const nodes = p.parseTree.children as any[]
-      const hasUnits = nodes.some((n) => n?.type === P_UNITS)
-      const hasFormat = nodes.some((n) => n?.type === P_COORDFMT)
-      const inserts: any[] = []
-      if (!hasUnits && commonUnits) inserts.push({ type: P_UNITS, units: commonUnits })
-      if (!hasFormat && (commonFormat || commonZero)) inserts.push({ type: P_COORDFMT, format: commonFormat, zeroSuppression: commonZero })
-      if (inserts.length > 0) p.parseTree.children = [...inserts, ...nodes]
+
+  for (const p of parsedLayers) {
+    const nodes = p.parseTree.children as any[]
+    const group = borrowedMeta[metaGroupKey(p.type)]
+    if (!group.units && !group.format && !group.zeroSuppression) continue
+    const hasUnits = nodes.some((n) => n?.type === P_UNITS)
+    const hasFormat = nodes.some((n) => n?.type === P_COORDFMT)
+    const inserts: any[] = []
+    if (!hasUnits && group.units) inserts.push({ type: P_UNITS, units: group.units })
+    if (!hasFormat && (group.format || group.zeroSuppression)) {
+      inserts.push({
+        type: P_COORDFMT,
+        format: group.format,
+        zeroSuppression: group.zeroSuppression,
+      })
     }
+    if (inserts.length > 0) p.parseTree.children = [...inserts, ...nodes]
   }
 
   // === 绘图：生成 plotTrees 并自定义闭合容差 ===

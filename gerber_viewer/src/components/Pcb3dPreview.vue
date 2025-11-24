@@ -207,6 +207,46 @@ const setupTextureParams = (tex, { repeatX = 1 } = {}) => {
   tex.anisotropy = Math.min(maxAniso || 1, 8)
   tex.needsUpdate = true
 }
+const getTextureImageSize = (image) => {
+  if (!image) return { width: 0, height: 0 }
+  const width = image.width || image.videoWidth || image.naturalWidth || image.displayWidth || image.clientWidth || image.canvas?.width || 0
+  const height = image.height || image.videoHeight || image.naturalHeight || image.displayHeight || image.clientHeight || image.canvas?.height || 0
+  return { width, height }
+}
+const cloneTextureForExport = (texture, { flipX = false } = {}) => {
+  if (!texture) return null
+  if (!flipX) {
+    const cloned = texture.clone ? texture.clone() : texture
+    if (cloned?.repeat) cloned.repeat.x = Math.abs(cloned.repeat.x || 1)
+    cloned.needsUpdate = true
+    return cloned
+  }
+  const image = texture.image
+  const { width, height } = getTextureImageSize(image)
+  if (!width || !height) {
+    const fallback = texture.clone ? texture.clone() : texture
+    if (fallback?.repeat) fallback.repeat.x = Math.abs(fallback.repeat.x || 1)
+    fallback.needsUpdate = true
+    return fallback
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    const fallback = texture.clone ? texture.clone() : texture
+    if (fallback?.repeat) fallback.repeat.x = Math.abs(fallback.repeat.x || 1)
+    fallback.needsUpdate = true
+    return fallback
+  }
+  ctx.translate(width, 0)
+  ctx.scale(-1, 1)
+  ctx.drawImage(image, 0, 0, width, height)
+  const flipped = new THREE.CanvasTexture(canvas)
+  setupTextureParams(flipped, { repeatX: 1 })
+  flipped.needsUpdate = true
+  return flipped
+}
 
 const disposeTextures = () => {
   topTexture?.dispose?.()
@@ -331,11 +371,19 @@ const prepareGeometryForExport = (geometry) => {
   cloned.computeVertexNormals()
   return cloned
 }
-const cloneMaterialForExport = (material) => {
+const cloneMaterialForExport = (material, index = 0) => {
   if (!material) return null
   const cloned = material.clone ? material.clone() : material
   cloned.transparent = false
   cloned.opacity = 1
+  if (material.map) {
+    const flipBottom = material === bottomMaterial || index === 1
+    const exportTexture = cloneTextureForExport(material.map, { flipX: flipBottom })
+    if (exportTexture) {
+      cloned.map = exportTexture
+      cloned.needsUpdate = true
+    }
+  }
   return cloned
 }
 const cloneMeshForExport = () => {
@@ -350,7 +398,7 @@ const cloneMeshForExport = () => {
   }
   const preparedGeometry = prepareGeometryForExport(baseGeometry)
   const baseMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
-  const clonedMaterials = baseMaterials.map(cloneMaterialForExport)
+  const clonedMaterials = baseMaterials.map((mat, index) => cloneMaterialForExport(mat, index))
   const exportMesh = new THREE.Mesh(preparedGeometry, clonedMaterials)
   exportMesh.visible = true
   return exportMesh

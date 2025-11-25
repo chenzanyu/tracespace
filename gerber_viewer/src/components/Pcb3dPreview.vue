@@ -26,6 +26,7 @@ const props = defineProps({
   explosionActive: { type: Boolean, default: false },
   fitPadding: { type: Number, default: 1.1 },
   fitLerpMs: { type: Number, default: 150 },
+  explosionSpacingMultiplier: { type: Number, default: 4 },
   active: { type: Boolean, default: true },
 })
 
@@ -39,12 +40,152 @@ let controls = null
 let resizeObserver = null
 let modelGroup = null
 let geometryBox = null
+const geometryCenter = new THREE.Vector3()
+const doubleSideMaterials = new WeakSet()
 let rafId = 0
 let running = false
 const objectLoader = new THREE.ObjectLoader()
+const typedArrayConstructors = {
+  Float32Array,
+  Float64Array,
+  Uint32Array,
+  Uint16Array,
+  Uint8Array,
+  Uint8ClampedArray,
+  Int32Array,
+  Int16Array,
+  Int8Array,
+}
+
+const buildMeshGroupFromData = (meshData, defaultColor) => {
+  if (!meshData) return new THREE.Group()
+  if (meshData.format === 'buffer-geometry') {
+    const group = new THREE.Group()
+    const chunks = Array.isArray(meshData.chunks) ? meshData.chunks : []
+    const createTypedArray = (desc, fallback = Float32Array) => {
+      if (!desc?.array) return null
+      const ArrayCtor = typedArrayConstructors[desc.arrayType] || fallback
+      try {
+        return new ArrayCtor(desc.array)
+      } catch (error) {
+        console.warn('[Pcb3dPreview] Failed to create typed array', desc, error)
+        return null
+      }
+    }
+    const addAttribute = (geometry, name, desc) => {
+      const typedArray = createTypedArray(desc)
+      if (!typedArray) return
+      geometry.setAttribute(
+        name,
+        new THREE.BufferAttribute(
+          typedArray,
+          desc.itemSize || 3,
+          desc.normalized ?? false
+        )
+      )
+    }
+    chunks.forEach((chunk) => {
+      const geometry = new THREE.BufferGeometry()
+      addAttribute(geometry, 'position', chunk?.attributes?.position)
+      addAttribute(geometry, 'normal', chunk?.attributes?.normal)
+      addAttribute(geometry, 'uv', chunk?.attributes?.uv)
+      if (chunk?.index?.array) {
+        const indexArray = createTypedArray(
+          chunk.index,
+          chunk.index?.arrayType === 'Uint16Array' ? Uint16Array : Uint32Array
+        )
+        if (indexArray) {
+          geometry.setIndex(new THREE.BufferAttribute(indexArray, 1))
+        }
+      } else {
+        geometry.setIndex(null)
+      }
+      const color =
+        chunk?.material?.color != null ? chunk.material.color : defaultColor
+      const material = new THREE.MeshBasicMaterial({
+        color: color ?? 0xffffff,
+        transparent: chunk?.material?.transparent ?? false,
+        opacity: chunk?.material?.opacity ?? 1,
+      })
+      const mesh = new THREE.Mesh(geometry, material)
+      group.add(mesh)
+    })
+    return group
+  }
+  try {
+    return objectLoader.parse(meshData)
+  } catch (error) {
+    console.warn('[Pcb3dPreview] Failed to parse legacy mesh JSON', error)
+    return new THREE.Group()
+  }
+}
 let explosionEntries = []
 const explosionState = { progress: 0, target: 0 }
-const fitState = { active: false, start: 0, target: 0, startTime: 0, duration: 150 }
+const fitState = {
+  active: false,
+  start: new THREE.Vector3(),
+  target: new THREE.Vector3(),
+  startTime: 0,
+  duration: 150,
+}
+const explosionEpsilon = 1e-3
+const explosionSizeVector = new THREE.Vector3()
+const topLayerRenderOrders = {
+  copper: 90,
+  soldermask: 92,
+  silkscreen: 94,
+  solderpaste: 96,
+}
+const bottomLayerRenderOrders = {
+  copper: 10,
+  soldermask: 12,
+  silkscreen: 14,
+  solderpaste: 16,
+}
+
+const getLayerRenderOrder = (type, side) => {
+  if (type === 'outline') return 50
+  if (type === 'drill') return 52
+  if (side === 'top') return topLayerRenderOrders[type] ?? 80
+  if (side === 'bottom') return bottomLayerRenderOrders[type] ?? 20
+  if (type === 'drawing') return 40
+  return 60
+}
+
+const applyMaterialDepthBias = (material, order) => {
+  if (!material) return
+  material.polygonOffset = true
+  const factor = -order * 0.02
+  const units = -order * 0.5
+  material.polygonOffsetFactor = factor
+  material.polygonOffsetUnits = units
+  material.needsUpdate = true
+}
+
+const configureLayerVisuals = (mesh, type, side) => {
+  if (!mesh) return
+  const order = getLayerRenderOrder(type, side)
+  mesh.renderOrder = order
+  mesh.traverse((child) => {
+    if (!child.isMesh) return
+    child.renderOrder = order
+    if (Array.isArray(child.material)) {
+      child.material.forEach((mat) => applyMaterialDepthBias(mat, order))
+    } else {
+      applyMaterialDepthBias(child.material, order)
+    }
+    if (type === 'outline') {
+      const materials = Array.isArray(child.material) ? child.material : [child.material]
+      materials.forEach((mat) => {
+        if (mat && !doubleSideMaterials.has(mat)) {
+          mat.side = THREE.DoubleSide
+          mat.needsUpdate = true
+          doubleSideMaterials.add(mat)
+        }
+      })
+    }
+  })
+}
 
 const laminarDefaults = {
   total: 1.6,
@@ -120,6 +261,15 @@ const updateRendererSize = () => {
   camera.updateProjectionMatrix()
 }
 
+const handleViewportResize = () => {
+  updateRendererSize()
+  if (geometryBox) {
+    smoothRefitToBox()
+  } else {
+    requestRender()
+  }
+}
+
 const requestRender = () => {
   if (!renderer || !scene || !camera) return
   if (!running) {
@@ -138,6 +288,33 @@ const stopLoop = () => {
   if (!running) return
   running = false
   cancelAnimationFrame(rafId)
+}
+
+const isExplosionSettled = () =>
+  Math.abs(explosionState.progress - explosionState.target) <= explosionEpsilon
+
+const stopLoopIfIdle = () => {
+  if (!fitState.active && isExplosionSettled()) {
+    stopLoop()
+  }
+}
+
+const handleControlsStart = () => {
+  startLoop()
+}
+
+const handleControlsChange = () => {
+  startLoop()
+}
+
+const handleControlsEnd = () => {
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => {
+      stopLoopIfIdle()
+    })
+    return
+  }
+  setTimeout(() => stopLoopIfIdle(), 16)
 }
 
 const updateExplosionAnimation = () => {
@@ -160,17 +337,14 @@ const animate = () => {
   if (fitState.active && camera) {
     const duration = Math.max(1, fitState.duration)
     const t = Math.min(1, (now - fitState.startTime) / duration)
-    const nextZ = THREE.MathUtils.lerp(fitState.start, fitState.target, t)
-    camera.position.setZ(nextZ)
+    camera.position.lerpVectors(fitState.start, fitState.target, t)
     if (t >= 1) fitState.active = false
   }
   controls?.update()
   updateExplosionAnimation()
   renderer?.render(scene, camera)
   rafId = requestAnimationFrame(animate)
-  if (!fitState.active && Math.abs(explosionState.progress - explosionState.target) <= 1e-3) {
-    stopLoop()
-  }
+  stopLoopIfIdle()
 }
 
 const determineExplosionOrder = (type, side) => {
@@ -183,10 +357,25 @@ const determineExplosionOrder = (type, side) => {
   return 0
 }
 
+const resolveExplosionStep = () => {
+  const totalThickness = Math.max(props.thickness || laminarDefaults.total, 0.001)
+  const rawInput = Number(props.explosionSpacingMultiplier)
+  const spacingMultiplier = Number.isFinite(rawInput) ? Math.max(rawInput, 0) : 0
+  return totalThickness * spacingMultiplier
+}
+
 const computeExplosionOffset = (type, side) => {
   const order = determineExplosionOrder(type, side)
-  const step = Math.max(props.thickness || 0.001, 0.001) * 0.35
+  const step = resolveExplosionStep()
   return order * step
+}
+
+const refreshExplosionOffsets = () => {
+  if (!explosionEntries.length) return
+  explosionEntries.forEach((entry) => {
+    entry.offset = computeExplosionOffset(entry.type, entry.side)
+  })
+  startLoop()
 }
 
 const computeLaminate = () => {
@@ -209,11 +398,12 @@ const classifyLayers = (entries) => {
   const drills = []
   for (const entry of entries) {
     if (!entry?.mesh) continue
-    const mesh = objectLoader.parse(entry.mesh)
+    const mesh = buildMeshGroupFromData(entry.mesh, entry.color)
     mesh.userData.layerId = entry.id
     mesh.userData.layerType = entry.type
     mesh.userData.layerSide = entry.side
     setMeshColor(mesh, entry.color)
+    configureLayerVisuals(mesh, entry.type, entry.side)
     if (entry.type === 'outline') {
       outline.push(mesh)
     } else if (entry.type === 'drill') {
@@ -228,10 +418,13 @@ const classifyLayers = (entries) => {
 }
 
 const explosionEntriesForMesh = (mesh, type, side, baseZ) => {
+  const offset = computeExplosionOffset(type, side)
   explosionEntries.push({
     mesh,
     baseZ,
-    offset: computeExplosionOffset(type, side),
+    offset,
+    type,
+    side,
   })
 }
 
@@ -293,6 +486,12 @@ const assembleLayers = (entries) => {
   }
   scene.add(modelGroup)
   geometryBox = new THREE.Box3().setFromObject(modelGroup)
+  if (geometryBox) {
+    geometryBox.getCenter(geometryCenter)
+  } else {
+    geometryCenter.set(0, 0, 0)
+  }
+  refreshExplosionOffsets()
   updateCameraDepthRange()
   smoothRefitToBox()
   requestRender()
@@ -309,6 +508,8 @@ const rebuildModel = async () => {
         modelGroup = null
       }
       geometryBox = null
+      geometryCenter.set(0, 0, 0)
+      controls?.target?.set?.(0, 0, 0)
       explosionEntries = []
       requestRender()
       return
@@ -336,6 +537,7 @@ const computeFitDistance = (box, width, height, padding) => {
 const smoothRefitToBox = () => {
   if (!camera || !controls) return
   if (!geometryBox) {
+    geometryCenter.set(0, 0, 0)
     controls.target.set(0, 0, 0)
     requestRender()
     return
@@ -343,12 +545,13 @@ const smoothRefitToBox = () => {
   const { width, height } = getHostSize()
   const distance = computeFitDistance(geometryBox, width, height, props.fitPadding || 1.1)
   if (!Number.isFinite(distance)) return
+  controls.target.copy(geometryCenter)
   fitState.active = true
-  fitState.start = camera.position.z
-  fitState.target = distance
+  fitState.start.copy(camera.position)
+  fitState.target.copy(geometryCenter)
+  fitState.target.z += distance
   fitState.startTime = performance.now()
   fitState.duration = Math.max(props.fitLerpMs || 0, 0)
-  controls.target.set(0, 0, 0)
   startLoop()
 }
 
@@ -386,7 +589,13 @@ const initThree = () => {
   scene = new THREE.Scene()
   camera = new THREE.PerspectiveCamera(30, 1, 0.001, 1000)
   camera.position.set(0, 0, 1)
-  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, depth: true, stencil: false })
+  renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    alpha: false,
+    depth: true,
+    stencil: false,
+    logarithmicDepthBuffer: true,
+  })
   renderer.outputColorSpace = SRGBColorSpace
   renderer.setPixelRatio(window.devicePixelRatio || 1)
   renderer.domElement.style.display = 'block'
@@ -397,14 +606,13 @@ const initThree = () => {
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
   controls.dampingFactor = 0.08
-  controls.addEventListener('start', startLoop)
-  controls.addEventListener('change', startLoop)
-  controls.addEventListener('end', stopLoop)
+  controls.addEventListener('start', handleControlsStart)
+  controls.addEventListener('change', handleControlsChange)
+  controls.addEventListener('end', handleControlsEnd)
   updateRendererSize()
   if (typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => {
-      updateRendererSize()
-      requestRender()
+      handleViewportResize()
     })
     resizeObserver.observe(container.value)
   }
@@ -422,6 +630,7 @@ const destroyThree = () => {
   }
   explosionEntries = []
   geometryBox = null
+  geometryCenter.set(0, 0, 0)
   renderer?.dispose?.()
   if (renderer?.domElement && container.value && renderer.domElement.parentNode === container.value) {
     container.value.removeChild(renderer.domElement)
@@ -429,6 +638,11 @@ const destroyThree = () => {
   scene = null
   camera = null
   renderer = null
+  if (controls) {
+    controls.removeEventListener('start', handleControlsStart)
+    controls.removeEventListener('change', handleControlsChange)
+    controls.removeEventListener('end', handleControlsEnd)
+  }
   controls = null
 }
 
@@ -481,13 +695,15 @@ watch(() => props.explosionActive, (isActive) => {
   explosionState.target = isActive ? 1 : 0
   startLoop()
 })
+watch(() => props.explosionSpacingMultiplier, () => {
+  refreshExplosionOffsets()
+})
 watch(() => props.fitPadding, () => { if (geometryBox) smoothRefitToBox() })
 watch(() => props.fitLerpMs, () => { /* new lerp duration applied next refit */ })
 watch(
   () => [props.containerWidth, props.containerHeight, props.displayWidth, props.displayHeight],
   () => {
-    updateRendererSize()
-    requestRender()
+    handleViewportResize()
   }
 )
 watch(() => props.active, async (isActive) => {
@@ -496,8 +712,7 @@ watch(() => props.active, async (isActive) => {
     return
   }
   await nextTick()
-  updateRendererSize()
-  requestRender()
+  handleViewportResize()
 })
 
 onMounted(async () => {

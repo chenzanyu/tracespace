@@ -81,17 +81,44 @@
               title="重置 3D 视图" @click="resetPcb3dView">
               <img :src="resetIcon" alt="reset 3d view" class="w-6 h-6" />
             </button>
-            <button
-              class="px-3.5 py-2 rounded-md uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition"
-              :class="canExplode
-                ? (explosionActive
-                  ? 'bg-[#0092b8] text-white border-[#3fd3ff] drop-shadow-[0_0_12px_rgba(0,146,184,0.8)]'
+            <div class="relative" @mouseenter="showSpacingPanel" @mouseleave="hideSpacingPanel">
+              <button
+                class="px-3.5 py-2 rounded-md uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition"
+                :class="canExplode
+                  ? (explosionActive
+                    ? 'bg-[#0092b8] text-white border-[#3fd3ff] drop-shadow-[0_0_12px_rgba(0,146,184,0.8)]'
                   : 'bg-gray-900/80 text-white border-white/30 hover:bg-gray-800')
-                : 'bg-gray-900/50 text-white border-white/10 opacity-60 cursor-not-allowed'"
-              title="展开/还原模型" :disabled="!canExplode" @click="toggleExplosion"
-            >
-              <span class="pi pi-sitemap text-lg"></span>
-            </button>
+                  : 'bg-gray-900/50 text-white border-white/10 opacity-60 cursor-not-allowed'"
+                title="展开/还原模型" :disabled="!canExplode" @click="toggleExplosion"
+              >
+                <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                  <rect x="9" y="4" width="11" height="11" rx="1.5" stroke-linejoin="round"></rect>
+                  <rect x="4" y="9" width="11" height="11" rx="1.5" stroke-linejoin="round"></rect>
+                </svg>
+              </button>
+              <transition name="fade">
+                <div
+                  v-if="spacingPanelVisible"
+                  class="absolute left-0 top-full mt-2 w-56 rounded-lg border border-gray-700 bg-gray-900/95 px-3 py-2 text-xs text-gray-100 shadow-xl z-40"
+                >
+                  <div class="flex items-center justify-between">
+                    <span class="font-semibold tracking-wide uppercase text-[10px] text-gray-300">Layer spacing</span>
+                    <span class="text-cyan-300 font-semibold">{{ spacingDisplayValue }}</span>
+                  </div>
+                  <div class="mt-3">
+                    <input
+                      class="w-full accent-[#0092b8]"
+                      type="range"
+                      step="0.1"
+                      :min="spacingSliderMin"
+                      :max="spacingSliderMax"
+                      :value="spacingSliderValue"
+                      @input="handleSpacingSliderInput($event.target.value)"
+                    />
+                  </div>
+                </div>
+              </transition>
+            </div>
             <div class="relative">
               <button
                 class="px-3.5 py-3 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
@@ -107,6 +134,12 @@
                 </button>
               </div>
             </div>
+            <button
+              class="px-3.5 py-2 rounded-md bg-gray-900/80 text-white text-xs tracking-wide border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+              title="导出调试信息" @click="exportDebugInfo"
+            >
+              导出调试
+            </button>
           </template>
         </div>
 
@@ -140,6 +173,7 @@
           :display-width="previewSize.width"
           :display-height="previewSize.height"
           :explosion-active="explosionActive"
+          :explosion-spacing-multiplier="explosionSpacing"
           borderColor="#eae276"
           core-color="#eae276"
           :fitPadding="1.55"
@@ -251,6 +285,14 @@ const viewOptions = [
   { label: '3D', value: '3d' },
 ]
 const explosionActive = ref(false)
+const explosionSpacing = ref(8)
+const spacingPanelVisible = ref(false)
+const spacingPanelInitialized = ref(false)
+const spacingSliderValue = ref(explosionSpacing.value)
+const spacingSliderMin = 0
+const spacingSliderMax = 32
+let spacingHideHandle = null
+const spacingDisplayValue = computed(() => spacingSliderValue.value.toFixed(1))
 const canExplode = computed(() => pcb3dModel.layers.length > 0)
 const downloadMenuOpen = ref(false)
 const previewAreaRef = ref(null)
@@ -258,6 +300,12 @@ const previewSize = reactive({ width: 0, height: 0 })
 const previewContainerWidth = computed(() => (previewSize.width > 0 ? `${previewSize.width}px` : '100%'))
 const previewContainerHeight = computed(() => (previewSize.height > 0 ? `${previewSize.height}px` : '100%'))
 let previewResizeObserver = null
+const workerDebugLog = reactive({
+  jobs: [],
+  errors: [],
+})
+const workerPayloadLog = reactive([])
+const maxDebugEntries = 50
 const enablePerfLogs = import.meta.env?.DEV ?? false
 const perfLabel = (phase) => `[perf][GerberViewer] ${phase}`
 const runPerfSync = (phase, fn) => {
@@ -292,6 +340,60 @@ const triggerFileDownload = (blob, filename) => {
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
 }
+const trimDebugEntries = (entries) => {
+  while (entries.length > maxDebugEntries) entries.shift()
+}
+const summarizeParseTree = (tree) => {
+  if (!tree) return null
+  return {
+    filetype: tree.filetype ?? tree.format?.filetype ?? null,
+    statements: Array.isArray(tree.statements) ? tree.statements.length : undefined,
+    hasBoundingBox: Boolean(tree.boundingBox),
+    units: tree.units ?? tree.format?.units ?? null,
+  }
+}
+const computeBoundsFromArray = (arr) => {
+  if (!Array.isArray(arr) || arr.length < 3) return null
+  let minX = Infinity, minY = Infinity, minZ = Infinity
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+  for (let i = 0; i < arr.length; i += 3) {
+    const x = Number(arr[i]) || 0
+    const y = Number(arr[i + 1]) || 0
+    const z = Number(arr[i + 2]) || 0
+    if (x < minX) minX = x
+    if (y < minY) minY = y
+    if (z < minZ) minZ = z
+    if (x > maxX) maxX = x
+    if (y > maxY) maxY = y
+    if (z > maxZ) maxZ = z
+  }
+  return {
+    min: [minX, minY, minZ],
+    max: [maxX, maxY, maxZ],
+  }
+}
+const summarizeMeshData = (meshData) => {
+  if (!meshData) return null
+  if (meshData.summary) return meshData.summary
+  if (meshData.format === 'buffer-geometry') {
+    const chunks = Array.isArray(meshData.chunks) ? meshData.chunks : []
+    let totalVertices = 0
+    const geometrySummaries = chunks.map((chunk, index) => {
+      const vertexCount = chunk?.attributes?.position?.count ?? 0
+      totalVertices += vertexCount
+      return {
+        index,
+        vertexCount,
+      }
+    })
+    return {
+      geometryCount: chunks.length,
+      totalVertices,
+      geometries: geometrySummaries,
+    }
+  }
+  return null
+}
 const toggleDownloadMenu = (event) => {
   event?.stopPropagation?.()
   downloadMenuOpen.value = !downloadMenuOpen.value
@@ -299,9 +401,143 @@ const toggleDownloadMenu = (event) => {
 const handleGlobalClick = () => {
   downloadMenuOpen.value = false
 }
+const recordWorkerJobStart = (jobId, payload) => {
+  workerDebugLog.jobs.push({
+    jobId,
+    timestamp: Date.now(),
+    layerId: payload.layerId,
+    type: payload.type,
+    side: payload.side ?? null,
+    outline: Boolean(payload.outline),
+    hasParseTree: Boolean(payload.parseTree),
+    parseTreeSummary: summarizeParseTree(payload.parseTree),
+    drillShapeCount: Array.isArray(payload.drillShapes) ? payload.drillShapes.length : 0,
+  })
+  trimDebugEntries(workerDebugLog.jobs)
+}
+const recordWorkerJobResult = (jobId, { success, message, result }) => {
+  const entry = workerDebugLog.jobs.find((job) => job.jobId === jobId)
+  if (!entry) return
+  entry.completedAt = Date.now()
+  entry.success = success
+  if (success) {
+    entry.meshSummary = result?.meshSummary ?? summarizeMeshData(result?.mesh)
+  } else if (!success) {
+    entry.errorMessage = message || 'unknown worker failure'
+  }
+}
+const recordWorkerError = (detail) => {
+  workerDebugLog.errors.push({
+    timestamp: Date.now(),
+    ...detail,
+  })
+  trimDebugEntries(workerDebugLog.errors)
+}
 const toggleExplosion = () => {
   if (!canExplode.value) return
   explosionActive.value = !explosionActive.value
+}
+const clampSpacingValue = (value) => {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return explosionSpacing.value
+  return Math.min(spacingSliderMax, Math.max(spacingSliderMin, parsed))
+}
+const applySpacingValue = (value) => {
+  const clamped = clampSpacingValue(value)
+  explosionSpacing.value = clamped
+  spacingSliderValue.value = clamped
+}
+const clearSpacingHideTimer = () => {
+  if (spacingHideHandle) {
+    clearTimeout(spacingHideHandle)
+    spacingHideHandle = null
+  }
+}
+const showSpacingPanel = () => {
+  if (!canExplode.value) return
+  clearSpacingHideTimer()
+  spacingPanelVisible.value = true
+  if (!spacingPanelInitialized.value) {
+    spacingSliderValue.value = clampSpacingValue(explosionSpacing.value)
+    spacingPanelInitialized.value = true
+  } else {
+    spacingSliderValue.value = explosionSpacing.value
+  }
+}
+const hideSpacingPanel = () => {
+  clearSpacingHideTimer()
+  spacingHideHandle = setTimeout(() => {
+    spacingPanelVisible.value = false
+    spacingHideHandle = null
+  }, 3000)
+}
+const handleSpacingSliderInput = (value) => {
+  applySpacingValue(value)
+  spacingPanelInitialized.value = true
+}
+const exportDebugInfo = () => {
+  try {
+    const meshSummaries = pcb3dModel.layers.map((layer) => ({
+      id: layer.id,
+      type: layer.type,
+      side: layer.side,
+      color: layer.color,
+      meshSummary: layer.meshSummary ?? summarizeMeshData(layer.mesh),
+    }))
+    const workerPayloadsSnapshot = workerPayloadLog.map((entry) => ({
+      jobId: entry.jobId,
+      payload: {
+        layerId: entry.payload?.layerId,
+        type: entry.payload?.type,
+        side: entry.payload?.side,
+        outline: entry.payload?.outline,
+        parseTreeSummary: summarizeParseTree(entry.payload?.parseTree),
+        drillShapeSummaries: entry.payload?.drillShapes?.map((tree) => summarizeParseTree(tree)),
+      },
+    }))
+    const payload = {
+      timestamp: new Date().toISOString(),
+      board: {
+        thickness: boardThickness.value,
+        viewBox: boardViewBox.value,
+        width: boardWidthMm.value,
+        height: boardHeightMm.value,
+      },
+      viewer: {
+        explosionActive: explosionActive.value,
+        explosionSpacing: explosionSpacing.value,
+        measurementActive: measurementActive.value,
+      },
+      orderedLayers: orderedLayers.map((layer) => ({
+        id: layer.id,
+        filename: layer.filename,
+        type: layer.type,
+        side: layer.side,
+        visible: layer.visible,
+        color: layer.color,
+      })),
+      memoryLayers: memoryLayers.value,
+      pcb3dModelLayers: pcb3dModel.layers.map((layer) => ({
+        id: layer.id,
+        type: layer.type,
+        side: layer.side,
+        color: layer.color,
+        meshSummary: layer.meshSummary ?? summarizeMeshData(layer.mesh),
+      })),
+      meshSummaries,
+      workerDebug: {
+        jobs: workerDebugLog.jobs,
+        errors: workerDebugLog.errors,
+        pending: pcbModelJobs.pending,
+        total: pcbModelJobs.total,
+        rawPayloads: workerPayloadsSnapshot,
+      },
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    triggerFileDownload(blob, `pcb-debug-${Date.now()}.json`)
+  } catch (error) {
+    console.error('[GerberViewer] 导出调试信息失败', error)
+  }
 }
 const downloadPcbAsset = async (type) => {
   try {
@@ -348,7 +584,7 @@ const loadingMessage = computed(() => '加载中')
 // 设置面板
 const isSettingsOpen = ref(false)
 const editableLayers = reactive([])
-const supported3dTypes = new Set(['copper', 'soldermask', 'silkscreen', 'solderpaste', 'outline', 'drill'])
+const supported3dTypes = new Set(['copper', 'soldermask', 'silkscreen', 'solderpaste', 'outline'])
 let pcbWorker = null
 const pcbWorkerJobs = new Map()
 let pcbWorkerSeq = 0
@@ -371,7 +607,10 @@ const handlePcbWorkerMessage = (event) => {
   if (!entry) return
   pcbWorkerJobs.delete(jobId)
   if (success) entry.resolve(result)
-  else entry.reject(new Error(message || 'worker error'))
+  else {
+    console.error('[GerberViewer] PCB worker failure detail', message)
+    entry.reject(new Error(message || 'worker error'))
+  }
 }
 
 const disposePcbWorker = () => {
@@ -387,7 +626,29 @@ const ensurePcbWorker = () => {
     pcbWorker = createPcbWorker()
     pcbWorker.onmessage = handlePcbWorkerMessage
     pcbWorker.onerror = (event) => {
-      console.error('[GerberViewer] PCB model worker error', event)
+      const details =
+        event?.message ||
+        event?.error?.message ||
+        event?.error?.stack ||
+        'Unknown worker error'
+      console.error(
+        '[GerberViewer] PCB model worker error',
+        details,
+        event?.filename,
+        event?.lineno,
+        event?.colno,
+        event?.error
+      )
+      recordWorkerError({
+        message: details,
+        filename: event?.filename,
+        line: event?.lineno,
+        column: event?.colno,
+        errorStack: event?.error?.stack,
+      })
+      if (typeof event?.preventDefault === 'function') {
+        event.preventDefault()
+      }
     }
   }
   return pcbWorker
@@ -413,16 +674,21 @@ const queueWorkerJob = (payload) => {
   const jobId = ++pcbWorkerSeq
   pcbModelJobs.pending += 1
   updateWorkerLoading()
+  workerPayloadLog.push({ jobId, payload })
+  trimDebugEntries(workerPayloadLog)
+  recordWorkerJobStart(jobId, payload)
   return new Promise((resolve, reject) => {
     pcbWorkerJobs.set(jobId, {
       resolve: (result) => {
         pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
         updateWorkerLoading()
+        recordWorkerJobResult(jobId, { success: true, result })
         resolve(result)
       },
       reject: (error) => {
         pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
         updateWorkerLoading()
+        recordWorkerJobResult(jobId, { success: false, message: error?.message })
         reject(error)
       },
     })
@@ -443,17 +709,26 @@ const applyWorkerLayer = (payload) => {
     side: payload.side,
     color: payload.color,
     mesh: payload.mesh,
+    meshSummary: payload.meshSummary ?? summarizeMeshData(payload.mesh),
   })
   pcb3dModel.layers = layers
   pcb3dModel.version += 1
 }
 
-const buildPcbModelFromParsedLayers = (parsedLayers) => {
+const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
   resetPcbModelState()
   pcbModelJobs.total = 0
   pcbModelJobs.pending = 0
   updateWorkerLoading()
   if (!Array.isArray(parsedLayers) || parsedLayers.length === 0) return
+  const boardRegions = Array.isArray(boardShape?.regions) ? boardShape.regions : undefined
+  const boardBounds = Array.isArray(boardShape?.size) ? boardShape.size : undefined
+  const drillParseTrees = parsedLayers
+    .filter((layer) => {
+      const type = String(layer?.type || '').toLowerCase()
+      return type.includes('drill') && layer?.parseTree
+    })
+    .map((layer) => layer.parseTree)
   const layersFor3d = parsedLayers.filter(
     (layer) => layer?.type && supported3dTypes.has(layer.type)
   )
@@ -467,6 +742,10 @@ const buildPcbModelFromParsedLayers = (parsedLayers) => {
       side: layer.side ?? null,
       color: getLayerColor(layer.id, layer.type),
       outline: layer.type === 'outline',
+      boardShapeRegions: layer.type === 'outline' ? boardRegions : undefined,
+      boardClipRegions: boardRegions,
+      drillShapes: drillParseTrees.length ? drillParseTrees : undefined,
+      boardBounds,
     })
       .then((result) => {
         applyWorkerLayer(result)
@@ -533,7 +812,10 @@ const handleUploadFile = async (file) => {
       runHybridPipeline(memoryLayers.value)
     )
     runPerfSync('upload:buildOrderedLayers', () => applyModernResult(pipeline.modern))
-    buildPcbModelFromParsedLayers(pipeline.parsedLayers)
+    buildPcbModelFromParsedLayers(
+      pipeline.parsedLayers,
+      pipeline.modern?.plotResult?.boardShape
+    )
     logPerf('upload:layers-ready', {
       count: orderedLayers.length,
       boardViewBox: boardViewBox.value,
@@ -654,7 +936,10 @@ const applySettings = async () => {
       runHybridPipeline(list)
     )
     applyModernResult(pipeline.modern, { preserveVisuals: true })
-    buildPcbModelFromParsedLayers(pipeline.parsedLayers)
+    buildPcbModelFromParsedLayers(
+      pipeline.parsedLayers,
+      pipeline.modern?.plotResult?.boardShape
+    )
     recenterSignal.value += 1
     memoryLayers.value = list
     isSettingsOpen.value = false
@@ -684,6 +969,14 @@ watch(
     }
   }
 )
+
+watch(canExplode, (value) => {
+  if (!value) {
+    spacingPanelVisible.value = false
+    spacingPanelInitialized.value = false
+    clearSpacingHideTimer()
+  }
+})
 
 onMounted(() => {
   nextTick(() => {

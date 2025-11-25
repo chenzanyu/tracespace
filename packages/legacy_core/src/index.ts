@@ -425,6 +425,12 @@ export function fromParsedLayers(
     layers.map(l => [l.id, plotter.plot(parseTreesById[l.id])])
   )
 
+  const collectCompositeBoxes = (filterFn: (layer: Layer) => boolean) =>
+    layers
+      .filter(filterFn)
+      .map(layer => plotTreesById[layer.id]?.size)
+      .filter((box): box is plotter.BoundingBox.Box => Boolean(box) && !plotter.BoundingBox.isEmpty(box))
+
   // 从首个图确定文件单位（'mm' 或 'in'）
   const firstTree: ImageTree | undefined = plotTreesById[layers[0]?.id as string]
   const fileUnits: 'mm' | 'in' = (firstTree?.units as any) ?? 'mm'
@@ -438,10 +444,12 @@ export function fromParsedLayers(
 
   const boardShape = plotBoardShape(layers, plotTreesById, maxGapUnits)
   // Composite viewBox across all plotted layers (no board clipping)
-  const allSize = plotter.BoundingBox.sum(
-    Object.values(plotTreesById).map(t => t.size)
-  )
-  const compositeViewBox = renderer.sizeToViewBox(allSize)
+  const nonDrillBoxes = collectCompositeBoxes(layer => layer.type !== 'drill')
+  const fallbackBoxes = nonDrillBoxes.length > 0
+    ? nonDrillBoxes
+    : collectCompositeBoxes(() => true)
+  const compositeBox = plotter.BoundingBox.sum(fallbackBoxes)
+  const compositeViewBox = renderer.sizeToViewBox(compositeBox)
   const boardShapeRender = renderBoardShape(boardShape)
 
   // === 分层渲染：强制使用相同 viewBox ===

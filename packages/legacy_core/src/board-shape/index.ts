@@ -41,12 +41,21 @@ export function plotBoardShape(
   plotTreesById: Record<string, ImageTree>,
   maximumGap: number
 ): BoardShape {
+  const collectLayerBoxes = (filterFn: (layer: Layer) => boolean): SizeEnvelope[] =>
+    layers
+      .filter(filterFn)
+      .map(layer => plotTreesById[layer.id]?.size)
+      .filter((box): box is SizeEnvelope => Boolean(box) && !BoundingBox.isEmpty(box))
+
+  const nonDrillBoxes = collectLayerBoxes(layer => layer.type !== 'drill')
+  const anyLayerBoxes = nonDrillBoxes.length > 0
+    ? nonDrillBoxes
+    : collectLayerBoxes(() => true)
+
   const outlineId = getOutlineLayer(layers)
   const outlinePlot =
     outlineId === undefined ? undefined : plotTreesById[outlineId]
-  const size = BoundingBox.sum(
-    Object.values(plotTreesById).map(({size}) => size)
-  )
+  const size = BoundingBox.sum(anyLayerBoxes)
 
   if (outlinePlot === undefined) {
     return {

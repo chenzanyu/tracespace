@@ -72,21 +72,42 @@ const normalizeType = (type?: MemoryLayerInput['type']): GerberType | undefined 
 
 export function prepareParsedLayers(layersInput: MemoryLayerInput[]): ParsedMemoryLayer[] {
   const parsedLayers: ParsedMemoryLayer[] = []
+  const parseFailures: Array<{filename?: string; message: string}> = []
 
   for (const layer of layersInput) {
-    const id = randomId()
-    const contents = toString(layer.gerber)
-    const parseTree = parser.parse(contents) as GerberTree
+    try {
+      const id = randomId()
+      const contents = toString(layer.gerber)
+      const parseTree = parser.parse(contents) as GerberTree
 
-    parsedLayers.push({
-      id,
-      filename: layer.filename,
-      type: normalizeType(layer.type),
-      side: normalizeSide(layer.side),
-      parseTree,
-      color: layer.color,
-      opacity: layer.opacity,
-    })
+      parsedLayers.push({
+        id,
+        filename: layer.filename,
+        type: normalizeType(layer.type),
+        side: normalizeSide(layer.side),
+        parseTree,
+        color: layer.color,
+        opacity: layer.opacity,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      parseFailures.push({filename: layer.filename, message})
+      const name = layer.filename || '<unnamed layer>'
+      console.warn(`[tracespace][hybrid-core] failed to parse "${name}": ${message}`)
+    }
+  }
+
+  if (
+    parsedLayers.length === 0 &&
+    layersInput.length > 0 &&
+    parseFailures.length > 0
+  ) {
+    const detail = parseFailures
+      .map(({filename, message}) => `${filename ?? '<unnamed>'}: ${message}`)
+      .join('; ')
+    throw new Error(
+      `[tracespace][hybrid-core] failed to parse any layers${detail ? ` (${detail})` : ''}`,
+    )
   }
 
   return parsedLayers

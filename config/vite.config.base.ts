@@ -63,11 +63,14 @@ export function defineLibraryConfig(
       rollupOptions: {
         external: (n: string) => n.startsWith('node:') || n in dependencies,
         output: {
-          globals: Object.fromEntries(
-            Object.keys(dependencies)
-              .filter(name => name.startsWith('@tracespace/'))
-              .map(name => [name, pascalCase(name)])
-          ),
+          globals: {
+            ...Object.fromEntries(
+              Object.keys(dependencies)
+                .filter(name => name.startsWith('@tracespace/'))
+                .map(name => [name, pascalCase(name)])
+            ),
+            'polygon-clipping': 'polygonClipping',
+          },
         },
       },
     },

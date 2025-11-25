@@ -744,7 +744,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
       outline: layer.type === 'outline',
       boardShapeRegions: layer.type === 'outline' ? boardRegions : undefined,
       boardClipRegions: boardRegions,
-      drillShapes: drillParseTrees.length ? drillParseTrees : undefined,
+      drillShapes: layer.type === 'outline' ? drillParseTrees : undefined,
       boardBounds,
     })
       .then((result) => {

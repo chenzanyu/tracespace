@@ -29,7 +29,6 @@ export function renderImageRegion(element) {
       console.warn('[pcbModel] Unsupported region segment type', segment)
     }
   }
-
   const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings)
   geometry.translate(0, 0, -0.5)
   return geometry

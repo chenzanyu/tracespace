@@ -66,11 +66,27 @@ export function plotBoardShape(
     }
   }
 
-  const inputSegments = outlinePlot.children
-    .filter((node): node is ImagePath => node.type === IMAGE_PATH)
-    .flatMap(path => path.segments)
+  const outlinePaths = outlinePlot.children.filter(
+    (node): node is ImagePath => node.type === IMAGE_PATH
+  )
+  const outlineRegions = outlinePlot.children.filter(
+    (node): node is ImageRegion => node.type === IMAGE_REGION
+  )
+  const inputSegments = outlinePaths.flatMap(path => path.segments)
 
   if (inputSegments.length === 0) {
+    if (outlineRegions.length > 0) {
+      const derivedRegions = outlineRegions.map(region => ({
+        type: IMAGE_REGION as const,
+        segments: region.segments,
+      }))
+      const regionBox = BoundingBox.fromGraphics(derivedRegions)
+      return {
+        size: BoundingBox.isEmpty(regionBox) ? size : regionBox,
+        regions: derivedRegions,
+        openPaths: [],
+      }
+    }
     return {
       size,
       regions: [],
@@ -87,10 +103,6 @@ export function plotBoardShape(
     // numerically close (CAD output quirks, rounding, or missing final edge).
     // In that case, derive a rectangular board shape from the bounding box of
     // all outline paths so top/bottom renders still get a reasonable clip.
-    const outlinePaths = outlinePlot.children.filter(
-      (n): n is ImagePath => n.type === IMAGE_PATH
-    )
-
     if (outlinePaths.length > 0) {
       const box = outlinePaths
         .map(p => BoundingBox.fromPath(p.segments, p.width))

@@ -126,7 +126,6 @@ const buildLayerPayload = payload => {
         imageTree,
         normalizeColor(color),
         () => {},
-        payload.type,
         payload.outline,
         drillTrees,
         boardShapeRegions

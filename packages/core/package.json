@@ -49,7 +49,8 @@
     "@tracespace/parser": "workspace:*",
     "@tracespace/plotter": "workspace:*",
     "@tracespace/renderer": "workspace:*",
-    "@tracespace/xml-id": "workspace:*"
+    "@tracespace/xml-id": "workspace:*",
+    "polygon-clipping": "^0.15.7"
   },
   "devDependencies": {
     "hast-util-to-html": "^8.0.4",

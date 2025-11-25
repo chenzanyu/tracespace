@@ -1,6 +1,6 @@
 export const extrudeSettings = {
   depth: 1,
-  bevelEnabled: true,
+  bevelEnabled: false,
   bevelSize: 0,
   bevelSegments: 1,
   bevelThickness: 0,

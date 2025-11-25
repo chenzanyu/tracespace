@@ -105,9 +105,6 @@
                 <button class="block w-full text-left px-3 py-2 hover:bg-gray-800" @click.stop="downloadPcbAsset('gltf')">
                   下载 glTF 模型
                 </button>
-                <button class="block w-full text-left px-3 py-2 hover:bg-gray-800" @click.stop="downloadPcbAsset('svg')">
-                  下载 SVG（顶/底）
-                </button>
               </div>
             </div>
           </template>
@@ -135,8 +132,7 @@
         <Pcb3dPreview
           ref="pcb3dRef"
           v-show="activeView === '3d'"
-          :top-svg="topSvg"
-          :bottom-svg="bottomSvg"
+          :model-data="pcb3dModel"
           :thickness="boardThickness"
           :active="activeView === '3d'"
           :container-width="previewContainerWidth"
@@ -144,7 +140,6 @@
           :display-width="previewSize.width"
           :display-height="previewSize.height"
           :explosion-active="explosionActive"
-          :explosion-layers="explosionLayers"
           borderColor="#eae276"
           core-color="#eae276"
           :fitPadding="1.55"
@@ -217,7 +212,6 @@
 import { ref, reactive, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
 import { runHybridPipeline } from '@tracespace/hybrid-core'
-import { stringifySvg as legacyStringifySvg } from '@tracespace/legacy-core'
 import UploadPanel from './UploadPanel.vue'
 import LayerStackPreview from './LayerStackPreview.vue'
 import Pcb3dPreview from './Pcb3dPreview.vue'
@@ -236,7 +230,6 @@ const layerPanelTransitionEnabled = ref(true)
 const showFilenames = ref(false)
 const isLayerLoading = ref(false)
 const isLayerRenderLoading = ref(false)
-const isPcb3dLoading = ref(false)
 const orderedLayers = reactive([])
 const memoryLayers = ref([])
 const fmRef = ref(null)
@@ -244,28 +237,27 @@ const boardViewBox = ref([0, 0, 0, 0])
 const boardWidthMm = ref(0)
 const boardHeightMm = ref(0)
 const pcb3dRef = ref(null)
-const topSvg = ref('')
-const bottomSvg = ref('')
 const boardThickness = ref(0.016)
+const pcb3dModel = reactive({
+  layers: [],
+  version: 0,
+})
+const pcbModelJobs = reactive({ pending: 0, total: 0 })
+const workerLoading = ref(false)
+const viewerLoading = ref(false)
+const isPcb3dLoading = computed(() => workerLoading.value || viewerLoading.value)
 const viewOptions = [
   { label: 'Layers', value: 'layers' },
   { label: '3D', value: '3d' },
 ]
-const explosionLayers = ref([])
 const explosionActive = ref(false)
-const canExplode = computed(() => explosionLayers.value.length > 0)
+const canExplode = computed(() => pcb3dModel.layers.length > 0)
 const downloadMenuOpen = ref(false)
 const previewAreaRef = ref(null)
 const previewSize = reactive({ width: 0, height: 0 })
 const previewContainerWidth = computed(() => (previewSize.width > 0 ? `${previewSize.width}px` : '100%'))
 const previewContainerHeight = computed(() => (previewSize.height > 0 ? `${previewSize.height}px` : '100%'))
 let previewResizeObserver = null
-const boardOutlineColor = computed(() => {
-  const outlineLayer = orderedLayers.find((layer) => layer.type === 'outline')
-  if (outlineLayer?.color) return outlineLayer.color
-  return '#e8e8e8'
-})
-
 const enablePerfLogs = import.meta.env?.DEV ?? false
 const perfLabel = (phase) => `[perf][GerberViewer] ${phase}`
 const runPerfSync = (phase, fn) => {
@@ -289,7 +281,6 @@ const runPerfAsync = async (phase, fn) => {
 const logPerf = (phase, payload) => {
   if (enablePerfLogs) console.log(perfLabel(phase), payload)
 }
-const explosionLayerTypes = new Set(['copper', 'soldermask', 'silkscreen', 'solderpaste', 'drill'])
 const triggerFileDownload = (blob, filename) => {
   if (!blob) return
   const url = URL.createObjectURL(blob)
@@ -300,10 +291,6 @@ const triggerFileDownload = (blob, filename) => {
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
-}
-const stripXmlDeclaration = (svg) => {
-  if (typeof svg !== 'string') return ''
-  return svg.replace(/<\?xml[^>]*?>/gi, '').trim()
 }
 const toggleDownloadMenu = (event) => {
   event?.stopPropagation?.()
@@ -316,32 +303,12 @@ const toggleExplosion = () => {
   if (!canExplode.value) return
   explosionActive.value = !explosionActive.value
 }
-const downloadSvgPair = () => {
-  const targets = [
-    { data: topSvg.value, suffix: 'top' },
-    { data: bottomSvg.value, suffix: 'bottom' },
-  ]
-  let success = false
-  for (const target of targets) {
-    if (!target.data) continue
-    const sanitized = stripXmlDeclaration(target.data)
-    if (!sanitized) continue
-    const blob = new Blob([sanitized], { type: 'image/svg+xml;charset=utf-8' })
-    triggerFileDownload(blob, `pcb-${target.suffix}.svg`)
-    success = true
-  }
-  return success
-}
 const downloadPcbAsset = async (type) => {
   try {
     if (type === 'gltf') {
       const blob = await pcb3dRef.value?.exportGltf?.()
       if (!blob) throw new Error('glTF 导出失败')
       triggerFileDownload(blob, 'pcb-preview.glb')
-      return
-    }
-    if (type === 'svg') {
-      if (!downloadSvgPair()) throw new Error('缺少 SVG 数据')
       return
     }
     throw new Error(`未知导出类型: ${type}`)
@@ -381,10 +348,134 @@ const loadingMessage = computed(() => '加载中')
 // 设置面板
 const isSettingsOpen = ref(false)
 const editableLayers = reactive([])
+const supported3dTypes = new Set(['copper', 'soldermask', 'silkscreen', 'solderpaste', 'outline', 'drill'])
+let pcbWorker = null
+const pcbWorkerJobs = new Map()
+let pcbWorkerSeq = 0
+const defaultLayerColors = {
+  copper: '#f2c55b',
+  soldermask: '#1c7a2a',
+  silkscreen: '#ffffff',
+  solderpaste: '#b4b8c0',
+  drill: '#333333',
+  outline: '#bfa782',
+}
 
-let baseTopEl = null
-let baseBottomEl = null
-let legacyBoardUpdateToken = 0
+const createPcbWorker = () =>
+  new Worker(new URL('../workers/pcbModel.worker.js', import.meta.url), {type: 'module'})
+
+const handlePcbWorkerMessage = (event) => {
+  const {jobId, success, result, message} = event.data || {}
+  if (!jobId) return
+  const entry = pcbWorkerJobs.get(jobId)
+  if (!entry) return
+  pcbWorkerJobs.delete(jobId)
+  if (success) entry.resolve(result)
+  else entry.reject(new Error(message || 'worker error'))
+}
+
+const disposePcbWorker = () => {
+  if (pcbWorker) {
+    pcbWorker.terminate()
+    pcbWorker = null
+  }
+  pcbWorkerJobs.clear()
+}
+
+const ensurePcbWorker = () => {
+  if (!pcbWorker) {
+    pcbWorker = createPcbWorker()
+    pcbWorker.onmessage = handlePcbWorkerMessage
+    pcbWorker.onerror = (event) => {
+      console.error('[GerberViewer] PCB model worker error', event)
+    }
+  }
+  return pcbWorker
+}
+
+const getLayerColor = (layerId, type) => {
+  const matched = orderedLayers.find((layer) => layer.id === layerId)
+  if (matched?.color) return matched.color
+  return defaultLayerColors[type] || '#ffffff'
+}
+
+const resetPcbModelState = () => {
+  pcb3dModel.layers = []
+  pcb3dModel.version += 1
+}
+
+const updateWorkerLoading = () => {
+  workerLoading.value = pcbModelJobs.pending > 0
+}
+
+const queueWorkerJob = (payload) => {
+  const worker = ensurePcbWorker()
+  const jobId = ++pcbWorkerSeq
+  pcbModelJobs.pending += 1
+  updateWorkerLoading()
+  return new Promise((resolve, reject) => {
+    pcbWorkerJobs.set(jobId, {
+      resolve: (result) => {
+        pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
+        updateWorkerLoading()
+        resolve(result)
+      },
+      reject: (error) => {
+        pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
+        updateWorkerLoading()
+        reject(error)
+      },
+    })
+    worker.postMessage({
+      jobId,
+      action: 'build-layer',
+      payload,
+    })
+  })
+}
+
+const applyWorkerLayer = (payload) => {
+  if (!payload) return
+  const layers = pcb3dModel.layers.filter((entry) => entry.id !== payload.layerId)
+  layers.push({
+    id: payload.layerId,
+    type: payload.type,
+    side: payload.side,
+    color: payload.color,
+    mesh: payload.mesh,
+  })
+  pcb3dModel.layers = layers
+  pcb3dModel.version += 1
+}
+
+const buildPcbModelFromParsedLayers = (parsedLayers) => {
+  resetPcbModelState()
+  pcbModelJobs.total = 0
+  pcbModelJobs.pending = 0
+  updateWorkerLoading()
+  if (!Array.isArray(parsedLayers) || parsedLayers.length === 0) return
+  const layersFor3d = parsedLayers.filter(
+    (layer) => layer?.type && supported3dTypes.has(layer.type)
+  )
+  pcbModelJobs.total = layersFor3d.length
+  if (!layersFor3d.length) return
+  for (const layer of layersFor3d) {
+    queueWorkerJob({
+      layerId: layer.id,
+      parseTree: layer.parseTree,
+      type: layer.type,
+      side: layer.side ?? null,
+      color: getLayerColor(layer.id, layer.type),
+      outline: layer.type === 'outline',
+    })
+      .then((result) => {
+        applyWorkerLayer(result)
+      })
+      .catch((error) => {
+        console.error('[GerberViewer] PCB worker failed', error)
+      })
+  }
+}
 
 const setActiveView = (mode) => {
   if (mode === activeView.value) return
@@ -404,7 +495,7 @@ const setActiveView = (mode) => {
 
 const openLayerPanel = () => { isLayerPanelOpen.value = true }
 const collapseLayerPanel = () => { isLayerPanelOpen.value = false }
-const handlePcb3dLoading = (loading) => { isPcb3dLoading.value = loading }
+const handlePcb3dLoading = (loading) => { viewerLoading.value = loading }
 const handleLayerPreviewLoading = (loading) => { isLayerRenderLoading.value = loading }
 
 const toggleMeasurementMode = () => {
@@ -442,6 +533,7 @@ const handleUploadFile = async (file) => {
       runHybridPipeline(memoryLayers.value)
     )
     runPerfSync('upload:buildOrderedLayers', () => applyModernResult(pipeline.modern))
+    buildPcbModelFromParsedLayers(pipeline.parsedLayers)
     logPerf('upload:layers-ready', {
       count: orderedLayers.length,
       boardViewBox: boardViewBox.value,
@@ -450,7 +542,6 @@ const handleUploadFile = async (file) => {
     })
     currentStatusIndex.value = 1
     isLayerPanelOpen.value = false
-    applyLegacyBoardRenders(pipeline.legacy)
     recenterSignal.value += 1
   } catch (error) {
     console.error('[GerberViewer] handleUploadFile failed', error)
@@ -458,20 +549,6 @@ const handleUploadFile = async (file) => {
   } finally {
     isLayerLoading.value = false
   }
-}
-
-// 旧版渲染 & 颜色
-const updateBoardDimensionsFromBase = () => {
-  const fallbackWidth = Array.isArray(boardViewBox.value) ? boardViewBox.value[2] || 0 : 0
-  const fallbackHeight = Array.isArray(boardViewBox.value) ? boardViewBox.value[3] || 0 : 0
-  const parseDim = (attr, fallback) => {
-    const numeric = parseFloat(String(attr ?? '').replace('mm', ''))
-    return Number.isFinite(numeric) ? numeric : fallback
-  }
-  const widthAttr = baseTopEl?.properties?.width ?? baseBottomEl?.properties?.width
-  const heightAttr = baseTopEl?.properties?.height ?? baseBottomEl?.properties?.height
-  boardWidthMm.value = parseDim(widthAttr, fallbackWidth)
-  boardHeightMm.value = parseDim(heightAttr, fallbackHeight)
 }
 
 // 工具
@@ -520,6 +597,10 @@ const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
   if (!fm) return
   fmRef.value = fm
   boardViewBox.value = fm.renderLayersResult.boardShapeRender.viewBox
+  if (Array.isArray(boardViewBox.value) && boardViewBox.value.length >= 4) {
+    boardWidthMm.value = boardViewBox.value[2] || 0
+    boardHeightMm.value = boardViewBox.value[3] || 0
+  }
   const keep = preserveVisuals
     ? new Map(orderedLayers.map((layer) => [layer.filename, { color: layer.color, visible: layer.visible, opacity: layer.opacity }]))
     : null
@@ -541,61 +622,6 @@ const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
     })
   }
   orderedLayers.sort((a, b) => a.weight - b.weight)
-}
-
-const updateExplosionLayersFromLegacy = (renderLayersResult) => {
-  if (!renderLayersResult) {
-    explosionLayers.value = []
-    explosionActive.value = false
-    return
-  }
-  const entries = []
-  const rendersById = renderLayersResult.rendersById || {}
-  for (const layer of renderLayersResult.layers || []) {
-    if (!layer?.type || !explosionLayerTypes.has(layer.type)) continue
-    const node = rendersById[layer.id]
-    if (!node) continue
-    entries.push({
-      id: layer.id,
-      type: layer.type,
-      side: layer.side || null,
-      svg: legacyStringifySvg(node),
-    })
-  }
-  explosionLayers.value = entries
-  explosionActive.value = false
-}
-
-const commitLegacyBoardResult = (legacyResult, token) => {
-  if (token !== legacyBoardUpdateToken) return
-  if (!legacyResult) {
-    baseTopEl = null
-    baseBottomEl = null
-    topSvg.value = ''
-    bottomSvg.value = ''
-    boardWidthMm.value = 0
-    boardHeightMm.value = 0
-    explosionLayers.value = []
-    explosionActive.value = false
-    return
-  }
-  const { renderBoardResult, renderLayersResult } = legacyResult || {}
-  baseTopEl = renderBoardResult?.top ?? null
-  baseBottomEl = renderBoardResult?.bottom ?? null
-  if (renderLayersResult?.boardShapeRender?.viewBox) {
-    boardViewBox.value = renderLayersResult.boardShapeRender.viewBox
-  }
-  updateBoardDimensionsFromBase()
-  if (baseTopEl) topSvg.value = legacyStringifySvg(baseTopEl)
-  else topSvg.value = ''
-  if (baseBottomEl) bottomSvg.value = legacyStringifySvg(baseBottomEl)
-  else bottomSvg.value = ''
-  updateExplosionLayersFromLegacy(renderLayersResult)
-}
-
-const applyLegacyBoardRenders = (legacyResult) => {
-  const token = ++legacyBoardUpdateToken
-  commitLegacyBoardResult(legacyResult, token)
 }
 
 const applySettings = async () => {
@@ -628,7 +654,7 @@ const applySettings = async () => {
       runHybridPipeline(list)
     )
     applyModernResult(pipeline.modern, { preserveVisuals: true })
-    applyLegacyBoardRenders(pipeline.legacy)
+    buildPcbModelFromParsedLayers(pipeline.parsedLayers)
     recenterSignal.value += 1
     memoryLayers.value = list
     isSettingsOpen.value = false
@@ -638,6 +664,26 @@ const applySettings = async () => {
     isLayerLoading.value = false
   }
 }
+
+watch(
+  () => orderedLayers.map((layer) => ({ id: layer.id, color: layer.color })),
+  (entries) => {
+    const colorMap = new Map(entries.map((entry) => [entry.id, entry.color]))
+    let changed = false
+    const nextLayers = pcb3dModel.layers.map((layer) => {
+      const color = colorMap.get(layer.id)
+      if (color && color !== layer.color) {
+        changed = true
+        return { ...layer, color }
+      }
+      return layer
+    })
+    if (changed) {
+      pcb3dModel.layers = nextLayers
+      pcb3dModel.version += 1
+    }
+  }
+)
 
 onMounted(() => {
   nextTick(() => {
@@ -659,6 +705,7 @@ onBeforeUnmount(() => {
     previewResizeObserver.disconnect()
     previewResizeObserver = null
   }
+  disposePcbWorker()
 })
 </script>
 

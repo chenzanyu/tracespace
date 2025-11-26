@@ -138,6 +138,7 @@ const buildLayerPayload = payload => {
       }
     }
     let group = null
+    let renderDebug = null
     try {
       const renderStart = performance.now()
       group = renderThree(
@@ -146,8 +147,12 @@ const buildLayerPayload = payload => {
         () => {},
         payload.outline,
         drillTrees,
-        boardShapeRegions
+        boardShapeRegions,
+        payload.type,
+        boardBounds,
+        boardClipRegions
       )
+      renderDebug = group?.userData?.planarDebug || null
       logWorker('renderThree-complete', {
         ...contextBase,
         durationMs: Number((performance.now() - renderStart).toFixed(2)),
@@ -186,6 +191,7 @@ const buildLayerPayload = payload => {
           summary,
         },
         meshSummary: summary,
+        debug: renderDebug ? {planar: renderDebug} : null,
       },
       transferList,
     }

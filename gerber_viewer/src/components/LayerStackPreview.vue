@@ -53,7 +53,7 @@ const props = defineProps({
   active: { type: Boolean, default: true },
 })
 
-const emit = defineEmits(['exit-measurement', 'loading-change'])
+const emit = defineEmits(['exit-measurement', 'loading-change', 'debug-update'])
 
 const enablePerfLogs = import.meta.env?.DEV ?? false
 const perfLabel = (phase) => `[perf][LayerStack] ${phase}`
@@ -320,6 +320,7 @@ const updateComposite = async ({ recenter = false } = {}) => {
     let zIndex = 0
     const nextActiveIds = new Set()
     const stats = { reused: 0, rebuilt: 0, removed: 0 }
+    const pixiDebugPayload = []
     for (const { layer } of stackingOrder) {
       nextActiveIds.add(layer.id)
       const visible = layer.visible !== false
@@ -331,7 +332,7 @@ const updateComposite = async ({ recenter = false } = {}) => {
       const needsRebuild = !cached || cached.tree !== tree || cached.color !== colorValue || cached.opacity !== layerOpacity
       if (needsRebuild) {
         disposeLayerDisplay(layer.id, cached)
-        const display = createLayerDisplay(tree, ctx, colorValue, layerOpacity)
+        const display = createLayerDisplay(tree, ctx, colorValue, layerOpacity, {debug: true})
         if (!display) continue
         display.eventMode = 'none'
         layerDisplayCache.set(layer.id, { display, tree, color: colorValue, opacity: layerOpacity })
@@ -347,6 +348,14 @@ const updateComposite = async ({ recenter = false } = {}) => {
       entry.display.zIndex = zIndex++
       entry.display.visible = visible
       if (entry.display.parent !== pixiRoot) pixiRoot.addChild(entry.display)
+      if (entry.display.__debug) {
+        pixiDebugPayload.push({
+          id: layer.id,
+          type: layer.type,
+          side: layer.side,
+          debug: entry.display.__debug,
+        })
+      }
     }
     for (const [layerId, entry] of layerDisplayCache.entries()) {
       if (nextActiveIds.has(layerId)) continue
@@ -371,6 +380,7 @@ const updateComposite = async ({ recenter = false } = {}) => {
       rendererInfo,
       jsHeap,
     })
+    emit('debug-update', pixiDebugPayload)
   } finally {
     if (token === compositeUpdateToken) setCompositeLoading(false)
   }

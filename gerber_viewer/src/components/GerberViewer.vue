@@ -159,7 +159,8 @@
         <LayerStackPreview v-show="activeView === 'layers'" :ordered-layers="orderedLayers" :fm-result="fmRef"
           :board-view-box="boardViewBox" :board-width-mm="boardWidthMm" :board-height-mm="boardHeightMm"
           :measurement-active="measurementActive" :recenter-signal="recenterSignal" :active="activeView === 'layers'"
-          @exit-measurement="measurementActive = false" @loading-change="handleLayerPreviewLoading" />
+          @exit-measurement="measurementActive = false" @loading-change="handleLayerPreviewLoading"
+          @debug-update="handlePixiDebugUpdate" />
 
         <!-- 3D 视图 -->
         <Pcb3dPreview
@@ -305,6 +306,7 @@ const workerDebugLog = reactive({
   errors: [],
 })
 const workerPayloadLog = reactive([])
+const pixiLayerDebug = ref([])
 const maxDebugEntries = 50
 const enablePerfLogs = import.meta.env?.DEV ?? false
 const perfLabel = (phase) => `[perf][GerberViewer] ${phase}`
@@ -422,6 +424,7 @@ const recordWorkerJobResult = (jobId, { success, message, result }) => {
   entry.success = success
   if (success) {
     entry.meshSummary = result?.meshSummary ?? summarizeMeshData(result?.mesh)
+    if (result?.debug) entry.debug = result.debug
   } else if (!success) {
     entry.errorMessage = message || 'unknown worker failure'
   }
@@ -483,7 +486,16 @@ const exportDebugInfo = () => {
       side: layer.side,
       color: layer.color,
       meshSummary: layer.meshSummary ?? summarizeMeshData(layer.mesh),
+      hasDebug: Boolean(layer.debug),
     }))
+    const planarDebugLayers = pcb3dModel.layers
+      .filter((layer) => layer.debug?.planar)
+      .map((layer) => ({
+        id: layer.id,
+        type: layer.type,
+        side: layer.side,
+        debug: layer.debug,
+      }))
     const workerPayloadsSnapshot = workerPayloadLog.map((entry) => ({
       jobId: entry.jobId,
       payload: {
@@ -523,8 +535,11 @@ const exportDebugInfo = () => {
         side: layer.side,
         color: layer.color,
         meshSummary: layer.meshSummary ?? summarizeMeshData(layer.mesh),
+        debug: layer.debug ?? null,
       })),
       meshSummaries,
+      planarDebugLayers,
+      pixiLayerDebug: pixiLayerDebug.value,
       workerDebug: {
         jobs: workerDebugLog.jobs,
         errors: workerDebugLog.errors,
@@ -730,6 +745,7 @@ const applyWorkerLayer = (payload) => {
     color: payload.color,
     mesh: payload.mesh,
     meshSummary: payload.meshSummary ?? summarizeMeshData(payload.mesh),
+    debug: payload.debug ?? null,
   })
   pcb3dModel.layers = layers
   pcb3dModel.version += 1
@@ -796,6 +812,9 @@ const openLayerPanel = () => { isLayerPanelOpen.value = true }
 const collapseLayerPanel = () => { isLayerPanelOpen.value = false }
 const handlePcb3dLoading = (loading) => { viewerLoading.value = loading }
 const handleLayerPreviewLoading = (loading) => { isLayerRenderLoading.value = loading }
+const handlePixiDebugUpdate = (payload) => {
+  pixiLayerDebug.value = Array.isArray(payload) ? payload : []
+}
 
 const toggleMeasurementMode = () => {
   if (activeView.value !== 'layers') return

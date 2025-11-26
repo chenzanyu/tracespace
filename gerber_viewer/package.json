@@ -18,6 +18,7 @@
     "@tracespace/plotter": "workspace:*",
     "@tracespace/renderer": "workspace:*",
     "axios": "^1.11.0",
+    "polygon-clipping": "^0.15.7",
     "pixi.js": "^8.2.2",
     "primeicons": "^7.0.0",
     "primevue": "^4.3.7",

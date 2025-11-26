@@ -180,6 +180,9 @@ importers:
       pixi.js:
         specifier: ^8.2.2
         version: 8.14.0
+      polygon-clipping:
+        specifier: ^0.15.7
+        version: 0.15.7
       primeicons:
         specifier: ^7.0.0
         version: 7.0.0

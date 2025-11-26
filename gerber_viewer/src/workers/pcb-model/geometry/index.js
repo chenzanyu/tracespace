@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import polygonClipping from 'polygon-clipping'
 import {CLEAR} from '@tracespace/parser'
 import {
   IMAGE_PATH,
@@ -24,6 +25,11 @@ import {renderImageRegion} from './region'
 import {renderImageShape, drawRoundedRect} from './shape'
 
 const PLANE_THICKNESS = 0.0005
+const SNAP_PRECISION = 1e7
+const RING_AREA_EPSILON = 1e-12
+const RING_POINT_EPSILON = 1e-8
+const SHAPE_SAMPLING_DIVISIONS = 16
+const reportedUnionFailures = new Set()
 
 const mergeGeometry = (existing, addition) => {
   if (!addition) return existing
@@ -173,11 +179,474 @@ const applyDrillHoles = (shape, drillTrees) => {
   }
 }
 
+const snapValue = value => {
+  const number = Number(value) || 0
+  return Math.round(number * SNAP_PRECISION) / SNAP_PRECISION
+}
+
+const snapPoint = point => [snapValue(point?.[0]), snapValue(point?.[1])]
+
+const distanceSquared = (a, b) => {
+  if (!Array.isArray(a) || !Array.isArray(b)) return 0
+  return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+}
+
 const segmentsToShape = (segments) => {
   if (!Array.isArray(segments) || !segments.length) return null
   const shape = new THREE.Shape()
   appendSegmentsToPath(segments, shape)
   return shape
+}
+
+const regionsToMultiPolygon = regions => {
+  if (!Array.isArray(regions) || regions.length === 0) return null
+  const polygons = regions
+    .map(region => segmentsToShape(region?.segments))
+    .filter(Boolean)
+    .map(shape => shapeToMultiPolygon(shape))
+    .filter(Boolean)
+  return unionPolygonList(polygons)
+}
+
+const rectangleRegionFromBounds = bounds => {
+  if (!Array.isArray(bounds) || bounds.length < 4) return null
+  const [x1, y1, x2, y2] = bounds
+  if (
+    !Number.isFinite(x1) ||
+    !Number.isFinite(y1) ||
+    !Number.isFinite(x2) ||
+    !Number.isFinite(y2)
+  ) {
+    return null
+  }
+  const minX = Math.min(x1, x2)
+  const maxX = Math.max(x1, x2)
+  const minY = Math.min(y1, y2)
+  const maxY = Math.max(y1, y2)
+  return {
+    type: IMAGE_REGION,
+    segments: [
+      {type: LINE, start: [minX, minY], end: [maxX, minY]},
+      {type: LINE, start: [maxX, minY], end: [maxX, maxY]},
+      {type: LINE, start: [maxX, maxY], end: [minX, maxY]},
+      {type: LINE, start: [minX, maxY], end: [minX, minY]},
+    ],
+  }
+}
+
+const getFallbackBoardRegions = (imageTree, boardBounds, boardClipRegions) => {
+  if (Array.isArray(boardClipRegions) && boardClipRegions.length) {
+    return boardClipRegions
+  }
+  const fromBounds = rectangleRegionFromBounds(boardBounds)
+  if (fromBounds) return [fromBounds]
+  const fromSize = rectangleRegionFromBounds(imageTree?.size)
+  return fromSize ? [fromSize] : null
+}
+
+const POINT_TOLERANCE = 1e-6
+
+const pointsClose = (a, b, eps = POINT_TOLERANCE) =>
+  Array.isArray(a) &&
+  Array.isArray(b) &&
+  Math.abs(a[0] - b[0]) <= eps &&
+  Math.abs(a[1] - b[1]) <= eps
+
+const dedupeSequentialPoints = (points, eps = POINT_TOLERANCE) => {
+  if (!Array.isArray(points) || points.length === 0) return []
+  const deduped = [points[0]]
+  for (let i = 1; i < points.length; i++) {
+    const prev = deduped[deduped.length - 1]
+    const current = points[i]
+    if (!pointsClose(prev, current, eps)) {
+      deduped.push(current)
+    }
+  }
+  return deduped
+}
+
+const simplifyRingPoints = (ring, eps = RING_AREA_EPSILON) => {
+  if (!Array.isArray(ring) || ring.length < 4) return ring
+  const simplified = []
+  for (let i = 0; i < ring.length; i++) {
+    const prev = simplified.length > 0 ? simplified[simplified.length - 1] : ring[i === 0 ? ring.length - 2 : i - 1]
+    const current = ring[i]
+    const next = ring[(i + 1) % ring.length]
+    if (!prev || !current || !next) continue
+    if (pointsClose(prev, current, POINT_TOLERANCE)) continue
+    const cross =
+      prev[0] * (current[1] - next[1]) +
+      current[0] * (next[1] - prev[1]) +
+      next[0] * (prev[1] - current[1])
+    const area = Math.abs(cross / 2)
+    const prevDist = distanceSquared(prev, current)
+    const nextDist = distanceSquared(current, next)
+    if (area < eps && (prevDist < RING_POINT_EPSILON || nextDist < RING_POINT_EPSILON)) {
+      continue
+    }
+    simplified.push(current)
+  }
+  if (simplified.length < 4) return ring
+  if (!pointsClose(simplified[0], simplified[simplified.length - 1])) {
+    simplified.push([...simplified[0]])
+  }
+  return simplified
+}
+
+const normalizeRing = (ring) => {
+  if (!Array.isArray(ring) || ring.length < 3) return null
+  const snapped = dedupeSequentialPoints(ring.map(point => snapPoint(point)))
+  if (snapped.length < 3) return null
+  if (!pointsClose(snapped[0], snapped[snapped.length - 1])) {
+    snapped.push([...snapped[0]])
+  }
+  if (snapped.length < 4) return null
+  return simplifyRingPoints(snapped)
+}
+
+const vectorToPoint = vector => snapPoint([vector?.x, vector?.y])
+
+const vectorsToRing = vectors => normalizeRing(vectors?.map(vectorToPoint))
+
+const shapeToMultiPolygon = (shape, divisions = SHAPE_SAMPLING_DIVISIONS) => {
+  if (!shape?.extractPoints) return null
+  const extracted = shape.extractPoints(divisions)
+  const outerRing = vectorsToRing(extracted.shape)
+  if (!outerRing) return null
+  const polygon = [outerRing]
+  if (Array.isArray(extracted.holes)) {
+    extracted.holes.forEach(holePoints => {
+      const ring = vectorsToRing(holePoints)
+      if (ring) polygon.push(ring)
+    })
+  }
+  return [polygon]
+}
+
+const ringToShape = ring => {
+  if (!Array.isArray(ring) || ring.length < 3) return null
+  const shape = new THREE.Shape()
+  ring.forEach(([x, y], index) => {
+    if (index === 0) {
+      shape.moveTo(x, y)
+    } else {
+      shape.lineTo(x, y)
+    }
+  })
+  shape.closePath()
+  return shape
+}
+
+const ringToPath = ring => {
+  if (!Array.isArray(ring) || ring.length < 3) return null
+  const path = new THREE.Path()
+  ring.forEach(([x, y], index) => {
+    if (index === 0) {
+      path.moveTo(x, y)
+    } else {
+      path.lineTo(x, y)
+    }
+  })
+  path.closePath()
+  return path
+}
+
+const polygonToShape = polygon => {
+  if (!Array.isArray(polygon) || polygon.length === 0) return null
+  const normalized = polygon
+    .map(ring => normalizeRing(ring))
+    .filter(Boolean)
+  if (normalized.length === 0) return null
+  const outer = ringToShape(normalized[0])
+  if (!outer) return null
+  if (normalized.length > 1) {
+    ensureHoleList(outer)
+    normalized.slice(1).forEach(ring => {
+      const holePath = ringToPath(ring)
+      if (holePath) outer.holes.push(holePath)
+    })
+  }
+  return outer
+}
+
+const multiPolygonToShapes = multiPolygon => {
+  if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) return []
+  const shapes = []
+  multiPolygon.forEach(polygon => {
+    const shape = polygonToShape(polygon)
+    if (shape) shapes.push(shape)
+  })
+  return shapes
+}
+
+const cloneMultiPolygon = multiPolygon => {
+  if (!Array.isArray(multiPolygon)) return null
+  const cloned = multiPolygon
+    .map(polygon => {
+      if (!Array.isArray(polygon) || polygon.length === 0) return null
+      const rings = polygon
+        .map(ring => {
+          if (!Array.isArray(ring) || ring.length < 3) return null
+          return ring.map(point => [Number(point?.[0]) || 0, Number(point?.[1]) || 0])
+        })
+        .filter(Boolean)
+      return rings.length ? rings : null
+    })
+    .filter(Boolean)
+  return cloned.length ? cloned : null
+}
+
+const sanitizeMultiPolygon = value => {
+  if (!Array.isArray(value) || value.length === 0) return null
+  const polygons = value
+    .map(polygon => {
+      if (!Array.isArray(polygon) || polygon.length === 0) return null
+      const rings = polygon
+        .map(ring => normalizeRing(ring))
+        .filter(Boolean)
+      return rings.length ? rings : null
+    })
+    .filter(Boolean)
+  return polygons.length ? polygons : null
+}
+
+const unionMultiPolygon = (existing, addition) => {
+  if (!addition || addition.length === 0) {
+    return existing || null
+  }
+  if (!existing || existing.length === 0) {
+    return addition || null
+  }
+  try {
+    const result = polygonClipping.union(existing, addition)
+    return sanitizeMultiPolygon(result)
+  } catch (error) {
+    const message = error?.message || 'unknown'
+    if (!reportedUnionFailures.has(message)) {
+      console.warn('[pcbModel] polygon union failed', {message})
+      reportedUnionFailures.add(message)
+    }
+    const combined = [
+      ...(existing ? cloneMultiPolygon(existing) || [] : []),
+      ...(addition ? cloneMultiPolygon(addition) || [] : []),
+    ]
+    return sanitizeMultiPolygon(combined)
+  }
+}
+
+const subtractMultiPolygon = (subject, removal) => {
+  if (!subject || subject.length === 0) return null
+  if (!removal || removal.length === 0) return cloneMultiPolygon(subject)
+  try {
+    const result = polygonClipping.difference(subject, removal)
+    return sanitizeMultiPolygon(result)
+  } catch (error) {
+    const message = error?.message || 'unknown'
+    if (!reportedUnionFailures.has(`diff:${message}`)) {
+      console.warn('[pcbModel] polygon difference failed', {message})
+      reportedUnionFailures.add(`diff:${message}`)
+    }
+    return cloneMultiPolygon(subject)
+  }
+}
+
+const extendBounds = (bounds, addition) => {
+  if (!addition) return bounds
+  if (!bounds) return {...addition}
+  return {
+    minX: Math.min(bounds.minX, addition.minX),
+    minY: Math.min(bounds.minY, addition.minY),
+    maxX: Math.max(bounds.maxX, addition.maxX),
+    maxY: Math.max(bounds.maxY, addition.maxY),
+  }
+}
+
+const getMultiPolygonBounds = multiPolygon => {
+  if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) return null
+  let bounds = null
+  for (const polygon of multiPolygon) {
+    if (!Array.isArray(polygon)) continue
+    for (const ring of polygon) {
+      if (!Array.isArray(ring)) continue
+      for (const point of ring) {
+        if (!Array.isArray(point)) continue
+        bounds = extendBounds(bounds, {
+          minX: point[0],
+          minY: point[1],
+          maxX: point[0],
+          maxY: point[1],
+        })
+      }
+    }
+  }
+  return bounds
+}
+
+const unionPolygonList = polygons => {
+  if (!Array.isArray(polygons) || polygons.length === 0) return null
+  const valid = polygons.filter(Boolean)
+  if (valid.length === 0) return null
+  if (valid.length === 1) return valid[0]
+  try {
+    return sanitizeMultiPolygon(polygonClipping.union(...valid))
+  } catch (error) {
+    const message = error?.message || 'unknown'
+    if (!reportedUnionFailures.has(`list:${message}`)) {
+      console.warn('[pcbModel] polygon union failed', {message})
+      reportedUnionFailures.add(`list:${message}`)
+    }
+    return valid[0]
+  }
+}
+
+const computePolygonStats = multiPolygon => {
+  if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) {
+    return {polygonCount: 0, ringCount: 0, pointCount: 0}
+  }
+  return multiPolygon.reduce(
+    (acc, polygon) => {
+      if (!Array.isArray(polygon) || polygon.length === 0) return acc
+      acc.polygonCount += 1
+      acc.ringCount += polygon.length
+      polygon.forEach(ring => {
+        if (Array.isArray(ring)) {
+          acc.pointCount += ring.length
+        }
+      })
+      return acc
+    },
+    {polygonCount: 0, ringCount: 0, pointCount: 0}
+  )
+}
+
+const combineShapeEntriesPolygon = entries => {
+  if (!Array.isArray(entries) || entries.length === 0) return null
+  return entries.reduce((acc, entry) => {
+    if (!entry?.shape) return acc
+    const polygon = shapeToMultiPolygon(entry.shape)
+    if (!polygon) return acc
+    return unionMultiPolygon(acc, polygon)
+  }, null)
+}
+
+const contourizeCirclePath = (segment, width) => {
+  const radius = Number(width) / 2
+  if (!Number.isFinite(radius) || radius <= 0) return []
+  if (segment.type === LINE) {
+    const {start, end} = segment
+    const [x1, y1] = start
+    const [x2, y2] = end
+    const theta = Math.atan2(y2 - y1, x2 - x1)
+    const dx = -radius * Math.sin(theta)
+    const dy = radius * Math.cos(theta)
+    return [
+      {type: LINE, start: [x1 + dx, y1 + dy], end: [x2 + dx, y2 + dy]},
+      {
+        type: ARC,
+        start: [x2 + dx, y2 + dy, theta + Math.PI / 2],
+        end: [x2 - dx, y2 - dy, theta - Math.PI / 2],
+        center: [x2, y2],
+        radius,
+      },
+      {type: LINE, start: [x2 - dx, y2 - dy], end: [x1 - dx, y1 - dy]},
+      {
+        type: ARC,
+        start: [x1 - dx, y1 - dy, theta + (3 * Math.PI) / 2],
+        end: [x1 + dx, y1 + dy, theta + Math.PI / 2],
+        center: [x1, y1],
+        radius,
+      },
+    ]
+  }
+  const {start, end, radius: arcRadius, center} = segment
+  const [x1, y1] = start
+  const [x2, y2] = end
+  const [cx, cy] = center
+  const theta1 = start[2]
+  const theta2 = end[2]
+  const dx1 = -radius * Math.sin(theta1 - Math.PI / 2)
+  const dy1 = radius * Math.cos(theta1 - Math.PI / 2)
+  const dx2 = -radius * Math.sin(theta2 - Math.PI / 2)
+  const dy2 = radius * Math.cos(theta2 - Math.PI / 2)
+  const innerRadius = Math.max((arcRadius || 0) - radius, 0)
+  const outerRadius = Math.max((arcRadius || 0) + radius, 0)
+  if (theta1 > theta2) {
+    return [
+      {
+        type: ARC,
+        start: [x1 + dx1, y1 + dy1, theta1],
+        end: [x2 + dx2, y2 + dy2, theta2],
+        center: [cx, cy],
+        radius: outerRadius,
+      },
+      {
+        type: ARC,
+        start: [x2 + dx2, y2 + dy2, theta2],
+        end: [x2 - dx2, y2 - dy2, theta2 - Math.PI],
+        center: [x2, y2],
+        radius,
+      },
+      {
+        type: ARC,
+        start: [x2 - dx2, y2 - dy2, theta2],
+        end: [x1 - dx1, y1 - dy1, theta1],
+        center: [cx, cy],
+        radius: innerRadius,
+      },
+      {
+        type: ARC,
+        start: [x1 - dx1, y1 - dy1, theta1 + Math.PI],
+        end: [x1 + dx1, y1 + dy1, theta1],
+        center: [x1, y1],
+        radius,
+      },
+    ]
+  }
+  return [
+    {
+      type: ARC,
+      start: [x1 + dx1, y1 + dy1, theta1],
+      end: [x2 + dx2, y2 + dy2, theta2],
+      center: [cx, cy],
+      radius: outerRadius,
+    },
+    {
+      type: ARC,
+      start: [x2 + dx2, y2 + dy2, theta2],
+      end: [x2 - dx2, y2 - dy2, theta2 + Math.PI],
+      center: [x2, y2],
+      radius,
+    },
+    {
+      type: ARC,
+      start: [x2 - dx2, y2 - dy2, theta2],
+      end: [x1 - dx1, y1 - dy1, theta1],
+      center: [cx, cy],
+      radius: innerRadius,
+    },
+    {
+      type: ARC,
+      start: [x1 - dx1, y1 - dy1, theta1 - Math.PI],
+      end: [x1 + dx1, y1 + dy1, theta1],
+      center: [x1, y1],
+      radius,
+    },
+  ]
+}
+
+const pathToMultiPolygon = element => {
+  if (!element?.segments || element.segments.length === 0) return null
+  const width = Number(element.width) || 0
+  if (!Number.isFinite(width) || width <= 0) return null
+  const strokePolygons = []
+  element.segments.forEach(segment => {
+    const contourSegments = contourizeCirclePath(segment, width)
+    const strokeShape = segmentsToShape(contourSegments)
+    if (!strokeShape) return
+    const strokePolygon = shapeToMultiPolygon(strokeShape)
+    if (strokePolygon) strokePolygons.push(strokePolygon)
+  })
+  return unionPolygonList(strokePolygons)
 }
 
 export function renderThree(
@@ -186,7 +655,10 @@ export function renderThree(
   progress = () => {},
   outline = false,
   drillTrees = [],
-  boardShapeRegions = null
+  boardShapeRegions = null,
+  layerType = null,
+  boardBounds = null,
+  boardClipRegions = null
 ) {
   if (!imageTree) {
     return new THREE.Group()
@@ -194,25 +666,336 @@ export function renderThree(
   if (outline) {
     return buildBoardGeometry(imageTree, color, drillTrees, boardShapeRegions, progress)
   }
-  return buildPlanarLayerGeometry(imageTree, color, progress)
+  return buildPlanarLayerGeometry(
+    imageTree,
+    color,
+    progress,
+    layerType,
+    boardShapeRegions,
+    boardBounds,
+    boardClipRegions
+  )
 }
 
-const buildPlanarLayerGeometry = (imageTree, color, progress) => {
+const buildPlanarLayerGeometry = (
+  imageTree,
+  color,
+  progress,
+  layerType = null,
+  boardShapeRegions = null,
+  boardBounds = null,
+  boardClipRegions = null
+) => {
   const group = new THREE.Group()
   let current = 0
   progress(current)
   const children = imageTree.children || []
+  const planarEntries = []
+
+  const planarDebug = {
+    elements: [],
+    chunks: [],
+    summary: null,
+  }
+  let chunkResolutionTime = 0
+  let darkEntryCount = 0
+  let clearEntryCount = 0
+
+  const chunkList = []
+  const initialDarkPolygons = []
+  const isSolderMaskLayer = layerType === 'soldermask'
+  const createChunk = () => {
+    const chunk = {
+      darkEntries: [],
+      clearEntries: [],
+      multiPolygon: null,
+      hasClear: false,
+      index: chunkList.length,
+      dirty: true,
+      contentBounds: null,
+    }
+    chunkList.push(chunk)
+    planarDebug.chunks.push({
+      index: chunk.index,
+      createdAt: planarDebug.elements.length,
+      hasClear: false,
+      polygonStats: computePolygonStats(null),
+      darkCount: 0,
+      clearCount: 0,
+    })
+    return chunk
+  }
+
+  let currentChunk = createChunk()
+
+  if (isSolderMaskLayer) {
+    const regionInput =
+      Array.isArray(boardShapeRegions) && boardShapeRegions.length
+        ? boardShapeRegions
+        : getFallbackBoardRegions(imageTree, boardBounds, boardClipRegions)
+    const boardMaskPolygon = regionsToMultiPolygon(regionInput)
+    if (boardMaskPolygon) {
+      initialDarkPolygons.push({
+        polygon: boardMaskPolygon,
+        info: {
+          index: -1,
+          type: 'board-shape',
+          polarity: null,
+          isClear: false,
+          action: 'soldermask-base',
+        },
+      })
+    } else {
+      console.warn(
+        '[pcbModel] Missing board shape for soldermask layer after fallback; rendering mask openings only'
+      )
+    }
+  }
+
+  const getChunkDebug = chunk => planarDebug.chunks[chunk.index] || null
+
+  const updateChunkDebug = chunk => {
+    const debugEntry = getChunkDebug(chunk)
+    if (!debugEntry) return
+    debugEntry.hasClear = chunk.hasClear
+    debugEntry.polygonStats = computePolygonStats(chunk.multiPolygon)
+  }
+
+  const recordElementDebug = (info, polygonStatsByChunk = null) => {
+    planarDebug.elements.push({
+      ...info,
+      polygonStatsAfter:
+        polygonStatsByChunk && Object.keys(polygonStatsByChunk).length
+          ? polygonStatsByChunk
+          : null,
+    })
+  }
+
+  const ensureChunkReadyForDark = () => {
+    if (currentChunk.hasClear) {
+      currentChunk = createChunk()
+    }
+  }
+
+  const recordChunkPolygonStats = chunk => {
+    const stats = {
+      polygonStats: computePolygonStats(chunk.multiPolygon),
+      darkCount: chunk.darkEntries.length,
+      clearCount: chunk.clearEntries.length,
+    }
+    const debugEntry = planarDebug.chunks[chunk.index]
+    if (debugEntry) {
+      debugEntry.polygonStats = stats.polygonStats
+      debugEntry.darkCount = stats.darkCount
+      debugEntry.clearCount = stats.clearCount
+    }
+    return stats.polygonStats
+  }
+
+  const applyDarkPolygon = (multiPolygon, elementInfo) => {
+    const stored = sanitizeMultiPolygon(multiPolygon)
+    if (!stored) return
+    const entryBounds = getMultiPolygonBounds(stored)
+    if (!entryBounds) return
+    ensureChunkReadyForDark()
+    currentChunk.darkEntries.push({polygon: stored, bounds: entryBounds})
+    currentChunk.contentBounds = extendBounds(currentChunk.contentBounds, entryBounds)
+    currentChunk.dirty = true
+    recordElementDebug({
+      ...elementInfo,
+      chunkIndices: [currentChunk.index],
+    })
+    const debugEntry = planarDebug.chunks[currentChunk.index]
+    if (debugEntry) {
+      debugEntry.darkCount = currentChunk.darkEntries.length
+    }
+    darkEntryCount += 1
+  }
+
+  const applyClearPolygon = (multiPolygon, elementInfo) => {
+    const stored = sanitizeMultiPolygon(multiPolygon)
+    if (!stored) return
+    const entryBounds = getMultiPolygonBounds(stored)
+    if (!entryBounds) return
+    const affected = []
+    chunkList.forEach(chunk => {
+      if (!chunk.contentBounds || !boundsOverlap(chunk.contentBounds, entryBounds)) {
+        return
+      }
+      chunk.clearEntries.push({polygon: stored, bounds: entryBounds})
+      chunk.hasClear = true
+      chunk.dirty = true
+      affected.push(chunk.index)
+      const debugEntry = planarDebug.chunks[chunk.index]
+      if (debugEntry) {
+        debugEntry.clearCount = chunk.clearEntries.length
+      }
+      clearEntryCount += 1
+    })
+    recordElementDebug({
+      ...elementInfo,
+      chunkIndices: affected,
+    })
+  }
+
+  const buildChunkMultiPolygon = chunk => {
+    if (!chunk.dirty && chunk.multiPolygon) return chunk.multiPolygon
+    const startTime = typeof performance !== 'undefined' ? performance.now() : null
+    const darkPolygons = chunk.darkEntries.map(entry => entry.polygon)
+    const darkUnion = unionPolygonList(darkPolygons)
+    if (!darkUnion) return null
+    let result = darkUnion
+    let resultBounds = getMultiPolygonBounds(result)
+    const relevantClears = chunk.clearEntries.filter(entry =>
+      resultBounds && boundsOverlap(resultBounds, entry.bounds)
+    ).map(entry => entry.polygon)
+    const clearUnion = unionPolygonList(relevantClears)
+    if (clearUnion) {
+      result = subtractMultiPolygon(result, clearUnion)
+      resultBounds = getMultiPolygonBounds(result)
+    }
+    chunk.multiPolygon = result
+    chunk.contentBounds = resultBounds
+    chunk.dirty = false
+    recordChunkPolygonStats(chunk)
+    if (startTime !== null && typeof performance !== 'undefined') {
+      chunkResolutionTime += performance.now() - startTime
+    }
+    return result
+  }
+
+  const emitChunkPolygons = chunk => {
+    const finalPolygon = chunk.multiPolygon ?? buildChunkMultiPolygon(chunk)
+    const shapes = multiPolygonToShapes(finalPolygon)
+    shapes.forEach(shape => {
+      const geometry = new THREE.ShapeGeometry(shape)
+      geometry.deleteAttribute('uv')
+      geometry.translate(0, 0, -PLANE_THICKNESS / 2)
+      planarEntries.push({geometry})
+    })
+  }
+
+  initialDarkPolygons.forEach(entry => applyDarkPolygon(entry.polygon, entry.info))
+
   for (let index = 0; index < children.length; index++) {
-    const element = imageTree.children[index]
-    const nextProgress = Math.ceil(((index + 1) / imageTree.children.length) * 100)
+    const element = children[index]
+    const nextProgress = Math.ceil(((index + 1) / children.length) * 100)
     if (nextProgress !== current) {
       current = nextProgress
       progress(current)
     }
-    const elementIsClear = element?.erase === true || element?.polarity === CLEAR
-    const meshes = planarMeshesFromElement(element, color, elementIsClear)
-    meshes.forEach(mesh => group.add(mesh))
+    const rawElementIsClear = element?.erase === true || element?.polarity === CLEAR
+    const elementIsClear = isSolderMaskLayer ? true : rawElementIsClear
+
+    if (element.type === IMAGE_REGION) {
+      const entry = createShapeEntryFromSegments(element.segments)
+      const regionPolygon = entry?.shape ? shapeToMultiPolygon(entry.shape) : null
+      if (!regionPolygon) continue
+      const debugBase = {
+        index,
+        type: element.type,
+        polarity: element.polarity ?? null,
+        isClear: elementIsClear,
+        action: elementIsClear ? 'clear-region' : 'dark-region',
+        segmentCount: element.segments?.length ?? 0,
+      }
+      if (elementIsClear) {
+        applyClearPolygon(regionPolygon, debugBase)
+      } else {
+        applyDarkPolygon(regionPolygon, debugBase)
+      }
+      continue
+    }
+
+    if (element.type === IMAGE_SHAPE) {
+      const entries = buildShapeEntriesFromDefinition(element.shape)
+      const shapePolygon = combineShapeEntriesPolygon(entries)
+      if (!shapePolygon) continue
+      const debugBase = {
+        index,
+        type: element.type,
+        polarity: element.polarity ?? null,
+        isClear: elementIsClear,
+        action: elementIsClear ? 'clear-shape' : 'dark-shape',
+        shapeType: element.shape?.type ?? null,
+        generatedShapes: entries.length,
+      }
+      if (elementIsClear) {
+        applyClearPolygon(shapePolygon, debugBase)
+      } else {
+        applyDarkPolygon(shapePolygon, debugBase)
+      }
+      continue
+    }
+
+    if (element.type === IMAGE_PATH) {
+      const pathPolygon = pathToMultiPolygon(element)
+      if (!pathPolygon) {
+        recordElementDebug({
+          index,
+          type: element.type,
+          polarity: element.polarity ?? null,
+          isClear: elementIsClear,
+          action: 'path-conversion-skip',
+          segmentCount: element.segments?.length ?? 0,
+          chunkIndices: [],
+        })
+        continue
+      }
+      const debugBase = {
+        index,
+        type: element.type,
+        polarity: element.polarity ?? null,
+        isClear: elementIsClear,
+        action: elementIsClear ? 'clear-path' : 'dark-path',
+        segmentCount: element.segments?.length ?? 0,
+      }
+      if (elementIsClear) {
+        applyClearPolygon(pathPolygon, debugBase)
+      } else {
+        applyDarkPolygon(pathPolygon, debugBase)
+      }
+      continue
+    }
   }
+
+  chunkList.forEach(emitChunkPolygons)
+
+  const polygonSummary = chunkList.reduce(
+    (acc, chunk) => {
+      if (!chunk.multiPolygon) {
+        buildChunkMultiPolygon(chunk)
+      }
+      const stats = computePolygonStats(chunk.multiPolygon)
+      acc.polygonCount += stats.polygonCount
+      acc.ringCount += stats.ringCount
+      acc.pointCount += stats.pointCount
+      return acc
+    },
+    {chunkCount: chunkList.length, polygonCount: 0, ringCount: 0, pointCount: 0}
+  )
+  planarDebug.summary = {
+    ...polygonSummary,
+    darkEntryCount,
+    clearEntryCount,
+    chunkResolveMs: Number(chunkResolutionTime.toFixed(2)),
+  }
+
+  planarEntries.forEach(entry => {
+    const material = new THREE.MeshBasicMaterial({color, transparent: true, opacity: 1})
+    material.side = THREE.DoubleSide
+    material.depthWrite = true
+    material.polygonOffset = true
+    material.polygonOffsetFactor = -0.2
+    material.polygonOffsetUnits = -0.2
+    const mesh = new THREE.Mesh(entry.geometry, material)
+    mesh.userData = {planar: true}
+    group.add(mesh)
+  })
+
+  group.userData = group.userData || {}
+  group.userData.planarDebug = planarDebug
+
   return group
 }
 
@@ -319,77 +1102,6 @@ const buildBoardGeometry = (imageTree, color, drillTrees, boardShapeRegions, pro
   return group
 }
 
-const planarMeshesFromElement = (element, color, isClear) => {
-  const entries = []
-  if (element.type === IMAGE_REGION) {
-    const geometry = planarRegionGeometry(element.segments)
-    if (geometry) entries.push({geometry, isClear})
-  } else if (element.type === IMAGE_PATH) {
-    const geos = planarPathGeometries(element)
-    geos.forEach(geo => entries.push({geometry: geo, isClear}))
-  } else if (element.type === IMAGE_SHAPE) {
-    const geos = planarShapeGeometries(element.shape)
-    geos.forEach(geo => entries.push({geometry: geo, isClear}))
-  }
-  return entries.map(entry => {
-    const material = new THREE.MeshBasicMaterial({color, transparent: true, opacity: 1})
-    material.side = THREE.DoubleSide
-    material.depthWrite = !entry.isClear
-    material.polygonOffset = true
-    material.polygonOffsetFactor = entry.isClear ? -0.5 : -0.2
-    material.polygonOffsetUnits = entry.isClear ? -0.5 : -0.2
-    const mesh = new THREE.Mesh(entry.geometry, material)
-    mesh.userData = {isClear: entry.isClear, planar: true}
-    return mesh
-  })
-}
-
-const planarRegionGeometry = (segments) => {
-  if (!Array.isArray(segments) || !segments.length) return null
-  const shape = new THREE.Shape()
-  appendSegmentsToPath(segments, shape)
-  const geometry = new THREE.ShapeGeometry(shape)
-  geometry.deleteAttribute('uv')
-  geometry.translate(0, 0, -PLANE_THICKNESS / 2)
-  return geometry
-}
-
-const planarPathGeometries = (element) => {
-  const geos = renderImagePath(element)
-  geos.forEach(geo => {
-    geo.scale(1, 1, PLANE_THICKNESS)
-    geo.translate(0, 0, -PLANE_THICKNESS / 2)
-  })
-  return geos
-}
-
-const planarShapeGeometries = (shapeDef) => {
-  const shapes = convertDefinitionToShapes(shapeDef)
-  return shapes.map(shape => {
-    const geometry = new THREE.ShapeGeometry(shape)
-    geometry.deleteAttribute('uv')
-    geometry.translate(0, 0, -PLANE_THICKNESS / 2)
-    return geometry
-  })
-}
-
-const convertDefinitionToShapes = (definition) => {
-  if (!definition || definition.erase === true) return []
-  if (definition.type === LAYERED_SHAPE) {
-    const layeredShapes = []
-    definition.shapes?.forEach((sub) => {
-      if (sub.erase) {
-        layeredShapes.forEach((target) => addHoleFromShapeDefinition(target, sub))
-      } else {
-        layeredShapes.push(...convertDefinitionToShapes(sub))
-      }
-    })
-    return layeredShapes
-  }
-  const baseShape = createShapeFromDefinition(definition)
-  return baseShape ? [baseShape] : []
-}
-
 const createShapeFromDefinition = (definition) => {
   switch (definition?.type) {
     case CIRCLE: {
@@ -422,6 +1134,157 @@ const createShapeFromDefinition = (definition) => {
     }
     case OUTLINE:
       return segmentsToShape(definition.segments)
+    default:
+      return null
+  }
+}
+
+const createShapeEntryFromSegments = (segments) => {
+  if (!Array.isArray(segments) || !segments.length) return null
+  const shape = segmentsToShape(segments)
+  if (!shape) return null
+  return {
+    shape,
+    bounds: boundsFromSegments(segments),
+    segments,
+  }
+}
+
+const boundsOverlap = (a, b) => {
+  if (!a || !b) return true
+  return !(
+    a.maxX < b.minX ||
+    a.minX > b.maxX ||
+    a.maxY < b.minY ||
+    a.minY > b.maxY
+  )
+}
+
+const buildShapeEntriesFromDefinition = (definition) => {
+  if (!definition || definition.erase === true) return []
+  if (definition.type === LAYERED_SHAPE) {
+    const layeredEntries = []
+    definition.shapes?.forEach(sub => {
+      if (sub?.erase) {
+        layeredEntries.forEach(entry => addHoleFromShapeDefinition(entry.shape, sub))
+      } else {
+        layeredEntries.push(...buildShapeEntriesFromDefinition(sub))
+      }
+    })
+    return layeredEntries
+  }
+  const shape = createShapeFromDefinition(definition)
+  if (!shape) return []
+  const bounds = shapeBounds(definition)
+  return [{shape, bounds}]
+}
+
+const toPoint = position => snapPoint(position)
+
+const extendBoundsWithPoint = (bounds, point) => {
+  if (!point) return bounds
+  if (!bounds) {
+    return {
+      minX: point[0],
+      maxX: point[0],
+      minY: point[1],
+      maxY: point[1],
+    }
+  }
+  return {
+    minX: Math.min(bounds.minX, point[0]),
+    maxX: Math.max(bounds.maxX, point[0]),
+    minY: Math.min(bounds.minY, point[1]),
+    maxY: Math.max(bounds.maxY, point[1]),
+  }
+}
+
+const approximateArcPointsForBounds = (segment) => {
+  const startAngle = Number(segment?.start?.[2])
+  const endAngle = Number(segment?.end?.[2])
+  if (!Number.isFinite(startAngle) || !Number.isFinite(endAngle)) return []
+  let sweep = endAngle - startAngle
+  const startRaw = toPoint(segment.start)
+  const endRaw = toPoint(segment.end)
+  if (Math.abs(sweep) < 1e-7 && distanceSquared(startRaw, endRaw) < 1e-12) {
+    sweep = sweep >= 0 ? Math.PI * 2 : -Math.PI * 2
+  }
+  const absSweep = Math.abs(sweep)
+  if (absSweep === 0) return []
+  const steps = Math.max(6, Math.ceil(absSweep / (Math.PI / 16)))
+  const center = toPoint(segment.center)
+  const radius = Number(segment.radius) || 0
+  const points = []
+  for (let i = 0; i <= steps; i++) {
+    const angle = startAngle + (sweep * i) / steps
+    points.push([
+      center[0] + radius * Math.cos(angle),
+      center[1] + radius * Math.sin(angle),
+    ])
+  }
+  return points
+}
+
+const boundsFromSegments = segments => {
+  if (!Array.isArray(segments) || segments.length === 0) return null
+  let bounds = null
+  for (const segment of segments) {
+    bounds = extendBoundsWithPoint(bounds, toPoint(segment.start))
+    bounds = extendBoundsWithPoint(bounds, toPoint(segment.end))
+    if (segment.type === ARC) {
+      const arcPoints = approximateArcPointsForBounds(segment)
+      arcPoints.forEach(pt => {
+        bounds = extendBoundsWithPoint(bounds, pt)
+      })
+    }
+  }
+  return bounds
+}
+
+const shapeBounds = definition => {
+  if (!definition) return null
+  switch (definition.type) {
+    case CIRCLE:
+      return {
+        minX: definition.cx - definition.r,
+        minY: definition.cy - definition.r,
+        maxX: definition.cx + definition.r,
+        maxY: definition.cy + definition.r,
+      }
+    case RECTANGLE:
+      return {
+        minX: definition.x,
+        minY: definition.y,
+        maxX: definition.x + definition.xSize,
+        maxY: definition.y + definition.ySize,
+      }
+    case POLYGON:
+      return boundsFromSegments(
+        definition.points?.map((point, index, arr) => ({
+          type: LINE,
+          start: point,
+          end: arr[(index + 1) % arr.length],
+        })) || []
+      )
+    case OUTLINE:
+      return boundsFromSegments(definition.segments)
+    case LAYERED_SHAPE: {
+      let merged = null
+      for (const sub of definition.shapes || []) {
+        const subBounds = shapeBounds(sub)
+        if (subBounds) {
+          merged = merged
+            ? {
+                minX: Math.min(merged.minX, subBounds.minX),
+                minY: Math.min(merged.minY, subBounds.minY),
+                maxX: Math.max(merged.maxX, subBounds.maxX),
+                maxY: Math.max(merged.maxY, subBounds.maxY),
+              }
+            : subBounds
+        }
+      }
+      return merged
+    }
     default:
       return null
   }

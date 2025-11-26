@@ -107,7 +107,16 @@ const buildMeshGroupFromData = (meshData, defaultColor) => {
         transparent: chunk?.material?.transparent ?? false,
         opacity: chunk?.material?.opacity ?? 1,
       })
+      const metadata = chunk?.metadata ? {...chunk.metadata} : {}
+      if (metadata.planar) {
+        material.side = THREE.DoubleSide
+        material.depthWrite = metadata.isClear ? false : true
+        material.polygonOffset = true
+        material.polygonOffsetFactor = metadata.isClear ? -0.5 : -0.2
+        material.polygonOffsetUnits = metadata.isClear ? -0.5 : -0.2
+      }
       const mesh = new THREE.Mesh(geometry, material)
+      mesh.userData = metadata
       group.add(mesh)
     })
     return group
@@ -219,12 +228,14 @@ const createColor = (value, fallback) => {
 const setMeshColor = (object, color) => {
   if (!object) return
   const next = createColor(color, '#ffffff')
+  const coreColor = createColor(props.coreColor || props.borderColor, '#ffffff')
   object.traverse((child) => {
     if (child.isMesh) {
+      const targetColor = child.userData?.isClear ? coreColor : next
       if (Array.isArray(child.material)) {
-        child.material.forEach((mat) => mat?.color?.set?.(next))
+        child.material.forEach((mat) => mat?.color?.set?.(targetColor))
       } else {
-        child.material?.color?.set?.(next)
+        child.material?.color?.set?.(targetColor)
       }
     }
   })

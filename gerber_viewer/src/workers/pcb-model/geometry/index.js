@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import {BufferGeometryUtils} from 'three/examples/jsm/Addons.js'
+import {CLEAR} from '@tracespace/parser'
 import {
   IMAGE_PATH,
   IMAGE_REGION,
@@ -21,7 +21,16 @@ import {
 } from './outline'
 import {renderImagePath} from './path'
 import {renderImageRegion} from './region'
-import {renderImageShape} from './shape'
+import {renderImageShape, drawRoundedRect} from './shape'
+
+const PLANE_THICKNESS = 0.0005
+
+const mergeGeometry = (existing, addition) => {
+  if (!addition) return existing
+  if (!existing) return addition
+  existing.dispose?.()
+  return addition
+}
 
 const normalizeGeometry = geometry => {
   if (!geometry) return null
@@ -182,6 +191,32 @@ export function renderThree(
   if (!imageTree) {
     return new THREE.Group()
   }
+  if (outline) {
+    return buildBoardGeometry(imageTree, color, drillTrees, boardShapeRegions, progress)
+  }
+  return buildPlanarLayerGeometry(imageTree, color, progress)
+}
+
+const buildPlanarLayerGeometry = (imageTree, color, progress) => {
+  const group = new THREE.Group()
+  let current = 0
+  progress(current)
+  const children = imageTree.children || []
+  for (let index = 0; index < children.length; index++) {
+    const element = imageTree.children[index]
+    const nextProgress = Math.ceil(((index + 1) / imageTree.children.length) * 100)
+    if (nextProgress !== current) {
+      current = nextProgress
+      progress(current)
+    }
+    const elementIsClear = element?.erase === true || element?.polarity === CLEAR
+    const meshes = planarMeshesFromElement(element, color, elementIsClear)
+    meshes.forEach(mesh => group.add(mesh))
+  }
+  return group
+}
+
+const buildBoardGeometry = (imageTree, color, drillTrees, boardShapeRegions, progress) => {
   const region = []
   const path = []
   const shape = []
@@ -189,8 +224,8 @@ export function renderThree(
   let current = 0
   progress(current)
   const useBoardShape =
-    outline && Array.isArray(boardShapeRegions) && boardShapeRegions.length > 0
-  const outlineState = useBoardShape ? null : outline ? createOutlineState() : null
+    Array.isArray(boardShapeRegions) && boardShapeRegions.length > 0
+  const outlineState = useBoardShape ? null : createOutlineState()
   const boardShapes = useBoardShape
     ? boardShapeRegions
         .map((regionDef) => segmentsToShape(regionDef?.segments))
@@ -269,14 +304,11 @@ export function renderThree(
 
   const mergeAndAdd = geometries => {
     if (!geometries.length) return
-    const merged = BufferGeometryUtils.mergeGeometries(geometries, false)
-    if (!merged) {
-      console.warn('[pcbModel] Failed to merge geometries')
-      return
-    }
+    const merged = geometries.reduce((acc, geo) => mergeGeometry(acc, geo), null)
+    if (!merged) return
     const mesh = new THREE.Mesh(merged, material)
+    mesh.userData = {planar: false}
     group.add(mesh)
-    for (const geo of geometries) geo.dispose()
   }
 
   mergeAndAdd(region)
@@ -284,6 +316,113 @@ export function renderThree(
   mergeAndAdd(shape)
   mergeAndAdd(polygonShapes)
 
-  material.dispose()
   return group
+}
+
+const planarMeshesFromElement = (element, color, isClear) => {
+  const entries = []
+  if (element.type === IMAGE_REGION) {
+    const geometry = planarRegionGeometry(element.segments)
+    if (geometry) entries.push({geometry, isClear})
+  } else if (element.type === IMAGE_PATH) {
+    const geos = planarPathGeometries(element)
+    geos.forEach(geo => entries.push({geometry: geo, isClear}))
+  } else if (element.type === IMAGE_SHAPE) {
+    const geos = planarShapeGeometries(element.shape)
+    geos.forEach(geo => entries.push({geometry: geo, isClear}))
+  }
+  return entries.map(entry => {
+    const material = new THREE.MeshBasicMaterial({color, transparent: true, opacity: 1})
+    material.side = THREE.DoubleSide
+    material.depthWrite = !entry.isClear
+    material.polygonOffset = true
+    material.polygonOffsetFactor = entry.isClear ? -0.5 : -0.2
+    material.polygonOffsetUnits = entry.isClear ? -0.5 : -0.2
+    const mesh = new THREE.Mesh(entry.geometry, material)
+    mesh.userData = {isClear: entry.isClear, planar: true}
+    return mesh
+  })
+}
+
+const planarRegionGeometry = (segments) => {
+  if (!Array.isArray(segments) || !segments.length) return null
+  const shape = new THREE.Shape()
+  appendSegmentsToPath(segments, shape)
+  const geometry = new THREE.ShapeGeometry(shape)
+  geometry.deleteAttribute('uv')
+  geometry.translate(0, 0, -PLANE_THICKNESS / 2)
+  return geometry
+}
+
+const planarPathGeometries = (element) => {
+  const geos = renderImagePath(element)
+  geos.forEach(geo => {
+    geo.scale(1, 1, PLANE_THICKNESS)
+    geo.translate(0, 0, -PLANE_THICKNESS / 2)
+  })
+  return geos
+}
+
+const planarShapeGeometries = (shapeDef) => {
+  const shapes = convertDefinitionToShapes(shapeDef)
+  return shapes.map(shape => {
+    const geometry = new THREE.ShapeGeometry(shape)
+    geometry.deleteAttribute('uv')
+    geometry.translate(0, 0, -PLANE_THICKNESS / 2)
+    return geometry
+  })
+}
+
+const convertDefinitionToShapes = (definition) => {
+  if (!definition || definition.erase === true) return []
+  if (definition.type === LAYERED_SHAPE) {
+    const layeredShapes = []
+    definition.shapes?.forEach((sub) => {
+      if (sub.erase) {
+        layeredShapes.forEach((target) => addHoleFromShapeDefinition(target, sub))
+      } else {
+        layeredShapes.push(...convertDefinitionToShapes(sub))
+      }
+    })
+    return layeredShapes
+  }
+  const baseShape = createShapeFromDefinition(definition)
+  return baseShape ? [baseShape] : []
+}
+
+const createShapeFromDefinition = (definition) => {
+  switch (definition?.type) {
+    case CIRCLE: {
+      const circle = new THREE.Shape()
+      circle.absellipse(definition.cx, definition.cy, definition.r, definition.r, 0, Math.PI * 2, false)
+      return circle
+    }
+    case RECTANGLE: {
+      if (definition.r) {
+        return drawRoundedRect(definition.x, definition.y, definition.xSize, definition.ySize, definition.r)
+      }
+      const rectShape = new THREE.Shape()
+      rectShape.moveTo(definition.x, definition.y)
+      rectShape.lineTo(definition.x + definition.xSize, definition.y)
+      rectShape.lineTo(definition.x + definition.xSize, definition.y + definition.ySize)
+      rectShape.lineTo(definition.x, definition.y + definition.ySize)
+      rectShape.closePath()
+      return rectShape
+    }
+    case POLYGON: {
+      const points = definition.points || []
+      if (points.length < 3) return null
+      const polygon = new THREE.Shape()
+      polygon.moveTo(points[0][0], points[0][1])
+      for (let i = 1; i < points.length; i++) {
+        polygon.lineTo(points[i][0], points[i][1])
+      }
+      polygon.closePath()
+      return polygon
+    }
+    case OUTLINE:
+      return segmentsToShape(definition.segments)
+    default:
+      return null
+  }
 }

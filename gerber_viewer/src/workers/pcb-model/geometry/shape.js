@@ -17,7 +17,7 @@ const renderCircle = shape => {
   return geometry
 }
 
-const drawRoundedRect = (x, y, width, height, radius) => {
+export const drawRoundedRect = (x, y, width, height, radius) => {
   const shape = new THREE.Shape()
   shape.moveTo(x + radius, y)
   shape.lineTo(x + width - radius, y)
@@ -78,38 +78,36 @@ const renderPolygon = points => {
 export function renderImageShape(element) {
   const output = []
   if (!element?.shape) return output
-  const {shape} = element
-  switch (shape.type) {
-    case CIRCLE:
-      output.push({erase: false, geometry: renderCircle(shape), type: CIRCLE})
-      break
-    case RECTANGLE:
-      output.push({erase: false, geometry: renderRectangle(shape), type: RECTANGLE})
-      break
-    case LAYERED_SHAPE:
-      for (const subShape of shape.shapes || []) {
-        if (subShape.erase) {
-          console.warn('[pcbModel] Layered shape erase flag not supported', subShape)
-          continue
-        }
-        if (subShape.type === CIRCLE) {
-          output.push({erase: false, geometry: renderCircle(subShape), type: subShape.type})
-        } else if (subShape.type === RECTANGLE) {
-          output.push({erase: false, geometry: renderRectangle(subShape), type: subShape.type})
-        } else if (subShape.type === POLYGON) {
-          output.push({erase: false, geometry: renderPolygon(subShape.points), type: subShape.type})
-        } else if (subShape.type === OUTLINE) {
-          output.push({erase: false, geometry: renderOutlineShape(subShape.segments), type: subShape.type})
-        } else {
-          console.warn('[pcbModel] Unsupported layered shape type', subShape)
-        }
-      }
-      break
-    case POLYGON:
-      output.push({erase: false, geometry: renderPolygon(shape.points), type: POLYGON})
-      break
-    default:
-      console.warn('[pcbModel] Unsupported shape type', shape)
+
+  const appendShapeGeometry = (definition, inheritedErase = false) => {
+    if (!definition) return
+    const eraseFlag = inheritedErase || definition.erase === true
+    switch (definition.type) {
+      case CIRCLE:
+        output.push({erase: eraseFlag, geometry: renderCircle(definition), type: CIRCLE})
+        break
+      case RECTANGLE:
+        output.push({erase: eraseFlag, geometry: renderRectangle(definition), type: RECTANGLE})
+        break
+      case LAYERED_SHAPE:
+        definition.shapes?.forEach((subShape) => appendShapeGeometry(subShape, eraseFlag))
+        break
+      case POLYGON:
+        output.push({erase: eraseFlag, geometry: renderPolygon(definition.points), type: POLYGON})
+        break
+      case OUTLINE:
+        output.push({
+          erase: eraseFlag,
+          geometry: renderOutlineShape(definition.segments),
+          type: OUTLINE,
+        })
+        break
+      default:
+        console.warn('[pcbModel] Unsupported shape type', definition)
+        break
+    }
   }
+
+  appendShapeGeometry(element.shape, element.shape?.erase === true)
   return output
 }

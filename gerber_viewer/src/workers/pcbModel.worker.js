@@ -65,6 +65,7 @@ const collectMeshChunks = (group) => {
       transparent: child.material?.transparent ?? false,
       opacity: child.material?.opacity ?? 1,
     }
+    chunk.metadata = child.userData ? {...child.userData} : null
     chunkSummaries.push({
       vertexCount: attributes.position?.count ?? 0,
       chunkType: child.type,
@@ -80,6 +81,14 @@ const collectMeshChunks = (group) => {
     }
   })
   return {chunks, transferList, chunkSummaries}
+}
+
+const logWorker = (event, details = {}) => {
+  try {
+    console.log(`[pcbModel.worker] ${event}`, details)
+  } catch (error) {
+    // ignore logging failures
+  }
 }
 
 const buildLayerPayload = payload => {
@@ -101,12 +110,20 @@ const buildLayerPayload = payload => {
       throw new Error('Missing parse tree for layer job')
     }
     const boardClipPolygons = buildClipPolygons(boardClipRegions)
-    const imageTree = filterImageTree(plot(parseTree), boardBounds, boardClipPolygons)
+    const plotStart = performance.now()
+    const plottedTree = plot(parseTree)
+    const plotDuration = performance.now() - plotStart
+    const imageTree = filterImageTree(plottedTree, boardBounds, boardClipPolygons)
     console.log('[pcbModel.worker] imageTree stats', {
       ...contextBase,
       boardBounds,
       boardClipPolygonCount: boardClipPolygons?.length ?? 0,
       childCount: imageTree?.children?.length ?? 0,
+    })
+    logWorker('plot-complete', {
+      ...contextBase,
+      childCount: imageTree?.children?.length ?? 0,
+      durationMs: Number(plotDuration.toFixed(2)),
     })
     let drillTrees = null
     if (Array.isArray(drillShapes) && drillShapes.length) {
@@ -122,6 +139,7 @@ const buildLayerPayload = payload => {
     }
     let group = null
     try {
+      const renderStart = performance.now()
       group = renderThree(
         imageTree,
         normalizeColor(color),
@@ -130,6 +148,10 @@ const buildLayerPayload = payload => {
         drillTrees,
         boardShapeRegions
       )
+      logWorker('renderThree-complete', {
+        ...contextBase,
+        durationMs: Number((performance.now() - renderStart).toFixed(2)),
+      })
     } catch (error) {
       const context = {
         ...contextBase,

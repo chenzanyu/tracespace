@@ -677,18 +677,38 @@ const queueWorkerJob = (payload) => {
   workerPayloadLog.push({ jobId, payload })
   trimDebugEntries(workerPayloadLog)
   recordWorkerJobStart(jobId, payload)
+  const startTime = performance.now()
+  console.log('[GerberViewer] queue worker job', {
+    jobId,
+    layerId: payload.layerId,
+    type: payload.type,
+    side: payload.side,
+  })
   return new Promise((resolve, reject) => {
     pcbWorkerJobs.set(jobId, {
       resolve: (result) => {
         pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
         updateWorkerLoading()
         recordWorkerJobResult(jobId, { success: true, result })
+        console.log('[GerberViewer] worker job finished', {
+          jobId,
+          layerId: payload.layerId,
+          type: payload.type,
+          durationMs: Number((performance.now() - startTime).toFixed(2)),
+        })
         resolve(result)
       },
       reject: (error) => {
         pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
         updateWorkerLoading()
         recordWorkerJobResult(jobId, { success: false, message: error?.message })
+        console.warn('[GerberViewer] worker job failed', {
+          jobId,
+          layerId: payload.layerId,
+          type: payload.type,
+          durationMs: Number((performance.now() - startTime).toFixed(2)),
+          error: error?.message,
+        })
         reject(error)
       },
     })

@@ -8,10 +8,8 @@
     <!-- 预览阶段 -->
     <div v-else class="h-full flex relative">
       <!-- 预览画布 -->
-      <section
-        ref="previewAreaRef"
-        class="flex-1 relative overflow-hidden bg-gradient-to-br from-[#0f1b2d] to-[#050b16]"
-      >
+      <section ref="previewAreaRef"
+        class="flex-1 relative overflow-hidden bg-gradient-to-br from-[#0f1b2d] to-[#050b16]">
         <transition name="layer-panel-fade" :css="layerPanelTransitionEnabled">
           <aside v-if="layerPanelVisible"
             class="absolute inset-y-0 left-0 w-80 border-r border-gray-800 bg-gradient-to-b from-gray-900 to-gray-800 flex flex-col z-30 shadow-[0_20px_40px_rgba(0,0,0,0.55)]">
@@ -77,69 +75,83 @@
           </template>
           <template v-else-if="activeView === '3d'">
             <button
-              class="px-2.5 py-2 rounded-md bg-gray-900/80 text-white uppercase text-[11px] tracking-wide border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+              class="px-3 py-2 rounded-md bg-gray-900/80 text-white uppercase text-[11px] tracking-wide border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
               title="重置 3D 视图" @click="resetPcb3dView">
               <img :src="resetIcon" alt="reset 3d view" class="w-6 h-6" />
             </button>
             <div class="relative" @mouseenter="showSpacingPanel" @mouseleave="hideSpacingPanel">
               <button
-                class="px-3.5 py-2 rounded-md uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition"
+                class="px-3.5 py-3 rounded-md uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition"
                 :class="canExplode
                   ? (explosionActive
                     ? 'bg-[#0092b8] text-white border-[#3fd3ff] drop-shadow-[0_0_12px_rgba(0,146,184,0.8)]'
-                  : 'bg-gray-900/80 text-white border-white/30 hover:bg-gray-800')
-                  : 'bg-gray-900/50 text-white border-white/10 opacity-60 cursor-not-allowed'"
-                title="展开/还原模型" :disabled="!canExplode" @click="toggleExplosion"
-              >
+                    : 'bg-gray-900/80 text-white border-white/30 hover:bg-gray-800')
+                  : 'bg-gray-900/50 text-white border-white/10 opacity-60 cursor-not-allowed'" title="展开/还原模型"
+                :disabled="!canExplode" @click="toggleExplosion">
                 <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
                   <rect x="9" y="4" width="11" height="11" rx="1.5" stroke-linejoin="round"></rect>
                   <rect x="4" y="9" width="11" height="11" rx="1.5" stroke-linejoin="round"></rect>
                 </svg>
               </button>
               <transition name="fade">
-                <div
-                  v-if="spacingPanelVisible"
-                  class="absolute left-0 top-full mt-2 w-56 rounded-lg border border-gray-700 bg-gray-900/95 px-3 py-2 text-xs text-gray-100 shadow-xl z-40"
-                >
+                <div v-if="spacingPanelVisible"
+                  class="absolute left-0 top-full mt-2 w-56 rounded-lg border border-gray-700 bg-gray-900/95 px-3 py-2 text-xs text-gray-100 shadow-xl z-40">
                   <div class="flex items-center justify-between">
                     <span class="font-semibold tracking-wide uppercase text-[10px] text-gray-300">Layer spacing</span>
                     <span class="text-cyan-300 font-semibold">{{ spacingDisplayValue }}</span>
                   </div>
                   <div class="mt-3">
-                    <input
-                      class="w-full accent-[#0092b8]"
-                      type="range"
-                      step="0.1"
-                      :min="spacingSliderMin"
-                      :max="spacingSliderMax"
-                      :value="spacingSliderValue"
-                      @input="handleSpacingSliderInput($event.target.value)"
-                    />
+                    <input class="w-full accent-[#0092b8]" type="range" step="0.1" :min="spacingSliderMin"
+                      :max="spacingSliderMax" :value="spacingSliderValue"
+                      @input="handleSpacingSliderInput($event.target.value)" />
                   </div>
                 </div>
               </transition>
             </div>
+
             <div class="relative">
               <button
-                class="px-3.5 py-3 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+                class="px-4 py-3.5 rounded-md bg-gray-900/80 text-white text-xs tracking-wide border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+                title="3D 颜色设置" @click.stop="toggleColorMenu">
+                <span class="pi pi-palette text-base"></span>
+              </button>
+              <div v-if="colorMenuOpen"
+                class="absolute right-0 mt-3 mr-2 w-52 rounded-xl border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50 px-3 py-2.5 space-y-3"
+                style="transform: translateX(0); min-width: 200px" @click.stop>
+                <div class="text-xs font-semibold text-gray-300 tracking-wide">3D 颜色设置</div>
+                <div class="space-y-2">
+                  <div v-for="item in pcb3dColorOptions" :key="item.key"
+                    class="grid grid-cols-[40px,auto,1fr] items-center gap-2">
+                    <div class="text-xs text-gray-300 text-right">{{ item.label }}</div>
+                    <input type="color" v-model="pcb3dColors[item.key]"
+                      class="w-9 h-6 border border-gray-600 rounded bg-transparent" />
+                    <span class="text-[11px] font-mono text-gray-400 uppercase">
+                      {{ (pcb3dColors[item.key] || '').toUpperCase() }}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  class="w-full mt-1 px-3 py-2 text-xs rounded-md border border-white/30 bg-white/5 hover:bg-white/10 transition"
+                  @click.stop="resetPcb3dColors">
+                  恢复默认
+                </button>
+              </div>
+            </div>
+
+            <div class="relative">
+              <button
+                class="px-4 py-3.5 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
                 title="下载 3D 模型" @click.stop="toggleDownloadMenu">
                 <span class="pi pi-download"></span>
               </button>
-              <div
-                v-if="downloadMenuOpen"
-                class="absolute mt-2 w-44 rounded-md border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50"
-              >
-                <button class="block w-full text-left px-3 py-2 hover:bg-gray-800" @click.stop="downloadPcbAsset('gltf')">
+              <div v-if="downloadMenuOpen"
+                class="absolute mt-2 w-44 rounded-md border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50">
+                <button class="block w-full text-left px-3 py-2 hover:bg-gray-800"
+                  @click.stop="downloadPcbAsset('gltf')">
                   下载 glTF 模型
                 </button>
               </div>
             </div>
-            <button
-              class="px-3.5 py-2 rounded-md bg-gray-900/80 text-white text-xs tracking-wide border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
-              title="导出调试信息" @click="exportDebugInfo"
-            >
-              导出调试
-            </button>
           </template>
         </div>
 
@@ -163,21 +175,12 @@
           @debug-update="handlePixiDebugUpdate" />
 
         <!-- 3D 视图 -->
-        <Pcb3dPreview
-          ref="pcb3dRef"
-          v-show="activeView === '3d'"
-          :model-data="pcb3dModel"
-          :thickness="boardThickness"
-          :active="activeView === '3d'"
-          :container-width="previewContainerWidth"
-          :container-height="previewContainerHeight"
-          :display-width="previewSize.width"
-          :display-height="previewSize.height"
-          :explosion-active="explosionActive"
-          :explosion-spacing-multiplier="explosionSpacing"
-          borderColor="#eae276"
-          core-color="#eae276"
-          :fitPadding="1.55"
+        <Pcb3dPreview ref="pcb3dRef" v-show="activeView === '3d'" :model-data="pcb3dModel" :thickness="boardThickness"
+          :active="activeView === '3d'" :container-width="previewContainerWidth"
+          :container-height="previewContainerHeight" :display-width="previewSize.width"
+          :display-height="previewSize.height" :explosion-active="explosionActive"
+          :explosion-spacing-multiplier="explosionSpacing" :border-color="pcb3dColors.core"
+          :core-color="pcb3dColors.core" :layer-colors="pcb3dColors" :fitPadding="1.55"
           @loading-change="handlePcb3dLoading" />
       </section>
     </div>
@@ -277,6 +280,22 @@ const pcb3dModel = reactive({
   layers: [],
   version: 0,
 })
+const defaultPcb3dColors = Object.freeze({
+  copper: '#cc9933',
+  soldermask: '#004200',
+  silkscreen: '#ffffff',
+  solderpaste: '#b2b2b2',
+  core: '#ffffcc',
+})
+const pcb3dColors = reactive({ ...defaultPcb3dColors })
+const pcb3dColorOptions = [
+  { key: 'copper', label: '铜层' },
+  { key: 'soldermask', label: '阻焊' },
+  { key: 'silkscreen', label: '丝印' },
+  { key: 'solderpaste', label: '助焊' },
+  { key: 'core', label: '芯板' },
+]
+const colorMenuOpen = ref(false)
 const pcbModelJobs = reactive({ pending: 0, total: 0 })
 const workerLoading = ref(false)
 const viewerLoading = ref(false)
@@ -305,7 +324,6 @@ const workerDebugLog = reactive({
   jobs: [],
   errors: [],
 })
-const workerPayloadLog = reactive([])
 const pixiLayerDebug = ref([])
 const maxDebugEntries = 50
 const enablePerfLogs = import.meta.env?.DEV ?? false
@@ -400,8 +418,18 @@ const toggleDownloadMenu = (event) => {
   event?.stopPropagation?.()
   downloadMenuOpen.value = !downloadMenuOpen.value
 }
+const toggleColorMenu = (event) => {
+  event?.stopPropagation?.()
+  colorMenuOpen.value = !colorMenuOpen.value
+}
+const resetPcb3dColors = () => {
+  Object.entries(defaultPcb3dColors).forEach(([key, value]) => {
+    pcb3dColors[key] = value
+  })
+}
 const handleGlobalClick = () => {
   downloadMenuOpen.value = false
+  colorMenuOpen.value = false
 }
 const recordWorkerJobStart = (jobId, payload) => {
   workerDebugLog.jobs.push({
@@ -478,82 +506,6 @@ const handleSpacingSliderInput = (value) => {
   applySpacingValue(value)
   spacingPanelInitialized.value = true
 }
-const exportDebugInfo = () => {
-  try {
-    const meshSummaries = pcb3dModel.layers.map((layer) => ({
-      id: layer.id,
-      type: layer.type,
-      side: layer.side,
-      color: layer.color,
-      meshSummary: layer.meshSummary ?? summarizeMeshData(layer.mesh),
-      hasDebug: Boolean(layer.debug),
-    }))
-    const planarDebugLayers = pcb3dModel.layers
-      .filter((layer) => layer.debug?.planar)
-      .map((layer) => ({
-        id: layer.id,
-        type: layer.type,
-        side: layer.side,
-        debug: layer.debug,
-      }))
-    const workerPayloadsSnapshot = workerPayloadLog.map((entry) => ({
-      jobId: entry.jobId,
-      payload: {
-        layerId: entry.payload?.layerId,
-        type: entry.payload?.type,
-        side: entry.payload?.side,
-        outline: entry.payload?.outline,
-        parseTreeSummary: summarizeParseTree(entry.payload?.parseTree),
-        drillShapeSummaries: entry.payload?.drillShapes?.map((tree) => summarizeParseTree(tree)),
-      },
-    }))
-    const payload = {
-      timestamp: new Date().toISOString(),
-      board: {
-        thickness: boardThickness.value,
-        viewBox: boardViewBox.value,
-        width: boardWidthMm.value,
-        height: boardHeightMm.value,
-      },
-      viewer: {
-        explosionActive: explosionActive.value,
-        explosionSpacing: explosionSpacing.value,
-        measurementActive: measurementActive.value,
-      },
-      orderedLayers: orderedLayers.map((layer) => ({
-        id: layer.id,
-        filename: layer.filename,
-        type: layer.type,
-        side: layer.side,
-        visible: layer.visible,
-        color: layer.color,
-      })),
-      memoryLayers: memoryLayers.value,
-      pcb3dModelLayers: pcb3dModel.layers.map((layer) => ({
-        id: layer.id,
-        type: layer.type,
-        side: layer.side,
-        color: layer.color,
-        meshSummary: layer.meshSummary ?? summarizeMeshData(layer.mesh),
-        debug: layer.debug ?? null,
-      })),
-      meshSummaries,
-      planarDebugLayers,
-      pixiLayerDebug: pixiLayerDebug.value,
-      workerDebug: {
-        jobs: workerDebugLog.jobs,
-        errors: workerDebugLog.errors,
-        pending: pcbModelJobs.pending,
-        total: pcbModelJobs.total,
-        rawPayloads: workerPayloadsSnapshot,
-      },
-    }
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
-    triggerFileDownload(blob, `pcb-debug-${Date.now()}.json`)
-  } catch (error) {
-    console.error('[GerberViewer] 导出调试信息失败', error)
-  }
-}
 const downloadPcbAsset = async (type) => {
   try {
     if (type === 'gltf') {
@@ -613,10 +565,10 @@ const defaultLayerColors = {
 }
 
 const createPcbWorker = () =>
-  new Worker(new URL('../workers/pcbModel.worker.js', import.meta.url), {type: 'module'})
+  new Worker(new URL('../workers/pcbModel.worker.js', import.meta.url), { type: 'module' })
 
 const handlePcbWorkerMessage = (event) => {
-  const {jobId, success, result, message} = event.data || {}
+  const { jobId, success, result, message } = event.data || {}
   if (!jobId) return
   const entry = pcbWorkerJobs.get(jobId)
   if (!entry) return
@@ -689,8 +641,6 @@ const queueWorkerJob = (payload) => {
   const jobId = ++pcbWorkerSeq
   pcbModelJobs.pending += 1
   updateWorkerLoading()
-  workerPayloadLog.push({ jobId, payload })
-  trimDebugEntries(workerPayloadLog)
   recordWorkerJobStart(jobId, payload)
   const startTime = performance.now()
   console.log('[GerberViewer] queue worker job', {
@@ -1009,6 +959,13 @@ watch(
   }
 )
 
+watch(activeView, (value) => {
+  if (value !== '3d') {
+    colorMenuOpen.value = false
+    spacingPanelVisible.value = false
+  }
+})
+
 watch(canExplode, (value) => {
   if (!value) {
     spacingPanelVisible.value = false
@@ -1067,6 +1024,7 @@ onBeforeUnmount(() => {
   0% {
     transform: rotate(0deg);
   }
+
   100% {
     transform: rotate(360deg);
   }

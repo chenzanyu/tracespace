@@ -18,6 +18,7 @@ const props = defineProps({
   thickness: { type: Number, default: 0.016 },
   borderColor: { type: String, default: 'rgb(255, 235, 150)' },
   coreColor: { type: String, default: 'rgb(234, 226, 118)' },
+  layerColors: { type: Object, default: () => ({}) },
   backgroundColor: { type: String, default: '#0f1220' },
   containerWidth: { type: String, default: '100%' },
   containerHeight: { type: String, default: '100%' },
@@ -55,6 +56,13 @@ const typedArrayConstructors = {
   Int32Array,
   Int16Array,
   Int8Array,
+}
+
+const defaultLayerColors = {
+  copper: '#cc9933',
+  soldermask: '#004200',
+  silkscreen: '#ffffff',
+  solderpaste: '#b2b2b2',
 }
 
 const buildMeshGroupFromData = (meshData, defaultColor) => {
@@ -225,6 +233,14 @@ const createColor = (value, fallback) => {
   }
 }
 
+const resolveLayerColor = (type, fallbackColor) => {
+  if (props.layerColors && props.layerColors[type]) {
+    return props.layerColors[type]
+  }
+  if (fallbackColor) return fallbackColor
+  return defaultLayerColors[type] || '#ffffff'
+}
+
 const setMeshColor = (object, color) => {
   if (!object) return
   const next = createColor(color, '#ffffff')
@@ -239,6 +255,18 @@ const setMeshColor = (object, color) => {
       }
     }
   })
+}
+
+const applyLayerColorOverrides = () => {
+  if (!modelGroup) return
+  modelGroup.traverse((child) => {
+    if (!child.isMesh) return
+    const type = child.userData?.layerType
+    if (!type || !defaultLayerColors[type]) return
+    const color = resolveLayerColor(type)
+    if (color) setMeshColor(child, color)
+  })
+  requestRender()
 }
 
 const disposeObject = (object) => {
@@ -413,7 +441,15 @@ const classifyLayers = (entries) => {
     mesh.userData.layerId = entry.id
     mesh.userData.layerType = entry.type
     mesh.userData.layerSide = entry.side
-    setMeshColor(mesh, entry.color)
+    mesh.traverse((child) => {
+      if (!child.isMesh) return
+      child.userData = child.userData || {}
+      child.userData.layerId = entry.id
+      child.userData.layerType = entry.type
+      child.userData.layerSide = entry.side
+    })
+    const layerColor = resolveLayerColor(entry.type, entry.color)
+    setMeshColor(mesh, layerColor)
     configureLayerVisuals(mesh, entry.type, entry.side)
     if (entry.type === 'outline') {
       outline.push(mesh)
@@ -496,6 +532,7 @@ const assembleLayers = (entries) => {
     cursorBottom -= layer.thickness / 2
   }
   scene.add(modelGroup)
+  applyLayerColorOverrides()
   geometryBox = new THREE.Box3().setFromObject(modelGroup)
   if (geometryBox) {
     geometryBox.getCenter(geometryCenter)
@@ -702,6 +739,15 @@ watch(
 watch(() => props.backgroundColor, () => { setSceneBackground(); requestRender() })
 watch(() => props.coreColor, () => updateStructuralColors())
 watch(() => props.borderColor, () => updateStructuralColors())
+watch(
+  () => [
+    props.layerColors?.copper,
+    props.layerColors?.soldermask,
+    props.layerColors?.silkscreen,
+    props.layerColors?.solderpaste,
+  ],
+  () => applyLayerColorOverrides()
+)
 watch(() => props.explosionActive, (isActive) => {
   explosionState.target = isActive ? 1 : 0
   startLoop()

@@ -982,7 +982,11 @@ const buildPlanarLayerGeometry = (
   }
 
   planarEntries.forEach(entry => {
-    const material = new THREE.MeshBasicMaterial({color, transparent: true, opacity: 1})
+    const material = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: isSolderMaskLayer ? 0.85 : 1,
+    })
     material.side = THREE.DoubleSide
     material.depthWrite = true
     material.polygonOffset = true

@@ -79,6 +79,38 @@
               title="重置 3D 视图" @click="resetPcb3dView">
               <img :src="resetIcon" alt="reset 3d view" class="w-6 h-6" />
             </button>
+
+            <div class="relative">
+              <button
+                class="px-4 py-3.5 rounded-md bg-gray-900/80 text-white text-xs tracking-wide border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+                title="3D 颜色设置" @click.stop="toggleColorMenu">
+                <span class="pi pi-palette text-base"></span>
+              </button>
+              <div v-if="colorMenuOpen"
+                class="absolute left-0 mt-3 ml-2 w-[320px] rounded-xl border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50 px-3 py-2.5 space-y-3"
+                style="transform: translateX(0)" @click.stop>
+                <div class="text-xs font-semibold text-gray-300 tracking-wide">3D 颜色设置</div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div v-for="item in pcb3dColorOptions" :key="item.key"
+                    :class="['rounded-lg border border-white/10 bg-white/5 px-3 py-2 flex flex-col gap-1', item.key === 'core' ? 'col-span-2' : '']">
+                    <div class="text-[11px] text-gray-300 tracking-wide flex items-center">{{ item.label }}</div>
+                    <div class="flex items-center gap-3">
+                      <input type="color" v-model="pcb3dColors[item.key]"
+                        class="w-9 h-7 border border-gray-600 rounded bg-transparent" />
+                      <span class="text-[11px] font-mono text-gray-400 uppercase">
+                        {{ (pcb3dColors[item.key] || '').toUpperCase() }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <button
+                  class="w-full mt-1 px-3 py-2 text-xs rounded-md border border-white/30 bg-white/5 hover:bg-white/10 transition"
+                  @click.stop="resetPcb3dColors">
+                  恢复默认
+                </button>
+              </div>
+            </div>
+
             <div class="relative" @mouseenter="showSpacingPanel" @mouseleave="hideSpacingPanel">
               <button
                 class="px-3.5 py-3 rounded-md uppercase text-[11px] tracking-wide border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition"
@@ -107,35 +139,6 @@
                   </div>
                 </div>
               </transition>
-            </div>
-
-            <div class="relative">
-              <button
-                class="px-4 py-3.5 rounded-md bg-gray-900/80 text-white text-xs tracking-wide border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
-                title="3D 颜色设置" @click.stop="toggleColorMenu">
-                <span class="pi pi-palette text-base"></span>
-              </button>
-              <div v-if="colorMenuOpen"
-                class="absolute right-0 mt-3 mr-2 w-52 rounded-xl border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50 px-3 py-2.5 space-y-3"
-                style="transform: translateX(0); min-width: 200px" @click.stop>
-                <div class="text-xs font-semibold text-gray-300 tracking-wide">3D 颜色设置</div>
-                <div class="space-y-2">
-                  <div v-for="item in pcb3dColorOptions" :key="item.key"
-                    class="grid grid-cols-[40px,auto,1fr] items-center gap-2">
-                    <div class="text-xs text-gray-300 text-right">{{ item.label }}</div>
-                    <input type="color" v-model="pcb3dColors[item.key]"
-                      class="w-9 h-6 border border-gray-600 rounded bg-transparent" />
-                    <span class="text-[11px] font-mono text-gray-400 uppercase">
-                      {{ (pcb3dColors[item.key] || '').toUpperCase() }}
-                    </span>
-                  </div>
-                </div>
-                <button
-                  class="w-full mt-1 px-3 py-2 text-xs rounded-md border border-white/30 bg-white/5 hover:bg-white/10 transition"
-                  @click.stop="resetPcb3dColors">
-                  恢复默认
-                </button>
-              </div>
             </div>
 
             <div class="relative">
@@ -420,7 +423,15 @@ const toggleDownloadMenu = (event) => {
 }
 const toggleColorMenu = (event) => {
   event?.stopPropagation?.()
-  colorMenuOpen.value = !colorMenuOpen.value
+  const nextOpen = !colorMenuOpen.value
+  colorMenuOpen.value = nextOpen
+  if (nextOpen) {
+    spacingPanelVisible.value = false
+    if (spacingHideHandle) {
+      clearTimeout(spacingHideHandle)
+      spacingHideHandle = null
+    }
+  }
 }
 const resetPcb3dColors = () => {
   Object.entries(defaultPcb3dColors).forEach(([key, value]) => {
@@ -486,6 +497,7 @@ const clearSpacingHideTimer = () => {
 }
 const showSpacingPanel = () => {
   if (!canExplode.value) return
+  if (colorMenuOpen.value) colorMenuOpen.value = false
   clearSpacingHideTimer()
   spacingPanelVisible.value = true
   if (!spacingPanelInitialized.value) {

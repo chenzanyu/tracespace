@@ -720,6 +720,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
   updateWorkerLoading()
   if (!Array.isArray(parsedLayers) || parsedLayers.length === 0) return
   const boardRegions = Array.isArray(boardShape?.regions) ? boardShape.regions : undefined
+  const boardPolygons = Array.isArray(boardShape?.polygons) ? boardShape.polygons : undefined
   const boardBounds = Array.isArray(boardShape?.size) ? boardShape.size : undefined
   const drillParseTrees = parsedLayers
     .filter((layer) => {
@@ -732,6 +733,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
   )
   pcbModelJobs.total = layersFor3d.length
   if (!layersFor3d.length) return
+  const drillShapePayload = drillParseTrees.length ? drillParseTrees : undefined
   for (const layer of layersFor3d) {
     queueWorkerJob({
       layerId: layer.id,
@@ -741,8 +743,9 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
       color: getLayerColor(layer.id, layer.type),
       outline: layer.type === 'outline',
       boardShapeRegions: layer.type === 'outline' ? boardRegions : undefined,
+      boardShapePolygons: boardPolygons,
       boardClipRegions: boardRegions,
-      drillShapes: layer.type === 'outline' ? drillParseTrees : undefined,
+      drillShapes: drillShapePayload,
       boardBounds,
     })
       .then((result) => {

@@ -1,4 +1,17 @@
-import {IMAGE_PATH, IMAGE_REGION, LINE, ARC, BoundingBox} from '@tracespace/plotter'
+import {
+  IMAGE_PATH,
+  IMAGE_REGION,
+  LINE,
+  ARC,
+  BoundingBox,
+} from '@tracespace/plotter'
+import {
+  TYPE_COPPER,
+  TYPE_DRILL,
+  TYPE_SILKSCREEN,
+  TYPE_SOLDERMASK,
+  TYPE_SOLDERPASTE,
+} from '@tracespace/identify-layers'
 import {renderGraphic, sizeToViewBox} from '@tracespace/renderer'
 import polygonClipping from 'polygon-clipping'
 
@@ -25,6 +38,7 @@ export interface BoardShape {
   size: SizeEnvelope
   regions: ImageRegion[]
   openPaths: ImagePath[]
+  polygons: MultiPolygon | null
   failureReason?: BoardShapeFailureReason
 }
 
@@ -39,6 +53,32 @@ export type BoardShapeFailureReason =
   | typeof NO_PATHS_IN_OUTLINE_LAYER
   | typeof NO_CLOSED_REGIONS_FOUND
 
+const createRectangleRegionFromBox = (
+  box: SizeEnvelope
+): ImageRegion | null => {
+  if (!Array.isArray(box) || box.length < 4) return null
+  const [minX, minY, maxX, maxY] = box
+  if (
+    !Number.isFinite(minX) ||
+    !Number.isFinite(minY) ||
+    !Number.isFinite(maxX) ||
+    !Number.isFinite(maxY) ||
+    minX === maxX ||
+    minY === maxY
+  ) {
+    return null
+  }
+  return {
+    type: IMAGE_REGION,
+    segments: [
+      {type: LINE, start: [minX, minY], end: [maxX, minY]},
+      {type: LINE, start: [maxX, minY], end: [maxX, maxY]},
+      {type: LINE, start: [maxX, maxY], end: [minX, maxY]},
+      {type: LINE, start: [minX, maxY], end: [minX, minY]},
+    ],
+  }
+}
+
 export function plotBoardShape(
   layers: Layer[],
   plotTreesById: Record<string, ImageTree>,
@@ -50,10 +90,23 @@ export function plotBoardShape(
       .map(layer => plotTreesById[layer.id]?.size)
       .filter((box): box is SizeEnvelope => Boolean(box) && !BoundingBox.isEmpty(box))
 
-  const nonDrillBoxes = collectLayerBoxes(layer => layer.type !== 'drill')
-  const anyLayerBoxes = nonDrillBoxes.length > 0
-    ? nonDrillBoxes
-    : collectLayerBoxes(() => true)
+  const boardRelevantTypes = new Set<Layer['type']>([
+    TYPE_COPPER,
+    TYPE_SOLDERMASK,
+    TYPE_SOLDERPASTE,
+    TYPE_SILKSCREEN,
+  ])
+  const boardRelevantBoxes = collectLayerBoxes(layer => {
+    if (!layer.type) return false
+    return boardRelevantTypes.has(layer.type)
+  })
+  const nonDrillBoxes = collectLayerBoxes(layer => layer.type !== TYPE_DRILL)
+  const anyLayerBoxes =
+    boardRelevantBoxes.length > 0
+      ? boardRelevantBoxes
+      : nonDrillBoxes.length > 0
+        ? nonDrillBoxes
+        : collectLayerBoxes(() => true)
 
   const outlineId = getOutlineLayer(layers)
   const outlinePlot =
@@ -61,10 +114,13 @@ export function plotBoardShape(
   const size = BoundingBox.sum(anyLayerBoxes)
 
   if (outlinePlot === undefined) {
+    const fallbackRegion = createRectangleRegionFromBox(size)
+    const fallbackPolygon = fallbackRegion ? regionToPolygon(fallbackRegion) : null
     return {
       size,
-      regions: [],
+      regions: fallbackRegion ? [fallbackRegion] : [],
       openPaths: [],
+      polygons: fallbackPolygon ? [fallbackPolygon] : null,
       failureReason: MISSING_OUTLINE_LAYER,
     }
   }
@@ -75,72 +131,66 @@ export function plotBoardShape(
   const outlineRegions = outlinePlot.children.filter(
     (node): node is ImageRegion => node.type === IMAGE_REGION
   )
-  const inputSegments = [
-    ...outlinePaths.flatMap(path => path.segments),
-    ...outlineRegions.flatMap(region => region.segments),
-  ]
+  const pathSegments = outlinePaths.flatMap(path => path.segments)
 
-  if (inputSegments.length === 0) {
-    if (outlineRegions.length > 0) {
-      const derivedRegions = outlineRegions.map(region => ({
-        type: IMAGE_REGION as const,
-        segments: region.segments,
-      }))
-      const regionBox = BoundingBox.fromGraphics(derivedRegions)
-      return {
-        size: BoundingBox.isEmpty(regionBox) ? size : regionBox,
-        regions: derivedRegions,
-        openPaths: [],
-      }
-    }
+  if (pathSegments.length === 0 && outlineRegions.length === 0) {
     return {
       size,
       regions: [],
       openPaths: [],
+      polygons: null,
       failureReason: NO_PATHS_IN_OUTLINE_LAYER,
     }
   }
 
-  const allPaths = walkPaths(inputSegments)
-  const [regions, openPaths] = fillGaps(allPaths, maximumGap)
-  const mergedRegions = mergeBoardRegions(regions)
+  let derivedRegions: ImageRegion[] = []
+  let openPaths: ImagePath[] = []
+
+  if (pathSegments.length > 0) {
+    const allPaths = walkPaths(pathSegments)
+    const [regionCandidates, openCandidates] = fillGaps(allPaths, maximumGap)
+    derivedRegions = regionCandidates
+    openPaths = openCandidates
+  }
+
+  const {regions: mergedRegions, polygons: mergedPolygons} = mergeBoardRegions([
+    ...outlineRegions,
+    ...derivedRegions,
+  ])
 
   if (mergedRegions.length === 0) {
-    // Fallback: some outline layers are drawn as open strokes that never
-    // numerically close (CAD output quirks, rounding, or missing final edge).
-    // In that case, derive a rectangular board shape from the bounding box of
-    // all outline paths so top/bottom renders still get a reasonable clip.
-    if (outlinePaths.length > 0) {
-      const box = outlinePaths
-        .map(p => BoundingBox.fromPath(p.segments, p.width))
-        .reduce(BoundingBox.add, BoundingBox.empty())
+    // Fallback: derive a rectangular clip from whichever outline primitives
+    // exist so renders still have a bounded board.
+    const fallbackBox = (() => {
+      if (outlinePaths.length > 0) {
+        return outlinePaths
+          .map(p => BoundingBox.fromPath(p.segments, p.width))
+          .reduce(BoundingBox.add, BoundingBox.empty())
+      }
+      if (outlineRegions.length > 0) {
+        return BoundingBox.fromGraphics(outlineRegions)
+      }
+      return BoundingBox.empty()
+    })()
 
-      if (!BoundingBox.isEmpty(box)) {
-        const [x1, y1, x2, y2] = box
-        const fallbackRegion: ImageRegion = {
-          type: IMAGE_REGION,
-          segments: [
-            {type: LINE, start: [x1, y1], end: [x2, y1]},
-            {type: LINE, start: [x2, y1], end: [x2, y2]},
-            {type: LINE, start: [x2, y2], end: [x1, y2]},
-            {type: LINE, start: [x1, y2], end: [x1, y1]},
-          ],
-        }
-
-        return {
-          regions: [fallbackRegion],
-          openPaths,
-          size: box,
-        }
+    if (!BoundingBox.isEmpty(fallbackBox)) {
+      const fallbackRegion = createRectangleRegionFromBox(fallbackBox)
+      const fallbackPolygon = fallbackRegion ? regionToPolygon(fallbackRegion) : null
+      return {
+        regions: fallbackRegion ? [fallbackRegion] : [],
+        openPaths,
+        polygons: fallbackPolygon ? [fallbackPolygon] : null,
+        size: fallbackBox,
       }
     }
 
-    return {size, regions, openPaths, failureReason: NO_CLOSED_REGIONS_FOUND}
+    return {size, regions: [], openPaths, polygons: null, failureReason: NO_CLOSED_REGIONS_FOUND}
   }
 
   return {
     regions: mergedRegions,
     openPaths,
+    polygons: mergedPolygons,
     size: BoundingBox.fromGraphics(mergedRegions),
   }
 }
@@ -149,10 +199,16 @@ export function renderBoardShape(boardShape: BoardShape): BoardShapeRender {
   const {regions, size, failureReason} = boardShape
   const viewBox = sizeToViewBox(size)
   const segments = regions.flatMap(r => r.segments)
+  const path =
+    segments.length > 0 ? renderGraphic({type: IMAGE_REGION, segments}) : undefined
 
-  return failureReason === undefined
-    ? {viewBox, path: renderGraphic({type: IMAGE_REGION, segments})}
-    : {viewBox, failureReason}
+  if (failureReason && !path) {
+    return {viewBox, failureReason}
+  }
+
+  return failureReason
+    ? {viewBox, failureReason, path}
+    : {viewBox, path}
 }
 
 type Polygon = polygonClipping.Polygon
@@ -278,20 +334,60 @@ const polygonArea = (polygon?: [number, number][][]): number => {
   return sum / 2
 }
 
-const mergeBoardRegions = (regions: ImageRegion[]): ImageRegion[] => {
-  if (!Array.isArray(regions) || regions.length === 0) return regions
+const sanitizeRing = (ring?: [number, number][]): [number, number][] | null => {
+  if (!Array.isArray(ring) || ring.length < 3) return null
+  const cleaned: [number, number][] = []
+  for (const point of ring) {
+    const current: [number, number] = [Number(point?.[0]) || 0, Number(point?.[1]) || 0]
+    const prev = cleaned[cleaned.length - 1]
+    if (!prev || !positionsClose(prev, current)) {
+      cleaned.push(current)
+    }
+  }
+  if (cleaned.length < 3) return null
+  if (!positionsClose(cleaned[0], cleaned[cleaned.length - 1])) {
+    cleaned.push([cleaned[0][0], cleaned[0][1]])
+  }
+  if (cleaned.length < 4) return null
+  return cleaned
+}
+
+const sanitizeMultiPolygon = (value: MultiPolygon | null | undefined): MultiPolygon | null => {
+  if (!Array.isArray(value) || value.length === 0) return null
+  const polygons: MultiPolygon = []
+  value.forEach(polygon => {
+    if (!Array.isArray(polygon) || polygon.length === 0) return
+    const rings: [number, number][][] = []
+    polygon.forEach(ring => {
+      const cleaned = sanitizeRing(ring)
+      if (cleaned) rings.push(cleaned)
+    })
+    if (rings.length > 0) polygons.push(rings)
+  })
+  return polygons.length > 0 ? polygons : null
+}
+
+const mergeBoardRegions = (
+  regions: ImageRegion[]
+): {regions: ImageRegion[]; polygons: MultiPolygon | null} => {
+  if (!Array.isArray(regions) || regions.length === 0) {
+    return {regions, polygons: null}
+  }
   const polygons = regions
     .map(regionToPolygon)
     .filter((polygon): polygon is Polygon => Boolean(polygon))
-  if (polygons.length === 0) return regions
+  if (polygons.length === 0) {
+    return {regions, polygons: null}
+  }
   try {
     const unionResult = polygonClipping.union(...polygons)
-    if (!Array.isArray(unionResult) || unionResult.length === 0) {
-      return regions
+    const sanitized = sanitizeMultiPolygon(unionResult)
+    if (!sanitized) {
+      return {regions, polygons: null}
     }
-    return polygonToRegions(unionResult)
+    return {regions: polygonToRegions(sanitized), polygons: sanitized}
   } catch (error) {
     console.warn('[tracespace][board-shape] Failed to merge regions', error)
-    return regions
+    return {regions, polygons: null}
   }
 }

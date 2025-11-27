@@ -658,13 +658,21 @@ export function renderThree(
   boardShapeRegions = null,
   layerType = null,
   boardBounds = null,
-  boardClipRegions = null
+  boardClipRegions = null,
+  boardShapePolygons = null
 ) {
   if (!imageTree) {
     return new THREE.Group()
   }
   if (outline) {
-    return buildBoardGeometry(imageTree, color, drillTrees, boardShapeRegions, progress)
+    return buildBoardGeometry(
+      imageTree,
+      color,
+      drillTrees,
+      boardShapeRegions,
+      progress,
+      boardShapePolygons
+    )
   }
   return buildPlanarLayerGeometry(
     imageTree,
@@ -673,7 +681,9 @@ export function renderThree(
     layerType,
     boardShapeRegions,
     boardBounds,
-    boardClipRegions
+    boardClipRegions,
+    drillTrees,
+    boardShapePolygons
   )
 }
 
@@ -684,9 +694,12 @@ const buildPlanarLayerGeometry = (
   layerType = null,
   boardShapeRegions = null,
   boardBounds = null,
-  boardClipRegions = null
+  boardClipRegions = null,
+  drillTrees = null,
+  boardShapePolygons = null
 ) => {
   const group = new THREE.Group()
+  const normalizedBoardPolygon = sanitizeMultiPolygon(boardShapePolygons)
   let current = 0
   progress(current)
   const children = imageTree.children || []
@@ -729,11 +742,13 @@ const buildPlanarLayerGeometry = (
   let currentChunk = createChunk()
 
   if (isSolderMaskLayer) {
-    const regionInput =
-      Array.isArray(boardShapeRegions) && boardShapeRegions.length
-        ? boardShapeRegions
-        : getFallbackBoardRegions(imageTree, boardBounds, boardClipRegions)
-    const boardMaskPolygon = regionsToMultiPolygon(regionInput)
+    const boardMaskPolygon =
+      normalizedBoardPolygon ||
+      regionsToMultiPolygon(
+        Array.isArray(boardShapeRegions) && boardShapeRegions.length
+          ? boardShapeRegions
+          : getFallbackBoardRegions(imageTree, boardBounds, boardClipRegions)
+      )
     if (boardMaskPolygon) {
       initialDarkPolygons.push({
         polygon: boardMaskPolygon,
@@ -854,6 +869,15 @@ const buildPlanarLayerGeometry = (
       result = subtractMultiPolygon(result, clearUnion)
       resultBounds = getMultiPolygonBounds(result)
     }
+    if (result && drillHolePolygon) {
+      const shouldApplyDrill =
+        !resultBounds || !drillHoleBounds || boundsOverlap(resultBounds, drillHoleBounds)
+      if (shouldApplyDrill) {
+        // Carve global drill holes from every chunk
+        result = subtractMultiPolygon(result, drillHolePolygon)
+        resultBounds = getMultiPolygonBounds(result)
+      }
+    }
     chunk.multiPolygon = result
     chunk.contentBounds = resultBounds
     chunk.dirty = false
@@ -876,6 +900,9 @@ const buildPlanarLayerGeometry = (
   }
 
   initialDarkPolygons.forEach(entry => applyDarkPolygon(entry.polygon, entry.info))
+
+  const drillHolePolygon = drillTreesToMultiPolygon(drillTrees)
+  const drillHoleBounds = drillHolePolygon ? getMultiPolygonBounds(drillHolePolygon) : null
 
   for (let index = 0; index < children.length; index++) {
     const element = children[index]
@@ -1003,21 +1030,31 @@ const buildPlanarLayerGeometry = (
   return group
 }
 
-const buildBoardGeometry = (imageTree, color, drillTrees, boardShapeRegions, progress) => {
+const buildBoardGeometry = (
+  imageTree,
+  color,
+  drillTrees,
+  boardShapeRegions,
+  progress,
+  boardShapePolygons = null
+) => {
   const region = []
   const path = []
   const shape = []
   const polygonShapes = []
   let current = 0
   progress(current)
-  const useBoardShape =
-    Array.isArray(boardShapeRegions) && boardShapeRegions.length > 0
-  const outlineState = useBoardShape ? null : createOutlineState()
-  const boardShapes = useBoardShape
-    ? boardShapeRegions
-        .map((regionDef) => segmentsToShape(regionDef?.segments))
-        .filter(Boolean)
+  const normalizedBoardPolygons = sanitizeMultiPolygon(boardShapePolygons)
+  const polygonBoardShapes = normalizedBoardPolygons
+    ? multiPolygonToShapes(normalizedBoardPolygons)
     : []
+  const regionBoardShapes =
+    Array.isArray(boardShapeRegions) && boardShapeRegions.length > 0
+      ? boardShapeRegions.map(regionDef => segmentsToShape(regionDef?.segments)).filter(Boolean)
+      : []
+  const boardShapes = polygonBoardShapes.length > 0 ? polygonBoardShapes : regionBoardShapes
+  const hasExplicitBoardShape = boardShapes.length > 0
+  const outlineState = hasExplicitBoardShape ? null : createOutlineState()
 
   for (let index = 0; index < imageTree.children.length; index++) {
     const element = imageTree.children[index]
@@ -1032,7 +1069,7 @@ const buildBoardGeometry = (imageTree, color, drillTrees, boardShapeRegions, pro
       continue
     }
 
-    if (useBoardShape) {
+    if (hasExplicitBoardShape) {
       continue
     }
 
@@ -1076,7 +1113,7 @@ const buildBoardGeometry = (imageTree, color, drillTrees, boardShapeRegions, pro
       const normalized = normalizeGeometry(geometry)
       if (normalized) region.push(normalized)
     }
-  } else if (boardShapes.length > 0) {
+  } else if (hasExplicitBoardShape) {
     boardShapes.forEach((shapeEntry) => {
       if (!shapeEntry) return
       applyDrillHoles(shapeEntry, drillTrees)
@@ -1181,6 +1218,35 @@ const buildShapeEntriesFromDefinition = (definition) => {
   if (!shape) return []
   const bounds = shapeBounds(definition)
   return [{shape, bounds}]
+}
+
+const elementToMultiPolygon = element => {
+  if (!element) return null
+  if (element.type === IMAGE_REGION) {
+    const entry = createShapeEntryFromSegments(element.segments)
+    return entry?.shape ? shapeToMultiPolygon(entry.shape) : null
+  }
+  if (element.type === IMAGE_SHAPE) {
+    const entries = buildShapeEntriesFromDefinition(element.shape)
+    return combineShapeEntriesPolygon(entries)
+  }
+  if (element.type === IMAGE_PATH) {
+    return pathToMultiPolygon(element)
+  }
+  return null
+}
+
+const drillTreesToMultiPolygon = drillTrees => {
+  if (!Array.isArray(drillTrees) || drillTrees.length === 0) return null
+  const polygons = []
+  drillTrees.forEach(tree => {
+    if (!tree?.children) return
+    tree.children.forEach(element => {
+      const polygon = elementToMultiPolygon(element)
+      if (polygon) polygons.push(polygon)
+    })
+  })
+  return unionPolygonList(polygons)
 }
 
 const toPoint = position => snapPoint(position)

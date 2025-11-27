@@ -19,6 +19,7 @@ const props = defineProps({
   borderColor: { type: String, default: 'rgb(255, 235, 150)' },
   coreColor: { type: String, default: 'rgb(234, 226, 118)' },
   layerColors: { type: Object, default: () => ({}) },
+  layerVisibility: { type: Object, default: () => ({}) },
   backgroundColor: { type: String, default: '#0f1220' },
   containerWidth: { type: String, default: '100%' },
   containerHeight: { type: String, default: '100%' },
@@ -268,6 +269,13 @@ const resolveLayerColor = (type, fallbackColor) => {
   if (fallbackColor) return fallbackColor
   return defaultLayerColors[type] || '#ffffff'
 }
+const isLayerTypeVisible = (type) => {
+  if (!type) return true
+  const visibility = props.layerVisibility || {}
+  const value = visibility[type]
+  if (typeof value === 'boolean') return value
+  return true
+}
 
 const setMeshColor = (object, color, type = null) => {
   if (!object) return
@@ -297,6 +305,15 @@ const applyLayerColorOverrides = () => {
     if (!type || !defaultLayerColors[type]) return
     const color = resolveLayerColor(type)
     if (color) setMeshColor(child, color, type)
+  })
+  requestRender()
+}
+const applyLayerVisibility = () => {
+  if (!modelGroup) return
+  modelGroup.traverse((child) => {
+    const type = child.userData?.layerType
+    if (!type) return
+    child.visible = isLayerTypeVisible(type)
   })
   requestRender()
 }
@@ -565,6 +582,7 @@ const assembleLayers = (entries) => {
   }
   scene.add(modelGroup)
   applyLayerColorOverrides()
+  applyLayerVisibility()
   geometryBox = new THREE.Box3().setFromObject(modelGroup)
   if (geometryBox) {
     geometryBox.getCenter(geometryCenter)
@@ -817,6 +835,15 @@ watch(
     props.layerColors?.solderpaste,
   ],
   () => applyLayerColorOverrides()
+)
+watch(
+  () => [
+    props.layerVisibility?.copper,
+    props.layerVisibility?.soldermask,
+    props.layerVisibility?.silkscreen,
+    props.layerVisibility?.solderpaste,
+  ],
+  () => applyLayerVisibility()
 )
 watch(() => props.explosionActive, (isActive) => {
   explosionState.target = isActive ? 1 : 0

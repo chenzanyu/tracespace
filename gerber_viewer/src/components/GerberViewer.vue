@@ -82,18 +82,26 @@
 
             <div class="relative">
               <button
-                class="px-4 py-3.5 rounded-md bg-gray-900/80 text-white text-xs tracking-wide border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
-                title="3D 颜色设置" @click.stop="toggleColorMenu">
-                <span class="pi pi-palette text-base"></span>
+                class="px-3.5 py-3 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+                title="3D 显示设置" @click.stop="toggleDisplayMenu">
+                <span class="pi pi-eye text-lg"></span>
               </button>
-              <div v-if="colorMenuOpen"
+              <div v-if="displayMenuOpen"
                 class="absolute left-0 mt-3 ml-2 w-[320px] rounded-xl border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50 px-3 py-2.5 space-y-3"
                 style="transform: translateX(0)" @click.stop>
-                <div class="text-xs font-semibold text-gray-300 tracking-wide">3D 颜色设置</div>
+                <div class="text-xs font-semibold text-gray-300 tracking-wide">3D 显示设置</div>
                 <div class="grid grid-cols-2 gap-2">
                   <div v-for="item in pcb3dColorOptions" :key="item.key"
                     :class="['rounded-lg border border-white/10 bg-white/5 px-3 py-2 flex flex-col gap-1', item.key === 'core' ? 'col-span-2' : '']">
-                    <div class="text-[11px] text-gray-300 tracking-wide flex items-center">{{ item.label }}</div>
+                    <div class="text-[11px] text-gray-300 tracking-wide flex items-center justify-between">
+                      <span>{{ item.label }}</span>
+                      <button v-if="item.toggleable"
+                        class="w-8 h-8 shrink-0 flex items-center justify-center rounded border border-gray-600 hover:bg-gray-800 transition"
+                        :title="isPcb3dLayerVisible(item.key) ? '隐藏' : '显示'"
+                        @click="togglePcb3dLayerVisibility(item.key)">
+                        <span :class="isPcb3dLayerVisible(item.key) ? 'pi pi-eye' : 'pi pi-eye-slash'" />
+                      </button>
+                    </div>
                     <div class="flex items-center gap-3">
                       <input type="color" v-model="pcb3dColors[item.key]"
                         class="w-9 h-7 border border-gray-600 rounded bg-transparent" />
@@ -105,7 +113,7 @@
                 </div>
                 <button
                   class="w-full mt-1 px-3 py-2 text-xs rounded-md border border-white/30 bg-white/5 hover:bg-white/10 transition"
-                  @click.stop="resetPcb3dColors">
+                  @click.stop="resetPcb3dDisplaySettings">
                   恢复默认
                 </button>
               </div>
@@ -183,7 +191,8 @@
           :container-height="previewContainerHeight" :display-width="previewSize.width"
           :display-height="previewSize.height" :explosion-active="explosionActive"
           :explosion-spacing-multiplier="explosionSpacing" :border-color="pcb3dColors.core"
-          :core-color="pcb3dColors.core" :layer-colors="pcb3dColors" :fitPadding="1.55"
+          :core-color="pcb3dColors.core" :layer-colors="pcb3dColors" :layer-visibility="pcb3dVisibility"
+          :fitPadding="1.55"
           @loading-change="handlePcb3dLoading" />
       </section>
     </div>
@@ -309,14 +318,22 @@ const defaultPcb3dColors = Object.freeze({
   core: '#ffffcc',
 })
 const pcb3dColors = reactive({ ...defaultPcb3dColors })
+const defaultPcb3dVisibility = Object.freeze({
+  copper: true,
+  soldermask: true,
+  silkscreen: true,
+  solderpaste: false,
+  core: true,
+})
+const pcb3dVisibility = reactive({ ...defaultPcb3dVisibility })
 const pcb3dColorOptions = [
-  { key: 'copper', label: '铜层' },
-  { key: 'soldermask', label: '阻焊' },
-  { key: 'silkscreen', label: '丝印' },
-  { key: 'solderpaste', label: '助焊' },
-  { key: 'core', label: '芯板' },
+  { key: 'copper', label: '铜层', toggleable: true },
+  { key: 'soldermask', label: '阻焊', toggleable: true },
+  { key: 'silkscreen', label: '丝印', toggleable: true },
+  { key: 'solderpaste', label: '助焊', toggleable: true },
+  { key: 'core', label: '芯板', toggleable: false },
 ]
-const colorMenuOpen = ref(false)
+const displayMenuOpen = ref(false)
 const pcbModelJobs = reactive({ pending: 0, total: 0 })
 const workerLoading = ref(false)
 const viewerLoading = ref(false)
@@ -439,10 +456,10 @@ const toggleDownloadMenu = (event) => {
   event?.stopPropagation?.()
   downloadMenuOpen.value = !downloadMenuOpen.value
 }
-const toggleColorMenu = (event) => {
+const toggleDisplayMenu = (event) => {
   event?.stopPropagation?.()
-  const nextOpen = !colorMenuOpen.value
-  colorMenuOpen.value = nextOpen
+  const nextOpen = !displayMenuOpen.value
+  displayMenuOpen.value = nextOpen
   if (nextOpen) {
     spacingPanelVisible.value = false
     if (spacingHideHandle) {
@@ -451,14 +468,26 @@ const toggleColorMenu = (event) => {
     }
   }
 }
-const resetPcb3dColors = () => {
+const isPcb3dLayerVisible = (key) => {
+  const value = pcb3dVisibility[key]
+  return typeof value === 'boolean' ? value : true
+}
+const togglePcb3dLayerVisibility = (key) => {
+  if (key === 'core') return
+  const next = !isPcb3dLayerVisible(key)
+  pcb3dVisibility[key] = next
+}
+const resetPcb3dDisplaySettings = () => {
   Object.entries(defaultPcb3dColors).forEach(([key, value]) => {
     pcb3dColors[key] = value
+  })
+  Object.entries(defaultPcb3dVisibility).forEach(([key, value]) => {
+    pcb3dVisibility[key] = value
   })
 }
 const handleGlobalClick = () => {
   downloadMenuOpen.value = false
-  colorMenuOpen.value = false
+  displayMenuOpen.value = false
 }
 const recordWorkerJobStart = (jobId, payload) => {
   workerDebugLog.jobs.push({
@@ -515,7 +544,7 @@ const clearSpacingHideTimer = () => {
 }
 const showSpacingPanel = () => {
   if (!canExplode.value) return
-  if (colorMenuOpen.value) colorMenuOpen.value = false
+  if (displayMenuOpen.value) displayMenuOpen.value = false
   clearSpacingHideTimer()
   spacingPanelVisible.value = true
   if (!spacingPanelInitialized.value) {
@@ -1002,7 +1031,7 @@ watch(
 
 watch(activeView, (value) => {
   if (value !== '3d') {
-    colorMenuOpen.value = false
+    displayMenuOpen.value = false
     spacingPanelVisible.value = false
   }
 })

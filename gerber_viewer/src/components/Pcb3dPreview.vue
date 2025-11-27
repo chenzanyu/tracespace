@@ -46,6 +46,7 @@ const doubleSideMaterials = new WeakSet()
 let rafId = 0
 let running = false
 const objectLoader = new THREE.ObjectLoader()
+let lightingGroup = null
 const typedArrayConstructors = {
   Float32Array,
   Float64Array,
@@ -110,11 +111,12 @@ const buildMeshGroupFromData = (meshData, defaultColor) => {
       }
       const color =
         chunk?.material?.color != null ? chunk.material.color : defaultColor
-      const material = new THREE.MeshBasicMaterial({
+      const material = new THREE.MeshStandardMaterial({
         color: color ?? 0xffffff,
         transparent: chunk?.material?.transparent ?? false,
         opacity: chunk?.material?.opacity ?? 1,
       })
+      applyMaterialFinish(material, null, chunk?.metadata?.isClear)
       const metadata = chunk?.metadata ? {...chunk.metadata} : {}
       if (metadata.planar) {
         material.side = THREE.DoubleSide
@@ -158,6 +160,32 @@ const bottomLayerRenderOrders = {
   soldermask: 12,
   silkscreen: 14,
   solderpaste: 16,
+}
+
+const layerMaterialProfiles = Object.freeze({
+  default: { metalness: 0.25, roughness: 0.85 },
+  copper: { metalness: 0.75, roughness: 0.3 },
+  soldermask: { metalness: 0.08, roughness: 0.92 },
+  silkscreen: { metalness: 0.05, roughness: 0.65 },
+  solderpaste: { metalness: 0.55, roughness: 0.4 },
+  drill: { metalness: 0.18, roughness: 0.55 },
+  outline: { metalness: 0.12, roughness: 0.75 },
+  core: { metalness: 0.05, roughness: 0.9 },
+})
+
+const applyMaterialFinish = (material, type, isClear = false) => {
+  const profileKey = isClear ? 'core' : type
+  const profile =
+    (profileKey && layerMaterialProfiles[profileKey]) || layerMaterialProfiles.default
+  if (!material) return
+  const setProps = (target) => {
+    if (!target) return
+    if (typeof target.metalness === 'number') target.metalness = profile.metalness
+    if (typeof target.roughness === 'number') target.roughness = profile.roughness
+    target.needsUpdate = true
+  }
+  if (Array.isArray(material)) material.forEach(setProps)
+  else setProps(material)
 }
 
 const getLayerRenderOrder = (type, side) => {
@@ -241,7 +269,7 @@ const resolveLayerColor = (type, fallbackColor) => {
   return defaultLayerColors[type] || '#ffffff'
 }
 
-const setMeshColor = (object, color) => {
+const setMeshColor = (object, color, type = null) => {
   if (!object) return
   const next = createColor(color, '#ffffff')
   const coreColor = createColor(props.coreColor || props.borderColor, '#ffffff')
@@ -249,9 +277,13 @@ const setMeshColor = (object, color) => {
     if (child.isMesh) {
       const targetColor = child.userData?.isClear ? coreColor : next
       if (Array.isArray(child.material)) {
-        child.material.forEach((mat) => mat?.color?.set?.(targetColor))
+        child.material.forEach((mat) => {
+          mat?.color?.set?.(targetColor)
+          applyMaterialFinish(mat, type ?? child.userData?.layerType, child.userData?.isClear)
+        })
       } else {
         child.material?.color?.set?.(targetColor)
+        applyMaterialFinish(child.material, type ?? child.userData?.layerType, child.userData?.isClear)
       }
     }
   })
@@ -264,7 +296,7 @@ const applyLayerColorOverrides = () => {
     const type = child.userData?.layerType
     if (!type || !defaultLayerColors[type]) return
     const color = resolveLayerColor(type)
-    if (color) setMeshColor(child, color)
+    if (color) setMeshColor(child, color, type)
   })
   requestRender()
 }
@@ -449,7 +481,7 @@ const classifyLayers = (entries) => {
       child.userData.layerSide = entry.side
     })
     const layerColor = resolveLayerColor(entry.type, entry.color)
-    setMeshColor(mesh, layerColor)
+    setMeshColor(mesh, layerColor, entry.type)
     configureLayerVisuals(mesh, entry.type, entry.side)
     if (entry.type === 'outline') {
       outline.push(mesh)
@@ -496,14 +528,14 @@ const assembleLayers = (entries) => {
   const laminate = computeLaminate()
   const halfCore = laminate.core / 2
   if (classification.outline) {
-    setMeshColor(classification.outline, props.coreColor || props.borderColor)
+    setMeshColor(classification.outline, props.coreColor || props.borderColor, 'outline')
     classification.outline.scale.setZ(laminate.core)
     classification.outline.position.setZ(0)
     modelGroup.add(classification.outline)
     explosionEntriesForMesh(classification.outline, 'outline', null, 0)
   }
   for (const drill of classification.drills) {
-    setMeshColor(drill, props.borderColor)
+    setMeshColor(drill, props.borderColor, 'drill')
     drill.scale.setZ(laminate.total)
     drill.position.setZ(0)
     modelGroup.add(drill)
@@ -632,6 +664,31 @@ const setSceneBackground = () => {
   }
 }
 
+const createSceneLights = () => {
+  if (!scene) return
+  if (lightingGroup) {
+    scene.remove(lightingGroup)
+    lightingGroup = null
+  }
+  lightingGroup = new THREE.Group()
+  const ambient = new THREE.AmbientLight(0xffffff, 1)
+  lightingGroup.add(ambient)
+  const hemi = new THREE.HemisphereLight(0xcad6ff, 0x0c1016, 0.8)
+  hemi.position.set(0, 8, 0)
+  lightingGroup.add(hemi)
+  const createDirectional = (color, intensity, position) => {
+    const light = new THREE.DirectionalLight(color, intensity)
+    light.position.copy(position)
+    light.castShadow = false
+    lightingGroup.add(light)
+    return light
+  }
+  createDirectional(0xffffff, 1.65, new THREE.Vector3(6, 10, 7))
+  createDirectional(0xffd7b0, 0.9, new THREE.Vector3(-6, 4, 5))
+  createDirectional(0x9bb9ff, 0.6, new THREE.Vector3(0, -5, -4))
+  scene.add(lightingGroup)
+}
+
 const initThree = () => {
   if (!container.value) return
   scene = new THREE.Scene()
@@ -645,12 +702,16 @@ const initThree = () => {
     logarithmicDepthBuffer: true,
   })
   renderer.outputColorSpace = SRGBColorSpace
+  renderer.toneMapping = THREE.ACESFilmicToneMapping
+  renderer.toneMappingExposure = 1.55
+  renderer.physicallyCorrectLights = true
   renderer.setPixelRatio(window.devicePixelRatio || 1)
   renderer.domElement.style.display = 'block'
   renderer.domElement.style.width = '100%'
   renderer.domElement.style.height = '100%'
   container.value.appendChild(renderer.domElement)
   setSceneBackground()
+  createSceneLights()
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
   controls.dampingFactor = 0.08
@@ -680,6 +741,10 @@ const destroyThree = () => {
   geometryBox = null
   geometryCenter.set(0, 0, 0)
   renderer?.dispose?.()
+  if (lightingGroup && scene) {
+    scene.remove(lightingGroup)
+  }
+  lightingGroup = null
   if (renderer?.domElement && container.value && renderer.domElement.parentNode === container.value) {
     container.value.removeChild(renderer.domElement)
   }
@@ -699,10 +764,10 @@ const updateStructuralColors = () => {
   modelGroup.traverse((child) => {
     if (!child.isMesh) return
     if (child.userData?.layerType === 'outline') {
-      setMeshColor(child, props.coreColor || props.borderColor)
+      setMeshColor(child, props.coreColor || props.borderColor, 'outline')
     }
     if (child.userData?.layerType === 'drill') {
-      setMeshColor(child, props.borderColor)
+      setMeshColor(child, props.borderColor, 'drill')
     }
   })
   requestRender()

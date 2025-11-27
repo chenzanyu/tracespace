@@ -326,7 +326,7 @@ const viewOptions = [
   { label: '3D', value: '3d' },
 ]
 const explosionActive = ref(false)
-const explosionSpacing = ref(8)
+const explosionSpacing = ref(2)
 const spacingPanelVisible = ref(false)
 const spacingPanelInitialized = ref(false)
 const spacingSliderValue = ref(explosionSpacing.value)

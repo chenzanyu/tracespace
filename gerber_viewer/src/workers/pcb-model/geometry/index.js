@@ -31,13 +31,6 @@ const RING_POINT_EPSILON = 1e-8
 const SHAPE_SAMPLING_DIVISIONS = 16
 const reportedUnionFailures = new Set()
 
-const mergeGeometry = (existing, addition) => {
-  if (!addition) return existing
-  if (!existing) return addition
-  existing.dispose?.()
-  return addition
-}
-
 const normalizeGeometry = geometry => {
   if (!geometry) return null
   let result = geometry
@@ -658,8 +651,7 @@ export function renderThree(
   boardShapeRegions = null,
   layerType = null,
   boardBounds = null,
-  boardClipRegions = null,
-  boardShapePolygons = null
+  boardClipRegions = null
 ) {
   if (!imageTree) {
     return new THREE.Group()
@@ -670,8 +662,7 @@ export function renderThree(
       color,
       drillTrees,
       boardShapeRegions,
-      progress,
-      boardShapePolygons
+      progress
     )
   }
   return buildPlanarLayerGeometry(
@@ -682,8 +673,7 @@ export function renderThree(
     boardShapeRegions,
     boardBounds,
     boardClipRegions,
-    drillTrees,
-    boardShapePolygons
+    drillTrees
   )
 }
 
@@ -695,11 +685,9 @@ const buildPlanarLayerGeometry = (
   boardShapeRegions = null,
   boardBounds = null,
   boardClipRegions = null,
-  drillTrees = null,
-  boardShapePolygons = null
+  drillTrees = null
 ) => {
   const group = new THREE.Group()
-  const normalizedBoardPolygon = sanitizeMultiPolygon(boardShapePolygons)
   let current = 0
   progress(current)
   const children = imageTree.children || []
@@ -742,13 +730,11 @@ const buildPlanarLayerGeometry = (
   let currentChunk = createChunk()
 
   if (isSolderMaskLayer) {
-    const boardMaskPolygon =
-      normalizedBoardPolygon ||
-      regionsToMultiPolygon(
-        Array.isArray(boardShapeRegions) && boardShapeRegions.length
-          ? boardShapeRegions
-          : getFallbackBoardRegions(imageTree, boardBounds, boardClipRegions)
-      )
+    const regionInput =
+      Array.isArray(boardShapeRegions) && boardShapeRegions.length
+        ? boardShapeRegions
+        : getFallbackBoardRegions(imageTree, boardBounds, boardClipRegions)
+    const boardMaskPolygon = regionsToMultiPolygon(regionInput)
     if (boardMaskPolygon) {
       initialDarkPolygons.push({
         polygon: boardMaskPolygon,
@@ -1030,31 +1016,21 @@ const buildPlanarLayerGeometry = (
   return group
 }
 
-const buildBoardGeometry = (
-  imageTree,
-  color,
-  drillTrees,
-  boardShapeRegions,
-  progress,
-  boardShapePolygons = null
-) => {
+const buildBoardGeometry = (imageTree, color, drillTrees, boardShapeRegions, progress) => {
   const region = []
   const path = []
   const shape = []
   const polygonShapes = []
   let current = 0
   progress(current)
-  const normalizedBoardPolygons = sanitizeMultiPolygon(boardShapePolygons)
-  const polygonBoardShapes = normalizedBoardPolygons
-    ? multiPolygonToShapes(normalizedBoardPolygons)
-    : []
-  const regionBoardShapes =
+  const useBoardShape =
     Array.isArray(boardShapeRegions) && boardShapeRegions.length > 0
-      ? boardShapeRegions.map(regionDef => segmentsToShape(regionDef?.segments)).filter(Boolean)
-      : []
-  const boardShapes = polygonBoardShapes.length > 0 ? polygonBoardShapes : regionBoardShapes
-  const hasExplicitBoardShape = boardShapes.length > 0
-  const outlineState = hasExplicitBoardShape ? null : createOutlineState()
+  const outlineState = useBoardShape ? null : createOutlineState()
+  const boardShapes = useBoardShape
+    ? boardShapeRegions
+        .map((regionDef) => segmentsToShape(regionDef?.segments))
+        .filter(Boolean)
+    : []
 
   for (let index = 0; index < imageTree.children.length; index++) {
     const element = imageTree.children[index]
@@ -1069,7 +1045,7 @@ const buildBoardGeometry = (
       continue
     }
 
-    if (hasExplicitBoardShape) {
+    if (useBoardShape) {
       continue
     }
 
@@ -1113,7 +1089,7 @@ const buildBoardGeometry = (
       const normalized = normalizeGeometry(geometry)
       if (normalized) region.push(normalized)
     }
-  } else if (hasExplicitBoardShape) {
+  } else if (boardShapes.length > 0) {
     boardShapes.forEach((shapeEntry) => {
       if (!shapeEntry) return
       applyDrillHoles(shapeEntry, drillTrees)
@@ -1128,11 +1104,12 @@ const buildBoardGeometry = (
 
   const mergeAndAdd = geometries => {
     if (!geometries.length) return
-    const merged = geometries.reduce((acc, geo) => mergeGeometry(acc, geo), null)
-    if (!merged) return
-    const mesh = new THREE.Mesh(merged, material)
-    mesh.userData = {planar: false}
-    group.add(mesh)
+    geometries.forEach(geo => {
+      if (!geo) return
+      const mesh = new THREE.Mesh(geo, material)
+      mesh.userData = {planar: false}
+      group.add(mesh)
+    })
   }
 
   mergeAndAdd(region)

@@ -103,7 +103,6 @@ const buildLayerPayload = payload => {
       color,
       drillShapes,
       boardShapeRegions,
-      boardShapePolygons,
       boardBounds,
       boardClipRegions,
     } = payload
@@ -151,8 +150,7 @@ const buildLayerPayload = payload => {
         boardShapeRegions,
         payload.type,
         boardBounds,
-        boardClipRegions,
-        boardShapePolygons
+        boardClipRegions
       )
       renderDebug = group?.userData?.planarDebug || null
       logWorker('renderThree-complete', {

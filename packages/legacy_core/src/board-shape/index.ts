@@ -26,9 +26,6 @@ import {getOutlineLayer} from '../sort-layers'
 import {walkPaths} from './walk-paths'
 import {fillGaps} from './fill-gaps'
 
-type Point = [number, number]
-type MultiPolygon = Point[][][]
-
 export const MISSING_OUTLINE_LAYER = 'missingOutlineLayer'
 export const NO_PATHS_IN_OUTLINE_LAYER = 'noPathsInOutlineLayer'
 export const NO_CLOSED_REGIONS_FOUND = 'noClosedRegionsFound'
@@ -37,7 +34,6 @@ export interface BoardShape {
   size: SizeEnvelope
   regions: ImageRegion[]
   openPaths: ImagePath[]
-  polygons: MultiPolygon | null
   failureReason?: BoardShapeFailureReason
 }
 
@@ -118,7 +114,6 @@ export function plotBoardShape(
       size,
       regions: fallbackRegion ? [fallbackRegion] : [],
       openPaths: [],
-      polygons: null,
       failureReason: MISSING_OUTLINE_LAYER,
     }
   }
@@ -136,7 +131,6 @@ export function plotBoardShape(
       size,
       regions: [],
       openPaths: [],
-      polygons: null,
       failureReason: NO_PATHS_IN_OUTLINE_LAYER,
     }
   }
@@ -175,18 +169,16 @@ export function plotBoardShape(
       return {
         regions: fallbackRegion ? [fallbackRegion] : [],
         openPaths,
-        polygons: null,
         size: fallbackBox,
       }
     }
 
-    return {size, regions: [], openPaths, polygons: null, failureReason: NO_CLOSED_REGIONS_FOUND}
+    return {size, regions: [], openPaths, failureReason: NO_CLOSED_REGIONS_FOUND}
   }
 
   return {
     regions,
     openPaths,
-    polygons: null,
     size: BoundingBox.fromGraphics(regions),
   }
 }

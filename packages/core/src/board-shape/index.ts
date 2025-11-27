@@ -38,7 +38,6 @@ export interface BoardShape {
   size: SizeEnvelope
   regions: ImageRegion[]
   openPaths: ImagePath[]
-  polygons: MultiPolygon | null
   failureReason?: BoardShapeFailureReason
 }
 
@@ -153,7 +152,7 @@ export function plotBoardShape(
     openPaths = openCandidates
   }
 
-  const {regions: mergedRegions, polygons: mergedPolygons} = mergeBoardRegions([
+  const mergedRegions = mergeBoardRegions([
     ...outlineRegions,
     ...derivedRegions,
   ])
@@ -179,18 +178,16 @@ export function plotBoardShape(
       return {
         regions: fallbackRegion ? [fallbackRegion] : [],
         openPaths,
-        polygons: fallbackPolygon ? [fallbackPolygon] : null,
         size: fallbackBox,
       }
     }
 
-    return {size, regions: [], openPaths, polygons: null, failureReason: NO_CLOSED_REGIONS_FOUND}
+    return {size, regions: [], openPaths, failureReason: NO_CLOSED_REGIONS_FOUND}
   }
 
   return {
     regions: mergedRegions,
     openPaths,
-    polygons: mergedPolygons,
     size: BoundingBox.fromGraphics(mergedRegions),
   }
 }
@@ -334,60 +331,20 @@ const polygonArea = (polygon?: [number, number][][]): number => {
   return sum / 2
 }
 
-const sanitizeRing = (ring?: [number, number][]): [number, number][] | null => {
-  if (!Array.isArray(ring) || ring.length < 3) return null
-  const cleaned: [number, number][] = []
-  for (const point of ring) {
-    const current: [number, number] = [Number(point?.[0]) || 0, Number(point?.[1]) || 0]
-    const prev = cleaned[cleaned.length - 1]
-    if (!prev || !positionsClose(prev, current)) {
-      cleaned.push(current)
-    }
-  }
-  if (cleaned.length < 3) return null
-  if (!positionsClose(cleaned[0], cleaned[cleaned.length - 1])) {
-    cleaned.push([cleaned[0][0], cleaned[0][1]])
-  }
-  if (cleaned.length < 4) return null
-  return cleaned
-}
-
-const sanitizeMultiPolygon = (value: MultiPolygon | null | undefined): MultiPolygon | null => {
-  if (!Array.isArray(value) || value.length === 0) return null
-  const polygons: MultiPolygon = []
-  value.forEach(polygon => {
-    if (!Array.isArray(polygon) || polygon.length === 0) return
-    const rings: [number, number][][] = []
-    polygon.forEach(ring => {
-      const cleaned = sanitizeRing(ring)
-      if (cleaned) rings.push(cleaned)
-    })
-    if (rings.length > 0) polygons.push(rings)
-  })
-  return polygons.length > 0 ? polygons : null
-}
-
-const mergeBoardRegions = (
-  regions: ImageRegion[]
-): {regions: ImageRegion[]; polygons: MultiPolygon | null} => {
-  if (!Array.isArray(regions) || regions.length === 0) {
-    return {regions, polygons: null}
-  }
+const mergeBoardRegions = (regions: ImageRegion[]): ImageRegion[] => {
+  if (!Array.isArray(regions) || regions.length === 0) return regions
   const polygons = regions
     .map(regionToPolygon)
     .filter((polygon): polygon is Polygon => Boolean(polygon))
-  if (polygons.length === 0) {
-    return {regions, polygons: null}
-  }
+  if (polygons.length === 0) return regions
   try {
     const unionResult = polygonClipping.union(...polygons)
-    const sanitized = sanitizeMultiPolygon(unionResult)
-    if (!sanitized) {
-      return {regions, polygons: null}
+    if (!Array.isArray(unionResult) || unionResult.length === 0) {
+      return regions
     }
-    return {regions: polygonToRegions(sanitized), polygons: sanitized}
+    return polygonToRegions(unionResult)
   } catch (error) {
     console.warn('[tracespace][board-shape] Failed to merge regions', error)
-    return {regions, polygons: null}
+    return regions
   }
 }

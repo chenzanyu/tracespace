@@ -720,7 +720,6 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
   updateWorkerLoading()
   if (!Array.isArray(parsedLayers) || parsedLayers.length === 0) return
   const boardRegions = Array.isArray(boardShape?.regions) ? boardShape.regions : undefined
-  const boardPolygons = Array.isArray(boardShape?.polygons) ? boardShape.polygons : undefined
   const boardBounds = Array.isArray(boardShape?.size) ? boardShape.size : undefined
   const drillParseTrees = parsedLayers
     .filter((layer) => {
@@ -743,7 +742,6 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
       color: getLayerColor(layer.id, layer.type),
       outline: layer.type === 'outline',
       boardShapeRegions: layer.type === 'outline' ? boardRegions : undefined,
-      boardShapePolygons: boardPolygons,
       boardClipRegions: boardRegions,
       drillShapes: drillShapePayload,
       boardBounds,

@@ -671,10 +671,10 @@ const createSceneLights = () => {
     lightingGroup = null
   }
   lightingGroup = new THREE.Group()
-  const ambient = new THREE.AmbientLight(0xffffff, 1)
+  const ambient = new THREE.AmbientLight(0xffffff, 1.25)
   lightingGroup.add(ambient)
-  const hemi = new THREE.HemisphereLight(0xcad6ff, 0x0c1016, 0.8)
-  hemi.position.set(0, 8, 0)
+  const hemi = new THREE.HemisphereLight(0xcad6ff, 0x0c1016, 1.2)
+  hemi.position.set(0, 10, 0)
   lightingGroup.add(hemi)
   const createDirectional = (color, intensity, position) => {
     const light = new THREE.DirectionalLight(color, intensity)
@@ -683,9 +683,14 @@ const createSceneLights = () => {
     lightingGroup.add(light)
     return light
   }
-  createDirectional(0xffffff, 1.65, new THREE.Vector3(6, 10, 7))
-  createDirectional(0xffd7b0, 0.9, new THREE.Vector3(-6, 4, 5))
-  createDirectional(0x9bb9ff, 0.6, new THREE.Vector3(0, -5, -4))
+  createDirectional(0xffffff, 1.8, new THREE.Vector3(6, 11, 7))
+  createDirectional(0xffd7b0, 1.05, new THREE.Vector3(-6, 4, 6))
+  createDirectional(0x9bb9ff, 1.05, new THREE.Vector3(0, -7, -6))
+  createDirectional(0xcfe4ff, 0.8, new THREE.Vector3(0, -4, 5))
+  createDirectional(0xfff3d2, 0.55, new THREE.Vector3(4, -3, -6))
+  const bottomFill = new THREE.PointLight(0xffffff, 0.9)
+  bottomFill.position.set(0, -6, 0)
+  lightingGroup.add(bottomFill)
   scene.add(lightingGroup)
 }
 
@@ -703,7 +708,7 @@ const initThree = () => {
   })
   renderer.outputColorSpace = SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping
-  renderer.toneMappingExposure = 1.55
+  renderer.toneMappingExposure = 1.7
   renderer.physicallyCorrectLights = true
   renderer.setPixelRatio(window.devicePixelRatio || 1)
   renderer.domElement.style.display = 'block'

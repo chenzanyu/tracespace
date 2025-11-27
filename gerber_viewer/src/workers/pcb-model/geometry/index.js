@@ -998,7 +998,7 @@ const buildPlanarLayerGeometry = (
     const material = new THREE.MeshBasicMaterial({
       color,
       transparent: true,
-      opacity: isSolderMaskLayer ? 0.85 : 1,
+      opacity: isSolderMaskLayer ? 0.9 : 1,
     })
     material.side = THREE.DoubleSide
     material.depthWrite = true

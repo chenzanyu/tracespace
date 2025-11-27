@@ -82,8 +82,8 @@
 
             <div class="relative">
               <button
-                class="px-3.5 py-3 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
-                title="3D 显示设置" @click.stop="toggleDisplayMenu">
+                class="px-4 py-3.5 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+                title="显示设置" @click.stop="toggleDisplayMenu">
                 <span class="pi pi-eye text-lg"></span>
               </button>
               <div v-if="displayMenuOpen"
@@ -315,7 +315,7 @@ const defaultPcb3dColors = Object.freeze({
   soldermask: '#004200',
   silkscreen: '#ffffff',
   solderpaste: '#b2b2b2',
-  core: '#ffffcc',
+  core: '#292900',
 })
 const pcb3dColors = reactive({ ...defaultPcb3dColors })
 const defaultPcb3dVisibility = Object.freeze({

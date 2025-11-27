@@ -15,7 +15,7 @@ import {GLTFExporter} from 'three/examples/jsm/exporters/GLTFExporter.js'
 
 const props = defineProps({
   modelData: { type: Object, default: () => ({ layers: [], version: 0 }) },
-  thickness: { type: Number, default: 0.016 },
+  thickness: { type: Number, default: 1.6 },
   borderColor: { type: String, default: 'rgb(255, 235, 150)' },
   coreColor: { type: String, default: 'rgb(234, 226, 118)' },
   layerColors: { type: Object, default: () => ({}) },

@@ -178,7 +178,7 @@
           @debug-update="handlePixiDebugUpdate" />
 
         <!-- 3D 视图 -->
-        <Pcb3dPreview ref="pcb3dRef" v-show="activeView === '3d'" :model-data="pcb3dModel" :thickness="boardThickness"
+        <Pcb3dPreview ref="pcb3dRef" v-show="activeView === '3d'" :model-data="pcb3dModel" :thickness="boardThicknessUnits"
           :active="activeView === '3d'" :container-width="previewContainerWidth"
           :container-height="previewContainerHeight" :display-width="previewSize.width"
           :display-height="previewSize.height" :explosion-active="explosionActive"
@@ -278,7 +278,25 @@ const boardViewBox = ref([0, 0, 0, 0])
 const boardWidthMm = ref(0)
 const boardHeightMm = ref(0)
 const pcb3dRef = ref(null)
-const boardThickness = ref(0.016)
+const defaultBoardThicknessMm = 1.6
+// API historically emitted thickness in meters (e.g. 0.0016 for a 1.6 mm board),
+// so treat any value smaller than 0.01 as meters and convert it to millimeters.
+const boardThickness = ref(defaultBoardThicknessMm)
+const unitMmPerUnit = ref(1)
+const meterToMmThreshold = 0.01
+const convertThicknessToMillimeters = (value) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return null
+  if (numeric < meterToMmThreshold) return numeric * 1000
+  return numeric
+}
+const boardThicknessUnits = computed(() => {
+  const mmValue = Number(boardThickness.value)
+  const normalizedMm = Number.isFinite(mmValue) && mmValue > 0 ? mmValue : defaultBoardThicknessMm
+  const mmPerUnit = Number(unitMmPerUnit.value)
+  if (!Number.isFinite(mmPerUnit) || mmPerUnit <= 0) return normalizedMm
+  return normalizedMm / mmPerUnit
+})
 const pcb3dModel = reactive({
   layers: [],
   version: 0,
@@ -808,7 +826,12 @@ const handleUploadFile = async (file) => {
     )
     const result = res.data.Data
     memoryLayers.value = result.Items || []
-    if (typeof result.Thickness === 'number') boardThickness.value = result.Thickness
+    if (typeof result.Thickness === 'number') {
+      const normalizedThickness = convertThicknessToMillimeters(result.Thickness)
+      boardThickness.value = normalizedThickness ?? defaultBoardThicknessMm
+    } else {
+      boardThickness.value = defaultBoardThicknessMm
+    }
 
     const pipeline = runPerfSync('upload:hybridPipeline', () =>
       runHybridPipeline(memoryLayers.value)
@@ -880,10 +903,15 @@ const coerceSideForType = (type, side) => {
 const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
   if (!fm) return
   fmRef.value = fm
+  const mmPerUnit = Number(fm?.unitMeta?.mmPerUnit)
+  unitMmPerUnit.value = Number.isFinite(mmPerUnit) && mmPerUnit > 0 ? mmPerUnit : 1
   boardViewBox.value = fm.renderLayersResult.boardShapeRender.viewBox
   if (Array.isArray(boardViewBox.value) && boardViewBox.value.length >= 4) {
-    boardWidthMm.value = boardViewBox.value[2] || 0
-    boardHeightMm.value = boardViewBox.value[3] || 0
+    const widthUnits = boardViewBox.value[2] || 0
+    const heightUnits = boardViewBox.value[3] || 0
+    const mmScale = unitMmPerUnit.value || 1
+    boardWidthMm.value = widthUnits * mmScale
+    boardHeightMm.value = heightUnits * mmScale
   }
   const keep = preserveVisuals
     ? new Map(orderedLayers.map((layer) => [layer.filename, { color: layer.color, visible: layer.visible, opacity: layer.opacity }]))

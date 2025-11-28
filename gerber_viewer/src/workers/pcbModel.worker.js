@@ -155,6 +155,7 @@ const buildLayerPayload = payload => {
       boardShapeRegions,
       boardBounds,
       boardClipRegions,
+      boardShapePolygons,
     } = payload
     const metrics = createWorkerMetrics()
     const perfOrigin = getWorkerPerfNow()
@@ -225,7 +226,8 @@ const buildLayerPayload = payload => {
           boardShapeRegions,
           payload.type,
           boardBounds,
-          boardClipRegions
+          boardClipRegions,
+          boardShapePolygons
         )
       )
       renderDebug = group?.userData?.planarDebug || null

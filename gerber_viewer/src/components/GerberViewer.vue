@@ -92,7 +92,7 @@
                 <div class="text-xs font-semibold text-gray-300 tracking-wide">3D 显示设置</div>
                 <div class="grid grid-cols-2 gap-2">
                   <div v-for="item in pcb3dColorOptions" :key="item.key"
-                    :class="['rounded-lg border border-white/10 bg-white/5 px-3 py-2 flex flex-col gap-1', item.key === 'core' ? 'col-span-2' : '']">
+                    class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 flex flex-col gap-1">
                     <div class="text-[11px] text-gray-300 tracking-wide flex items-center justify-between">
                       <span>{{ item.label }}</span>
                       <button v-if="item.toggleable"
@@ -163,6 +163,13 @@
                 </button>
               </div>
             </div>
+
+            <button
+              class="px-4 py-3 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
+              title="性能监控" @click="openPerfModal">
+              <span class="pi pi-chart-line text-lg"></span>
+              <span class="text-xs font-semibold uppercase tracking-wide">性能</span>
+            </button>
           </template>
         </div>
 
@@ -193,7 +200,8 @@
           :explosion-spacing-multiplier="explosionSpacing" :border-color="pcb3dColors.core"
           :core-color="pcb3dColors.core" :layer-colors="pcb3dColors" :layer-visibility="pcb3dVisibility"
           :fitPadding="1.55"
-          @loading-change="handlePcb3dLoading" />
+          @loading-change="handlePcb3dLoading"
+          @perf-stats="handleViewerPerfEvent" />
       </section>
     </div>
 
@@ -219,7 +227,6 @@
                 <option value="copper">copper</option>
                 <option value="soldermask">soldermask</option>
                 <option value="silkscreen">silkscreen</option>
-                <option value="solderpaste">solderpaste</option>
                 <option value="drill">drill</option>
                 <option value="outline">outline</option>
                 <option value="drawing">drawing</option>
@@ -237,6 +244,141 @@
         <div class="p-3 border-t border-gray-700 flex items-center justify-end gap-2">
           <button class="px-3 py-1 border rounded" @click="isSettingsOpen = false">取消</button>
           <button class="px-3 py-1 border rounded bg-cyan-600 text-white" @click="applySettings">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="perfModalOpen" class="fixed inset-0 z-[90] flex items-center justify-center">
+      <div class="absolute inset-0 bg-black/60" @click="closePerfModal"></div>
+      <div
+        class="relative w-[1100px] max-w-[96vw] max-h-[85vh] bg-gray-900 text-gray-100 rounded-xl border border-gray-700 shadow-2xl flex flex-col">
+        <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
+          <div>
+            <div class="text-base font-semibold">性能监控</div>
+            <div class="text-xs text-gray-400 mt-1">
+              来源：{{ perfSourceLabel }} · {{ formatPerfTimestamp(pipelinePerfSummary.startedAt) }}
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button
+              class="px-3 py-1.5 text-xs border border-gray-600 rounded hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+              :disabled="!hasPerfData" @click="exportPerfMarkdown">
+              导出 Markdown
+            </button>
+            <button class="px-3 py-1.5 text-xs border border-gray-600 rounded hover:bg-gray-800" @click="closePerfModal">
+              关闭
+            </button>
+          </div>
+        </div>
+        <div class="p-5 overflow-y-auto flex-1 space-y-6">
+          <template v-if="hasPerfData">
+            <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+              <div class="bg-white/5 border border-white/5 rounded-lg p-3">
+                <div class="uppercase tracking-wide text-[11px] text-gray-400">总耗时</div>
+                <div class="text-lg font-semibold mt-1">
+                  {{ formatPerfDuration(pipelinePerfSummary.totalDurationMs) }}
+                </div>
+              </div>
+              <div class="bg-white/5 border border-white/5 rounded-lg p-3">
+                <div class="uppercase tracking-wide text-[11px] text-gray-400">Worker 数</div>
+                <div class="text-lg font-semibold mt-1">
+                  {{ pipelinePerfSummary.completedWorkerJobs }} / {{ pipelinePerfSummary.expectedWorkerJobs }}
+                </div>
+              </div>
+              <div class="bg-white/5 border border-white/5 rounded-lg p-3">
+                <div class="uppercase tracking-wide text-[11px] text-gray-400">累计顶点</div>
+                <div class="text-lg font-semibold mt-1">
+                  {{ pipelinePerfSummary.totalVertices.toLocaleString() }}
+                </div>
+              </div>
+              <div class="bg-white/5 border border-white/5 rounded-lg p-3">
+                <div class="uppercase tracking-wide text-[11px] text-gray-400">Worker 峰值内存</div>
+                <div class="text-lg font-semibold mt-1">
+                  {{ formatPerfMemory(pipelinePerfSummary.peakWorkerMemoryBytes) }}
+                </div>
+              </div>
+            </div>
+            <div class="text-[11px] text-gray-400 flex flex-wrap gap-4">
+              <span>文件：{{ pipelinePerfSession.meta?.fileName ?? '—' }}</span>
+              <span v-if="pipelinePerfSession.meta?.fileSize">
+                大小：{{ formatPerfMemory(pipelinePerfSession.meta.fileSize) }}
+              </span>
+              <span v-if="longestWorkerJob">
+                最慢 Worker：{{ longestWorkerJob.label }} · {{ formatPerfDuration(longestWorkerJob.durationMs) }}
+              </span>
+            </div>
+
+            <div v-if="pipelinePerfSession.stages.length" class="space-y-2">
+              <div class="text-sm font-semibold">前处理阶段</div>
+              <div class="space-y-2">
+                <div v-for="stage in pipelinePerfSession.stages" :key="stage.id"
+                  class="bg-white/5 border border-white/5 rounded-lg px-3 py-2">
+                  <div class="flex items-center justify-between text-sm font-medium">
+                    <span>{{ formatPerfPhase(stage.phase) }}</span>
+                    <span>{{ formatPerfDuration(stage.durationMs) }}</span>
+                  </div>
+                  <div class="text-[11px] text-gray-400 flex flex-wrap gap-3 mt-1">
+                    <span>Δ内存：{{ formatPerfMemory(stage.memoryDeltaBytes) }}</span>
+                    <span v-if="stage.memoryEndUsedBytes">
+                      结束：{{ formatPerfMemory(stage.memoryEndUsedBytes) }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="workerPerfRows.length" class="space-y-2">
+              <div class="text-sm font-semibold">Worker 阶段</div>
+              <div class="space-y-2">
+                <div v-for="job in workerPerfRows" :key="job.id"
+                  class="bg-gray-900/80 border border-white/5 rounded-lg px-3 py-2">
+                  <div class="flex items-center justify-between text-sm font-semibold">
+                    <span>{{ job.label }}</span>
+                    <span :class="job.success ? '' : 'text-red-300'">
+                      {{ job.success ? formatPerfDuration(job.durationMs) : '失败' }}
+                    </span>
+                  </div>
+                  <div class="text-[11px] text-gray-400 flex flex-wrap gap-3 mt-1">
+                    <span>顶点：{{ job.vertexCount.toLocaleString() }}</span>
+                    <span>块：{{ job.chunkCount }}</span>
+                    <span>峰值：{{ formatPerfMemory(job.peakMemoryBytes) }}</span>
+                  </div>
+                  <div v-if="job.timeline?.length" class="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    <div v-for="stage in job.timeline" :key="`${job.id}-${stage.index}`"
+                      class="bg-white/5 rounded px-2 py-1">
+                      <div class="text-[11px] text-gray-400">{{ resolvePerfStageLabel(stage.name) }}</div>
+                      <div class="text-xs font-semibold text-white">{{ formatPerfDuration(stage.durationMs) }}</div>
+                      <div class="text-[10px] text-gray-500">Δ{{ formatPerfMemory(stage.memoryDeltaBytes) }}</div>
+                    </div>
+                  </div>
+                  <div v-if="!job.success && job.errorMessage" class="text-[11px] text-red-300 mt-1">
+                    {{ job.errorMessage }}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="pipelinePerfSession.viewerStages.length" class="space-y-2">
+              <div class="text-sm font-semibold">3D 装配阶段</div>
+              <div class="space-y-2">
+                <div v-for="entry in pipelinePerfSession.viewerStages" :key="entry.id"
+                  class="bg-gray-900/80 border border-white/5 rounded-lg px-3 py-2">
+                  <div class="flex items-center justify-between text-sm font-medium">
+                    <span>{{ resolvePerfStageLabel(entry.stage) }}</span>
+                    <span>{{ formatPerfDuration(entry.durationMs) }}</span>
+                  </div>
+                  <div class="text-[11px] text-gray-400 flex flex-wrap gap-3 mt-1">
+                    <span>层数：{{ entry.meta?.layerCount ?? '—' }}</span>
+                    <span>顶点：{{ entry.meta?.vertexCount != null ? entry.meta.vertexCount.toLocaleString() : '—' }}</span>
+                    <span>Δ内存：{{ formatPerfMemory(entry.memoryDeltaBytes) }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+          <p v-else class="text-sm text-center text-gray-400 py-12">
+            还没有性能数据。请先上传或重新保存设置以触发 3D 处理。
+          </p>
         </div>
       </div>
     </div>
@@ -314,7 +456,6 @@ const defaultPcb3dColors = Object.freeze({
   copper: '#cc9933',
   soldermask: '#004200',
   silkscreen: '#ffffff',
-  solderpaste: '#b2b2b2',
   core: '#292900',
 })
 const pcb3dColors = reactive({ ...defaultPcb3dColors })
@@ -322,7 +463,6 @@ const defaultPcb3dVisibility = Object.freeze({
   copper: true,
   soldermask: true,
   silkscreen: true,
-  solderpaste: false,
   core: true,
 })
 const pcb3dVisibility = reactive({ ...defaultPcb3dVisibility })
@@ -330,7 +470,6 @@ const pcb3dColorOptions = [
   { key: 'copper', label: '铜层', toggleable: true },
   { key: 'soldermask', label: '阻焊', toggleable: true },
   { key: 'silkscreen', label: '丝印', toggleable: true },
-  { key: 'solderpaste', label: '助焊', toggleable: true },
   { key: 'core', label: '芯板', toggleable: false },
 ]
 const displayMenuOpen = ref(false)
@@ -364,29 +503,6 @@ const workerDebugLog = reactive({
 })
 const pixiLayerDebug = ref([])
 const maxDebugEntries = 50
-const enablePerfLogs = import.meta.env?.DEV ?? false
-const perfLabel = (phase) => `[perf][GerberViewer] ${phase}`
-const runPerfSync = (phase, fn) => {
-  if (!enablePerfLogs) return fn()
-  console.time(perfLabel(phase))
-  try {
-    return fn()
-  } finally {
-    console.timeEnd(perfLabel(phase))
-  }
-}
-const runPerfAsync = async (phase, fn) => {
-  if (!enablePerfLogs) return fn()
-  console.time(perfLabel(phase))
-  try {
-    return await fn()
-  } finally {
-    console.timeEnd(perfLabel(phase))
-  }
-}
-const logPerf = (phase, payload) => {
-  if (enablePerfLogs) console.log(perfLabel(phase), payload)
-}
 const triggerFileDownload = (blob, filename) => {
   if (!blob) return
   const url = URL.createObjectURL(blob)
@@ -452,6 +568,333 @@ const summarizeMeshData = (meshData) => {
   }
   return null
 }
+const perfModalOpen = ref(false)
+const pipelinePerfSession = reactive({
+  id: 0,
+  source: '',
+  startedAt: 0,
+  completedAt: 0,
+  expectedWorkerJobs: 0,
+  completedWorkerJobs: 0,
+  meta: {},
+  stages: [],
+  workerJobs: [],
+  viewerStages: [],
+})
+let perfSessionSeq = 0
+const bytesInMegabyte = 1024 * 1024
+const getPerfNow = () =>
+  (typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now())
+const hasPerfData = computed(
+  () =>
+    pipelinePerfSession.stages.length > 0 ||
+    pipelinePerfSession.workerJobs.length > 0 ||
+    pipelinePerfSession.viewerStages.length > 0
+)
+const captureMemorySnapshot = () => {
+  if (typeof performance === 'undefined' || !performance.memory) return null
+  const { usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit } = performance.memory
+  if (!Number.isFinite(usedJSHeapSize)) return null
+  return {
+    usedBytes: usedJSHeapSize,
+    totalBytes: totalJSHeapSize,
+    limitBytes: jsHeapSizeLimit,
+  }
+}
+const computeMemoryDelta = (start, end) => {
+  if (!start || !end) return null
+  if (!Number.isFinite(start.usedBytes) || !Number.isFinite(end.usedBytes)) return null
+  return end.usedBytes - start.usedBytes
+}
+const resetPerfCollections = () => {
+  pipelinePerfSession.stages.splice(0)
+  pipelinePerfSession.workerJobs.splice(0)
+  pipelinePerfSession.viewerStages.splice(0)
+}
+const startPerfSession = (source, meta = {}) => {
+  pipelinePerfSession.id = ++perfSessionSeq
+  pipelinePerfSession.source = source
+  pipelinePerfSession.meta = meta
+  pipelinePerfSession.startedAt = Date.now()
+  pipelinePerfSession.completedAt = 0
+  pipelinePerfSession.expectedWorkerJobs = 0
+  pipelinePerfSession.completedWorkerJobs = 0
+  resetPerfCollections()
+}
+const planPerfWorkerJobs = (count) => {
+  if (!pipelinePerfSession.id) return
+  pipelinePerfSession.expectedWorkerJobs = count
+  pipelinePerfSession.completedWorkerJobs = 0
+  if (count === 0) {
+    pipelinePerfSession.completedAt = Date.now()
+  }
+}
+const finalizePerfSessionIfIdle = () => {
+  if (!pipelinePerfSession.id || pipelinePerfSession.completedAt) return
+  if (
+    pipelinePerfSession.expectedWorkerJobs === 0 ||
+    pipelinePerfSession.completedWorkerJobs >= pipelinePerfSession.expectedWorkerJobs
+  ) {
+    pipelinePerfSession.completedAt = Date.now()
+  }
+}
+const markPerfWorkerJobComplete = () => {
+  if (!pipelinePerfSession.id) return
+  pipelinePerfSession.completedWorkerJobs = Math.min(
+    pipelinePerfSession.expectedWorkerJobs,
+    pipelinePerfSession.completedWorkerJobs + 1
+  )
+  finalizePerfSessionIfIdle()
+}
+const inferPerfCategory = (phase) => {
+  if (!phase) return 'general'
+  const idx = phase.indexOf(':')
+  return idx > 0 ? phase.slice(0, idx) : phase
+}
+const recordPerfStageMeasurement = (phase, durationMs, memoryStart, memoryEnd, meta = {}) => {
+  if (!pipelinePerfSession.id) return
+  pipelinePerfSession.stages.push({
+    id: `${pipelinePerfSession.id}-stage-${pipelinePerfSession.stages.length + 1}`,
+    phase,
+    category: inferPerfCategory(phase),
+    durationMs: Number.isFinite(durationMs) ? Number(durationMs.toFixed(2)) : null,
+    memoryStartUsedBytes: memoryStart?.usedBytes ?? null,
+    memoryEndUsedBytes: memoryEnd?.usedBytes ?? null,
+    memoryDeltaBytes: computeMemoryDelta(memoryStart, memoryEnd),
+    timestamp: Date.now(),
+    meta,
+  })
+}
+const describeWorkerLayer = (entry) => {
+  if (!entry) return 'layer job'
+  const side = entry.side ?? 'n/a'
+  return `${side} ${entry.type || 'unknown'}`
+}
+const recordWorkerPerfMetrics = (entry, result, success, message) => {
+  if (!pipelinePerfSession.id) return
+  const summary = result?.meshSummary ?? summarizeMeshData(result?.mesh)
+  const common = {
+    id: `${pipelinePerfSession.id}-worker-${entry.jobId}`,
+    jobId: entry.jobId,
+    type: entry.type,
+    side: entry.side ?? null,
+    label: describeWorkerLayer(entry),
+    vertexCount: summary?.totalVertices ?? 0,
+    chunkCount: summary?.chunkCount ?? summary?.geometryCount ?? 0,
+  }
+  if (!success) {
+    pipelinePerfSession.workerJobs.push({
+      ...common,
+      success: false,
+      durationMs: entry.completedAt && entry.timestamp ? entry.completedAt - entry.timestamp : null,
+      errorMessage: message || entry.errorMessage || 'worker failure',
+    })
+    return
+  }
+  const timeline = Array.isArray(result?.metrics?.timeline)
+    ? result.metrics.timeline.map((stage, index) => ({
+        ...stage,
+        index,
+        memoryDeltaBytes: computeMemoryDelta(stage.memoryStart, stage.memoryEnd),
+        memoryStartUsedBytes: stage.memoryStart?.usedBytes ?? null,
+        memoryEndUsedBytes: stage.memoryEnd?.usedBytes ?? null,
+      }))
+    : []
+  pipelinePerfSession.workerJobs.push({
+    ...common,
+    success: true,
+    durationMs: result?.metrics?.totalDurationMs ?? timeline.reduce((sum, entry) => sum + (entry.durationMs || 0), 0),
+    peakMemoryBytes: result?.metrics?.peakMemoryBytes ?? null,
+    timeline,
+  })
+}
+const formatPerfDuration = (value) => {
+  if (!Number.isFinite(value)) return '—'
+  if (Math.abs(value) >= 1000) return `${(value / 1000).toFixed(2)} s`
+  return `${value.toFixed(1)} ms`
+}
+const formatPerfMemory = (bytes) => {
+  if (!Number.isFinite(bytes)) return '—'
+  if (Math.abs(bytes) >= bytesInMegabyte) return `${(bytes / bytesInMegabyte).toFixed(2)} MB`
+  if (Math.abs(bytes) >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes.toFixed(0)} B`
+}
+const formatPerfTimestamp = (value) => {
+  if (!value) return '—'
+  return new Date(value).toLocaleTimeString(undefined, { hour12: false })
+}
+const formatPerfPhase = (phase) => {
+  if (!phase) return '—'
+  return phase.replace(':', ' › ')
+}
+const perfStageLabelMap = {
+  plot: 'Gerber plot',
+  'clip-polygons': '裁剪区域',
+  'filter-image-tree': '图形过滤',
+  'plot-drills': '钻孔绘制',
+  'render-three': 'Three.js 网格',
+  'collect-mesh': 'TypedArray 拷贝',
+  'three:rebuildModel': '场景装配',
+}
+const resolvePerfStageLabel = (value) => perfStageLabelMap[value] ?? value
+const pipelinePerfSummary = computed(() => {
+  const totalVertices = pipelinePerfSession.workerJobs.reduce((sum, job) => sum + (job.vertexCount || 0), 0)
+  const peakWorkerMemory = pipelinePerfSession.workerJobs.reduce(
+    (max, job) => Math.max(max, job.peakMemoryBytes ?? 0),
+    0
+  )
+  const completedAt = pipelinePerfSession.completedAt || Date.now()
+  const totalDurationMs = pipelinePerfSession.startedAt ? completedAt - pipelinePerfSession.startedAt : 0
+  return {
+    totalVertices,
+    peakWorkerMemoryBytes: peakWorkerMemory || null,
+    totalDurationMs,
+    startedAt: pipelinePerfSession.startedAt,
+    workerJobCount: pipelinePerfSession.workerJobs.length,
+    expectedWorkerJobs: pipelinePerfSession.expectedWorkerJobs,
+    completedWorkerJobs: pipelinePerfSession.completedWorkerJobs,
+  }
+})
+const workerPerfRows = computed(() =>
+  pipelinePerfSession.workerJobs.slice().sort((a, b) => (b.durationMs || 0) - (a.durationMs || 0))
+)
+const longestWorkerJob = computed(() => workerPerfRows.value[0] || null)
+const perfSourceLabel = computed(() => {
+  if (!pipelinePerfSession.source) return '未知'
+  return pipelinePerfSession.source === 'settings' ? '设置' : '上传'
+})
+const openPerfModal = () => {
+  perfModalOpen.value = true
+}
+const closePerfModal = () => {
+  perfModalOpen.value = false
+}
+const buildPerfMarkdown = () => {
+  if (!hasPerfData.value) return ''
+  const summary = pipelinePerfSummary.value
+  const lines = []
+  lines.push('# PCB 3D 性能报告')
+  lines.push('')
+  lines.push(`- 来源：${perfSourceLabel.value}`)
+  lines.push(`- 会话 ID：${pipelinePerfSession.id}`)
+  lines.push(`- 开始：${formatPerfTimestamp(summary.startedAt)}`)
+  lines.push(`- 导出：${formatPerfTimestamp(Date.now())}`)
+  if (pipelinePerfSession.meta?.fileName) {
+    lines.push(`- 文件：${pipelinePerfSession.meta.fileName}`)
+  }
+  if (pipelinePerfSession.meta?.fileSize) {
+    lines.push(`- 文件大小：${formatPerfMemory(pipelinePerfSession.meta.fileSize)}`)
+  }
+  lines.push('')
+  lines.push('## 汇总')
+  lines.push('')
+  lines.push(`- 总耗时：${formatPerfDuration(summary.totalDurationMs)}`)
+  lines.push(
+    `- Worker：${summary.completedWorkerJobs}/${summary.expectedWorkerJobs} · 顶点总数：${summary.totalVertices.toLocaleString()}`
+  )
+  lines.push(`- Worker 峰值内存：${formatPerfMemory(summary.peakWorkerMemoryBytes)}`)
+  lines.push('')
+  if (pipelinePerfSession.stages.length) {
+    lines.push('## 前处理阶段')
+    lines.push('')
+    lines.push('| 阶段 | 耗时 | Δ内存 | 结束内存 |')
+    lines.push('| --- | --- | --- | --- |')
+    pipelinePerfSession.stages.forEach((stage) => {
+      lines.push(
+        `| ${formatPerfPhase(stage.phase)} | ${formatPerfDuration(stage.durationMs)} | ${formatPerfMemory(stage.memoryDeltaBytes)} | ${formatPerfMemory(stage.memoryEndUsedBytes)} |`
+      )
+    })
+    lines.push('')
+  }
+  if (pipelinePerfSession.workerJobs.length) {
+    lines.push('## Worker 阶段')
+    lines.push('')
+    lines.push('| 图层 | 耗时 | 顶点 | 块数 | 峰值内存 | 结果 |')
+    lines.push('| --- | --- | --- | --- | --- | --- |')
+    pipelinePerfSession.workerJobs.forEach((job) => {
+      lines.push(
+        `| ${job.label} | ${formatPerfDuration(job.durationMs)} | ${job.vertexCount?.toLocaleString?.() ?? '—'} | ${job.chunkCount ?? '—'} | ${formatPerfMemory(job.peakMemoryBytes)} | ${
+          job.success ? '成功' : `失败：${job.errorMessage || 'unknown'}`
+        } |`
+      )
+    })
+    pipelinePerfSession.workerJobs.forEach((job) => {
+      if (!job.timeline?.length) return
+      lines.push('')
+      lines.push(`### Worker 细分 - ${job.label}`)
+      lines.push('')
+      lines.push('| 子阶段 | 耗时 | Δ内存 |')
+      lines.push('| --- | --- | --- |')
+      job.timeline.forEach((stage) => {
+        lines.push(
+          `| ${resolvePerfStageLabel(stage.name)} | ${formatPerfDuration(stage.durationMs)} | ${formatPerfMemory(stage.memoryDeltaBytes)} |`
+        )
+      })
+    })
+    lines.push('')
+  }
+  if (pipelinePerfSession.viewerStages.length) {
+    lines.push('## 3D 场景装配')
+    lines.push('')
+    lines.push('| 阶段 | 耗时 | 层数 | 顶点 | Δ内存 |')
+    lines.push('| --- | --- | --- | --- | --- |')
+    pipelinePerfSession.viewerStages.forEach((entry) => {
+      const layerCount = entry.meta?.layerCount ?? '—'
+      const vertexCount =
+        entry.meta?.vertexCount != null ? entry.meta.vertexCount.toLocaleString() : '—'
+      lines.push(
+        `| ${resolvePerfStageLabel(entry.stage)} | ${formatPerfDuration(entry.durationMs)} | ${layerCount} | ${vertexCount} | ${formatPerfMemory(entry.memoryDeltaBytes)} |`
+      )
+    })
+    lines.push('')
+  }
+  lines.push('> 由 GerberViewer 性能监测导出')
+  return lines.join('\n')
+}
+const exportPerfMarkdown = () => {
+  if (!hasPerfData.value) return
+  const markdown = buildPerfMarkdown()
+  if (!markdown) return
+  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' })
+  const timestamp = new Date().toISOString().replace(/[:\\.]/g, '-')
+  const filename = `pcb-perf-report-${pipelinePerfSession.id || 'session'}-${timestamp}.md`
+  triggerFileDownload(blob, filename)
+}
+const enablePerfLogs = import.meta.env?.DEV ?? false
+const perfLabel = (phase) => `[perf][GerberViewer] ${phase}`
+const runPerfSync = (phase, fn, options = {}) => {
+  const label = perfLabel(phase)
+  const start = getPerfNow()
+  const memoryStart = captureMemorySnapshot()
+  if (enablePerfLogs) console.time(label)
+  try {
+    return fn()
+  } finally {
+    const durationMs = getPerfNow() - start
+    const memoryEnd = captureMemorySnapshot()
+    if (enablePerfLogs) console.timeEnd(label)
+    recordPerfStageMeasurement(phase, durationMs, memoryStart, memoryEnd, options.meta)
+  }
+}
+const runPerfAsync = async (phase, fn, options = {}) => {
+  const label = perfLabel(phase)
+  const start = getPerfNow()
+  const memoryStart = captureMemorySnapshot()
+  if (enablePerfLogs) console.time(label)
+  try {
+    return await fn()
+  } finally {
+    const durationMs = getPerfNow() - start
+    const memoryEnd = captureMemorySnapshot()
+    if (enablePerfLogs) console.timeEnd(label)
+    recordPerfStageMeasurement(phase, durationMs, memoryStart, memoryEnd, options.meta)
+  }
+}
+const logPerf = (phase, payload) => {
+  if (enablePerfLogs) console.log(perfLabel(phase), payload)
+}
 const toggleDownloadMenu = (event) => {
   event?.stopPropagation?.()
   downloadMenuOpen.value = !downloadMenuOpen.value
@@ -493,6 +936,7 @@ const recordWorkerJobStart = (jobId, payload) => {
   workerDebugLog.jobs.push({
     jobId,
     timestamp: Date.now(),
+    perfSessionId: pipelinePerfSession.id,
     layerId: payload.layerId,
     type: payload.type,
     side: payload.side ?? null,
@@ -513,6 +957,10 @@ const recordWorkerJobResult = (jobId, { success, message, result }) => {
     if (result?.debug) entry.debug = result.debug
   } else if (!success) {
     entry.errorMessage = message || 'unknown worker failure'
+  }
+  if (entry.perfSessionId && entry.perfSessionId === pipelinePerfSession.id) {
+    recordWorkerPerfMetrics(entry, result, success, message)
+    markPerfWorkerJobComplete()
   }
 }
 const recordWorkerError = (detail) => {
@@ -610,74 +1058,148 @@ const loadingMessage = computed(() => '加载中')
 // 设置面板
 const isSettingsOpen = ref(false)
 const editableLayers = reactive([])
-const supported3dTypes = new Set(['copper', 'soldermask', 'silkscreen', 'solderpaste', 'outline'])
-let pcbWorker = null
-const pcbWorkerJobs = new Map()
-let pcbWorkerSeq = 0
 const defaultLayerColors = {
   copper: '#f2c55b',
   soldermask: '#1c7a2a',
   silkscreen: '#ffffff',
-  solderpaste: '#b4b8c0',
   drill: '#333333',
   outline: '#bfa782',
 }
+const structural3dTypes = new Set(['copper', 'soldermask', 'silkscreen'])
+const normalizeLayerType = (value) => {
+  if (typeof value !== 'string') return ''
+  return value.toLowerCase()
+}
+const normalizeLayerSide = (value) => {
+  if (typeof value !== 'string') return null
+  const normalized = value.toLowerCase()
+  return normalized === 'top' || normalized === 'bottom' ? normalized : null
+}
+const isLayerEligibleFor3d = (layer) => {
+  if (!layer) return false
+  const type = normalizeLayerType(layer.type)
+  if (!type) return false
+  if (type === 'outline' || type === 'drill') return true
+  if (!structural3dTypes.has(type)) return false
+  const side = normalizeLayerSide(layer.side)
+  return side === 'top' || side === 'bottom'
+}
+const detectWorkerConcurrency = () => {
+  const envValue = Number(import.meta.env?.VITE_PCB_WORKER_CONCURRENCY)
+  if (Number.isFinite(envValue) && envValue >= 1) return Math.floor(envValue)
+  const navCores = typeof navigator !== 'undefined' ? Number(navigator.hardwareConcurrency) : NaN
+  if (Number.isFinite(navCores) && navCores > 0) {
+    return Math.max(1, Math.min(4, Math.floor(navCores / 2)))
+  }
+  return 2
+}
+const pcbWorkerConcurrency = detectWorkerConcurrency()
+let pcbWorkerSeq = 0
+const pcbWorkerJobs = new Map()
+const workerJobQueue = []
+const pcbWorkerPool = []
 
 const createPcbWorker = () =>
   new Worker(new URL('../workers/pcbModel.worker.js', import.meta.url), { type: 'module' })
 
-const handlePcbWorkerMessage = (event) => {
+const assignQueuedWorkerJobs = () => {
+  for (const instance of pcbWorkerPool) {
+    if (instance.busy) continue
+    const nextJob = workerJobQueue.shift()
+    if (!nextJob) break
+    instance.busy = true
+    instance.currentJobId = nextJob.jobId
+    instance.worker.postMessage({
+      jobId: nextJob.jobId,
+      action: 'build-layer',
+      payload: nextJob.payload,
+    })
+  }
+}
+
+const handleWorkerInstanceMessage = (instance, event) => {
   const { jobId, success, result, message } = event.data || {}
-  if (!jobId) return
-  const entry = pcbWorkerJobs.get(jobId)
-  if (!entry) return
-  pcbWorkerJobs.delete(jobId)
-  if (success) entry.resolve(result)
-  else {
-    console.error('[GerberViewer] PCB worker failure detail', message)
-    entry.reject(new Error(message || 'worker error'))
-  }
-}
-
-const disposePcbWorker = () => {
-  if (pcbWorker) {
-    pcbWorker.terminate()
-    pcbWorker = null
-  }
-  pcbWorkerJobs.clear()
-}
-
-const ensurePcbWorker = () => {
-  if (!pcbWorker) {
-    pcbWorker = createPcbWorker()
-    pcbWorker.onmessage = handlePcbWorkerMessage
-    pcbWorker.onerror = (event) => {
-      const details =
-        event?.message ||
-        event?.error?.message ||
-        event?.error?.stack ||
-        'Unknown worker error'
-      console.error(
-        '[GerberViewer] PCB model worker error',
-        details,
-        event?.filename,
-        event?.lineno,
-        event?.colno,
-        event?.error
-      )
-      recordWorkerError({
-        message: details,
-        filename: event?.filename,
-        line: event?.lineno,
-        column: event?.colno,
-        errorStack: event?.error?.stack,
-      })
-      if (typeof event?.preventDefault === 'function') {
-        event.preventDefault()
+  if (jobId) {
+    const entry = pcbWorkerJobs.get(jobId)
+    if (entry) {
+      pcbWorkerJobs.delete(jobId)
+      if (success) entry.resolve(result)
+      else {
+        console.error('[GerberViewer] PCB worker failure detail', message)
+        entry.reject(new Error(message || 'worker error'))
       }
     }
   }
-  return pcbWorker
+  instance.busy = false
+  instance.currentJobId = null
+  assignQueuedWorkerJobs()
+}
+
+const handleWorkerInstanceError = (instance, event) => {
+  const details =
+    event?.message || event?.error?.message || event?.error?.stack || 'Unknown worker error'
+  console.error(
+    '[GerberViewer] PCB model worker error',
+    details,
+    event?.filename,
+    event?.lineno,
+    event?.colno,
+    event?.error
+  )
+  recordWorkerError({
+    message: details,
+    filename: event?.filename,
+    line: event?.lineno,
+    column: event?.colno,
+    errorStack: event?.error?.stack,
+  })
+  if (typeof event?.preventDefault === 'function') {
+    event.preventDefault()
+  }
+  const failedJobId = instance.currentJobId
+  if (failedJobId && pcbWorkerJobs.has(failedJobId)) {
+    const entry = pcbWorkerJobs.get(failedJobId)
+    pcbWorkerJobs.delete(failedJobId)
+    entry.reject(new Error(details || 'worker error'))
+  }
+  instance.worker.terminate()
+  const index = pcbWorkerPool.indexOf(instance)
+  if (index >= 0) pcbWorkerPool.splice(index, 1)
+  const replacement = spawnWorkerInstance()
+  if (replacement) {
+    pcbWorkerPool.push(replacement)
+  }
+  assignQueuedWorkerJobs()
+}
+
+const spawnWorkerInstance = () => {
+  try {
+    const worker = createPcbWorker()
+    const instance = { worker, busy: false, currentJobId: null }
+    worker.onmessage = (event) => handleWorkerInstanceMessage(instance, event)
+    worker.onerror = (event) => handleWorkerInstanceError(instance, event)
+    return instance
+  } catch (error) {
+    console.error('[GerberViewer] Failed to spawn worker', error)
+    return null
+  }
+}
+
+const ensureWorkerPool = () => {
+  if (pcbWorkerPool.length >= pcbWorkerConcurrency) return
+  while (pcbWorkerPool.length < pcbWorkerConcurrency) {
+    const instance = spawnWorkerInstance()
+    if (!instance) break
+    pcbWorkerPool.push(instance)
+  }
+}
+
+const disposePcbWorkers = () => {
+  pcbWorkerPool.splice(0).forEach((instance) => {
+    instance.worker.terminate()
+  })
+  pcbWorkerJobs.clear()
+  workerJobQueue.splice(0)
 }
 
 const getLayerColor = (layerId, type) => {
@@ -696,7 +1218,6 @@ const updateWorkerLoading = () => {
 }
 
 const queueWorkerJob = (payload) => {
-  const worker = ensurePcbWorker()
   const jobId = ++pcbWorkerSeq
   pcbModelJobs.pending += 1
   updateWorkerLoading()
@@ -736,11 +1257,9 @@ const queueWorkerJob = (payload) => {
         reject(error)
       },
     })
-    worker.postMessage({
-      jobId,
-      action: 'build-layer',
-      payload,
-    })
+    workerJobQueue.push({ jobId, payload })
+    ensureWorkerPool()
+    assignQueuedWorkerJobs()
   })
 }
 
@@ -774,9 +1293,8 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
       return type.includes('drill') && layer?.parseTree
     })
     .map((layer) => layer.parseTree)
-  const layersFor3d = parsedLayers.filter(
-    (layer) => layer?.type && supported3dTypes.has(layer.type)
-  )
+  const layersFor3d = parsedLayers.filter(isLayerEligibleFor3d)
+  planPerfWorkerJobs(layersFor3d.length)
   pcbModelJobs.total = layersFor3d.length
   if (!layersFor3d.length) return
   const drillShapePayload = drillParseTrees.length ? drillParseTrees : undefined
@@ -825,6 +1343,21 @@ const handleLayerPreviewLoading = (loading) => { isLayerRenderLoading.value = lo
 const handlePixiDebugUpdate = (payload) => {
   pixiLayerDebug.value = Array.isArray(payload) ? payload : []
 }
+const handleViewerPerfEvent = (payload) => {
+  if (!payload || !pipelinePerfSession.id) return
+  pipelinePerfSession.viewerStages.push({
+    id: `${pipelinePerfSession.id}-viewer-${pipelinePerfSession.viewerStages.length + 1}`,
+    stage: payload.stage,
+    durationMs: payload.durationMs ?? null,
+    memoryStartUsedBytes: payload.memoryStart?.usedBytes ?? null,
+    memoryEndUsedBytes: payload.memoryEnd?.usedBytes ?? null,
+    memoryDeltaBytes:
+      payload.memoryDeltaBytes ?? computeMemoryDelta(payload.memoryStart, payload.memoryEnd),
+    meta: payload.meta ?? {},
+    timestamp: payload.timestamp ?? Date.now(),
+  })
+  finalizePerfSessionIfIdle()
+}
 
 const toggleMeasurementMode = () => {
   if (activeView.value !== 'layers') return
@@ -843,6 +1376,10 @@ const resetPcb3dView = async () => {
 // 上传处理
 const handleUploadFile = async (file) => {
   isLayerLoading.value = true
+  startPerfSession('upload', {
+    fileName: file?.name ?? null,
+    fileSize: file?.size ?? null,
+  })
   try {
     const formData = new FormData()
     formData.append('UploadFile', file, file.name)
@@ -884,6 +1421,7 @@ const handleUploadFile = async (file) => {
     throw error
   } finally {
     isLayerLoading.value = false
+    finalizePerfSessionIfIdle()
   }
 }
 
@@ -967,11 +1505,12 @@ const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
 
 const applySettings = async () => {
   isLayerLoading.value = true
+  startPerfSession('settings', { reason: 'settings-panel' })
   const list = (memoryLayers.value || []).map((x) => ({ ...x }))
   for (const entry of editableLayers) entry.side = coerceSideForType(entry.type, entry.side)
-  const keyFor = (t, s) => {
+const keyFor = (t, s) => {
     if (t === 'outline') return 'all:outline'
-    if (['copper', 'soldermask', 'silkscreen', 'solderpaste'].includes(t) && (s === 'top' || s === 'bottom')) return `${s}:${t}`
+    if (['copper', 'soldermask', 'silkscreen'].includes(t) && (s === 'top' || s === 'bottom')) return `${s}:${t}`
     return null
   }
   const seen = new Map()
@@ -1006,6 +1545,7 @@ const applySettings = async () => {
     console.error('[GerberViewer] applySettings failed', error)
   } finally {
     isLayerLoading.value = false
+    finalizePerfSessionIfIdle()
   }
 }
 
@@ -1064,7 +1604,7 @@ onBeforeUnmount(() => {
     previewResizeObserver.disconnect()
     previewResizeObserver = null
   }
-  disposePcbWorker()
+  disposePcbWorkers()
 })
 </script>
 

@@ -14,6 +14,8 @@ import {
 import {renderThree} from './pcb-model/geometry/index.js'
 
 const ACTION_BUILD_LAYER = 'build-layer'
+const normalizeType = (value) => (typeof value === 'string' ? value.toLowerCase() : '')
+const isDrillType = (value) => normalizeType(value).includes('drill')
 
 const normalizeColor = value => {
   try {
@@ -90,6 +92,54 @@ const logWorker = (event, details = {}) => {
     // ignore logging failures
   }
 }
+const getWorkerPerfNow = () =>
+  (typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now())
+const captureWorkerMemoryUsage = () => {
+  if (typeof performance === 'undefined' || !performance.memory) return null
+  const { usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit } = performance.memory
+  if (!Number.isFinite(usedJSHeapSize)) return null
+  return {
+    usedBytes: usedJSHeapSize,
+    totalBytes: totalJSHeapSize,
+    limitBytes: jsHeapSizeLimit,
+  }
+}
+const pushWorkerMemorySample = (metrics, snapshot) => {
+  if (!metrics || !snapshot) return
+  metrics.memorySamples.push({
+    timestamp: Date.now(),
+    ...snapshot,
+  })
+  if (!metrics.peakMemoryBytes || snapshot.usedBytes > metrics.peakMemoryBytes) {
+    metrics.peakMemoryBytes = snapshot.usedBytes
+  }
+}
+const createWorkerMetrics = () => ({
+  startedAt: Date.now(),
+  timeline: [],
+  memorySamples: [],
+  peakMemoryBytes: null,
+})
+const measureWorkerStage = (metrics, name, fn) => {
+  const memoryStart = captureWorkerMemoryUsage()
+  pushWorkerMemorySample(metrics, memoryStart)
+  const start = getWorkerPerfNow()
+  try {
+    return fn()
+  } finally {
+    const durationMs = Number((getWorkerPerfNow() - start).toFixed(2))
+    const memoryEnd = captureWorkerMemoryUsage()
+    pushWorkerMemorySample(metrics, memoryEnd)
+    metrics.timeline.push({
+      name,
+      durationMs,
+      memoryStart,
+      memoryEnd,
+    })
+  }
+}
 
 const buildLayerPayload = payload => {
   const contextBase = {
@@ -106,14 +156,36 @@ const buildLayerPayload = payload => {
       boardBounds,
       boardClipRegions,
     } = payload
+    const metrics = createWorkerMetrics()
+    const perfOrigin = getWorkerPerfNow()
+    if (isDrillType(payload.type)) {
+      metrics.completedAt = Date.now()
+      metrics.totalDurationMs = Number((getWorkerPerfNow() - perfOrigin).toFixed(2))
+      return {
+        payload: {
+          layerId: payload.layerId,
+          type: payload.type,
+          side: payload.side,
+          color,
+          mesh: null,
+          meshSummary: { chunkCount: 0, totalVertices: 0, skipped: 'drill-layer' },
+          debug: null,
+          metrics,
+        },
+        transferList: [],
+      }
+    }
     if (!parseTree) {
       throw new Error('Missing parse tree for layer job')
     }
-    const boardClipPolygons = buildClipPolygons(boardClipRegions)
-    const plotStart = performance.now()
-    const plottedTree = plot(parseTree)
-    const plotDuration = performance.now() - plotStart
-    const imageTree = filterImageTree(plottedTree, boardBounds, boardClipPolygons)
+    const boardClipPolygons = measureWorkerStage(metrics, 'clip-polygons', () =>
+      buildClipPolygons(boardClipRegions)
+    )
+    const plottedTree = measureWorkerStage(metrics, 'plot', () => plot(parseTree))
+    const plotStage = metrics.timeline[metrics.timeline.length - 1]
+    const imageTree = measureWorkerStage(metrics, 'filter-image-tree', () =>
+      filterImageTree(plottedTree, boardBounds, boardClipPolygons)
+    )
     console.log('[pcbModel.worker] imageTree stats', {
       ...contextBase,
       boardBounds,
@@ -123,39 +195,43 @@ const buildLayerPayload = payload => {
     logWorker('plot-complete', {
       ...contextBase,
       childCount: imageTree?.children?.length ?? 0,
-      durationMs: Number(plotDuration.toFixed(2)),
+      durationMs: plotStage?.durationMs ?? null,
     })
     let drillTrees = null
     if (Array.isArray(drillShapes) && drillShapes.length) {
-      drillTrees = []
-      for (const tree of drillShapes) {
-        try {
-          const parsed = plot(tree)
-          if (parsed) drillTrees.push(parsed)
-        } catch (error) {
-          console.warn('[pcbModel.worker] Failed to plot drill tree', error)
+      drillTrees = measureWorkerStage(metrics, 'plot-drills', () => {
+        const produced = []
+        for (const tree of drillShapes) {
+          try {
+            const parsed = plot(tree)
+            if (parsed) produced.push(parsed)
+          } catch (error) {
+            console.warn('[pcbModel.worker] Failed to plot drill tree', error)
+          }
         }
-      }
+        return produced
+      })
     }
     let group = null
     let renderDebug = null
     try {
-      const renderStart = performance.now()
-      group = renderThree(
-        imageTree,
-        normalizeColor(color),
-        () => {},
-        payload.outline,
-        drillTrees,
-        boardShapeRegions,
-        payload.type,
-        boardBounds,
-        boardClipRegions
+      group = measureWorkerStage(metrics, 'render-three', () =>
+        renderThree(
+          imageTree,
+          normalizeColor(color),
+          () => {},
+          payload.outline,
+          drillTrees,
+          boardShapeRegions,
+          payload.type,
+          boardBounds,
+          boardClipRegions
+        )
       )
       renderDebug = group?.userData?.planarDebug || null
       logWorker('renderThree-complete', {
         ...contextBase,
-        durationMs: Number((performance.now() - renderStart).toFixed(2)),
+        durationMs: metrics.timeline[metrics.timeline.length - 1]?.durationMs ?? null,
       })
     } catch (error) {
       const context = {
@@ -177,8 +253,12 @@ const buildLayerPayload = payload => {
       ...contextBase,
       meshCount: group.children?.length ?? 0,
     })
-    const {chunks, transferList, chunkSummaries} = collectMeshChunks(group)
+    const meshResult = measureWorkerStage(metrics, 'collect-mesh', () => collectMeshChunks(group))
+    const {chunks, transferList, chunkSummaries} = meshResult
     const summary = summarizeChunks(chunkSummaries)
+    metrics.completedAt = Date.now()
+    metrics.totalDurationMs = Number((getWorkerPerfNow() - perfOrigin).toFixed(2))
+    metrics.vertexCount = summary.totalVertices
     return {
       payload: {
         layerId: payload.layerId,
@@ -192,6 +272,7 @@ const buildLayerPayload = payload => {
         },
         meshSummary: summary,
         debug: renderDebug ? {planar: renderDebug} : null,
+        metrics,
       },
       transferList,
     }

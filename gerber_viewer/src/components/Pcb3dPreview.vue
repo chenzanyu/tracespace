@@ -32,7 +32,7 @@ const props = defineProps({
   active: { type: Boolean, default: true },
 })
 
-const emit = defineEmits(['loading-change'])
+const emit = defineEmits(['loading-change', 'perf-stats'])
 const container = ref(null)
 
 let scene = null
@@ -58,6 +58,37 @@ const typedArrayConstructors = {
   Int32Array,
   Int16Array,
   Int8Array,
+}
+const getPerfNow = () =>
+  (typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now())
+const captureMemorySnapshot = () => {
+  if (typeof performance === 'undefined' || !performance.memory) return null
+  const { usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit } = performance.memory
+  if (!Number.isFinite(usedJSHeapSize)) return null
+  return {
+    usedBytes: usedJSHeapSize,
+    totalBytes: totalJSHeapSize,
+    limitBytes: jsHeapSizeLimit,
+  }
+}
+const computeMemoryDelta = (start, end) => {
+  if (!start || !end) return null
+  if (!Number.isFinite(start.usedBytes) || !Number.isFinite(end.usedBytes)) return null
+  return end.usedBytes - start.usedBytes
+}
+const emitViewerPerfSample = (stage, durationMs, meta, memoryStart, memoryEnd) => {
+  emit('perf-stats', {
+    stage,
+    category: 'viewer',
+    durationMs: Number.isFinite(durationMs) ? Number(durationMs.toFixed(2)) : null,
+    meta: meta || {},
+    memoryStart,
+    memoryEnd,
+    memoryDeltaBytes: computeMemoryDelta(memoryStart, memoryEnd),
+    timestamp: Date.now(),
+  })
 }
 
 const defaultLayerColors = {
@@ -597,8 +628,14 @@ const assembleLayers = (entries) => {
 
 const rebuildModel = async () => {
   emit('loading-change', true)
+  const layers = Array.isArray(props.modelData?.layers) ? props.modelData.layers : []
+  const perfStart = getPerfNow()
+  const memoryStart = captureMemorySnapshot()
+  const vertexCount = layers.reduce(
+    (sum, layer) => sum + (layer?.meshSummary?.totalVertices ?? 0),
+    0
+  )
   try {
-    const layers = Array.isArray(props.modelData?.layers) ? props.modelData.layers : []
     if (!layers.length) {
       if (modelGroup) {
         scene.remove(modelGroup)
@@ -615,6 +652,9 @@ const rebuildModel = async () => {
     assembleLayers(layers)
   } finally {
     emit('loading-change', false)
+    const durationMs = getPerfNow() - perfStart
+    const memoryEnd = captureMemorySnapshot()
+    emitViewerPerfSample('three:rebuildModel', durationMs, { layerCount: layers.length, vertexCount }, memoryStart, memoryEnd)
   }
 }
 

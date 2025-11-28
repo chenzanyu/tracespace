@@ -165,17 +165,6 @@
             </div>
 
             <button
-              class="px-4 py-3 rounded-md border flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] transition text-xs font-semibold uppercase tracking-wide"
-              :class="boardDebugAvailable
-                ? 'bg-gray-900/80 text-white border-white/30 hover:bg-gray-800'
-                : 'bg-gray-900/40 text-white/60 border-white/10 cursor-not-allowed'"
-              title="导出板轮廓调试信息" :disabled="!boardDebugAvailable"
-              @click="exportBoardDebugInfo">
-              <span class="pi pi-database text-lg"></span>
-              <span>轮廓调试</span>
-            </button>
-
-            <button
               class="px-4 py-3 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
               title="性能监控" @click="openPerfModal">
               <span class="pi pi-chart-line text-lg"></span>
@@ -419,7 +408,7 @@ import UploadPanel from './UploadPanel.vue'
 import LayerStackPreview from './LayerStackPreview.vue'
 import Pcb3dPreview from './Pcb3dPreview.vue'
 import { orderLayerWeight, randomHexColor } from '../libs/gerber_stack'
-import { resolveBoardOutlineDescriptor, buildBoardOutlineDebugPayload } from '../libs/3d/boardOutline'
+import { resolveBoardOutlineDescriptor } from '../libs/3d/boardOutline'
 
 const resetIcon = new URL('../assets/resetting.svg', import.meta.url).href
 const measureIcon = new URL('../assets/measurement.svg', import.meta.url).href
@@ -437,8 +426,6 @@ const isLayerRenderLoading = ref(false)
 const orderedLayers = reactive([])
 const memoryLayers = ref([])
 const fmRef = ref(null)
-const boardOutlineInfo = ref(null)
-const boardOutlineDebugInfo = ref(null)
 const boardViewBox = ref([0, 0, 0, 0])
 const boardWidthMm = ref(0)
 const boardHeightMm = ref(0)
@@ -462,7 +449,6 @@ const boardThicknessUnits = computed(() => {
   if (!Number.isFinite(mmPerUnit) || mmPerUnit <= 0) return normalizedMm
   return normalizedMm / mmPerUnit
 })
-const boardDebugAvailable = computed(() => Boolean(boardOutlineDebugInfo.value))
 const pcb3dModel = reactive({
   layers: [],
   version: 0,
@@ -1043,15 +1029,6 @@ const downloadPcbAsset = async (type) => {
     downloadMenuOpen.value = false
   }
 }
-const exportBoardDebugInfo = () => {
-  const payload = boardOutlineDebugInfo.value
-  if (!payload) return
-  const blob = new Blob([JSON.stringify(payload, null, 2)], {
-    type: 'application/json;charset=utf-8',
-  })
-  const timestamp = new Date().toISOString().replace(/[:\\.]/g, '-')
-  triggerFileDownload(blob, `pcb-outline-debug-${timestamp}.json`)
-}
 const updatePreviewSize = () => {
   const el = previewAreaRef.value
   if (!el) return
@@ -1304,19 +1281,8 @@ const applyWorkerLayer = (payload) => {
 }
 
 const refreshBoardOutlineState = (plotResult) => {
-  if (!plotResult) {
-    boardOutlineInfo.value = null
-    boardOutlineDebugInfo.value = null
-    return null
-  }
-  const descriptor = resolveBoardOutlineDescriptor(plotResult)
-  boardOutlineInfo.value = descriptor
-  const extraMeta = {
-    boardThicknessMm: boardThickness.value,
-    unitMmPerUnit: unitMmPerUnit.value,
-  }
-  boardOutlineDebugInfo.value = buildBoardOutlineDebugPayload(descriptor, plotResult, extraMeta)
-  return descriptor
+  if (!plotResult) return null
+  return resolveBoardOutlineDescriptor(plotResult)
 }
 
 const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline) => {

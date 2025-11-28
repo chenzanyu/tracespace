@@ -216,6 +216,11 @@ export function plotBoardShape(
     }
 
     if (polygonCoverageRatio < STROKE_AREA_RATIO_THRESHOLD) {
+      const outlinePathFallbacks = buildRegionsFromOpenPaths(outlinePaths, size)
+      applyFallbackRegions(outlinePathFallbacks)
+    }
+
+    if (polygonCoverageRatio < STROKE_AREA_RATIO_THRESHOLD) {
       const openPathFallbackRegions = buildRegionsFromOpenPaths(openPaths, size)
       if (applyFallbackRegions(openPathFallbackRegions)) {
         if (polygonCoverageRatio >= STROKE_AREA_RATIO_THRESHOLD) {

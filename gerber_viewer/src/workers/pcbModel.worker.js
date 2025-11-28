@@ -156,6 +156,7 @@ const buildLayerPayload = payload => {
       boardBounds,
       boardClipRegions,
       boardShapePolygons,
+      syntheticOutlineRegions: syntheticOutlineInput,
     } = payload
     const metrics = createWorkerMetrics()
     const perfOrigin = getWorkerPerfNow()
@@ -176,28 +177,46 @@ const buildLayerPayload = payload => {
         transferList: [],
       }
     }
-    if (!parseTree) {
+    const syntheticOutlineRegions = Array.isArray(syntheticOutlineInput)
+      ? syntheticOutlineInput.filter(Boolean)
+      : null
+    const hasSyntheticOutline =
+      Array.isArray(syntheticOutlineRegions) && syntheticOutlineRegions.length > 0
+    if (!parseTree && !hasSyntheticOutline) {
       throw new Error('Missing parse tree for layer job')
     }
-    const boardClipPolygons = measureWorkerStage(metrics, 'clip-polygons', () =>
-      buildClipPolygons(boardClipRegions)
-    )
-    const plottedTree = measureWorkerStage(metrics, 'plot', () => plot(parseTree))
-    const plotStage = metrics.timeline[metrics.timeline.length - 1]
-    const imageTree = measureWorkerStage(metrics, 'filter-image-tree', () =>
-      filterImageTree(plottedTree, boardBounds, boardClipPolygons)
-    )
+    const boardClipPolygons =
+      !hasSyntheticOutline
+        ? measureWorkerStage(metrics, 'clip-polygons', () => buildClipPolygons(boardClipRegions))
+        : null
+    const plottedTree = hasSyntheticOutline
+      ? { children: syntheticOutlineRegions }
+      : measureWorkerStage(metrics, 'plot', () => plot(parseTree))
+    const plotStage = hasSyntheticOutline ? null : metrics.timeline[metrics.timeline.length - 1]
+    const imageTree = hasSyntheticOutline
+      ? plottedTree
+      : measureWorkerStage(metrics, 'filter-image-tree', () =>
+          filterImageTree(plottedTree, boardBounds, boardClipPolygons)
+        )
     console.log('[pcbModel.worker] imageTree stats', {
       ...contextBase,
       boardBounds,
       boardClipPolygonCount: boardClipPolygons?.length ?? 0,
       childCount: imageTree?.children?.length ?? 0,
+      syntheticOutline: hasSyntheticOutline,
     })
-    logWorker('plot-complete', {
-      ...contextBase,
-      childCount: imageTree?.children?.length ?? 0,
-      durationMs: plotStage?.durationMs ?? null,
-    })
+    if (!hasSyntheticOutline) {
+      logWorker('plot-complete', {
+        ...contextBase,
+        childCount: imageTree?.children?.length ?? 0,
+        durationMs: plotStage?.durationMs ?? null,
+      })
+    } else {
+      logWorker('plot-skipped-synthetic-outline', {
+        ...contextBase,
+        childCount: imageTree?.children?.length ?? 0,
+      })
+    }
     let drillTrees = null
     if (Array.isArray(drillShapes) && drillShapes.length) {
       drillTrees = measureWorkerStage(metrics, 'plot-drills', () => {

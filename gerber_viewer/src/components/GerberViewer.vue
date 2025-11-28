@@ -1335,9 +1335,13 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline) => {
     })
     .map((layer) => layer.parseTree)
   const layersFor3d = parsedLayers.filter(isLayerEligibleFor3d)
-  planPerfWorkerJobs(layersFor3d.length)
-  pcbModelJobs.total = layersFor3d.length
-  if (!layersFor3d.length) return
+  const hasOutlineLayer = layersFor3d.some((layer) => layer.type === 'outline')
+  const syntheticOutlineNeeded =
+    !hasOutlineLayer && Array.isArray(boardRegions) && boardRegions.length > 0
+  const totalJobs = layersFor3d.length + (syntheticOutlineNeeded ? 1 : 0)
+  planPerfWorkerJobs(totalJobs)
+  pcbModelJobs.total = totalJobs
+  if (totalJobs === 0) return
   const drillShapePayload = drillParseTrees.length ? drillParseTrees : undefined
   for (const layer of layersFor3d) {
     queueWorkerJob({
@@ -1358,6 +1362,28 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline) => {
       })
       .catch((error) => {
         console.error('[GerberViewer] PCB worker failed', error)
+      })
+  }
+  if (syntheticOutlineNeeded) {
+    queueWorkerJob({
+      layerId: '__synthetic-board-outline__',
+      parseTree: null,
+      type: 'outline',
+      side: 'all',
+      color: getLayerColor('__synthetic-board-outline__', 'outline'),
+      outline: true,
+      boardShapeRegions: boardRegions,
+      boardShapePolygons: boardPolygons,
+      boardClipRegions: boardRegions,
+      drillShapes: drillShapePayload,
+      boardBounds,
+      syntheticOutlineRegions: boardRegions,
+    })
+      .then((result) => {
+        applyWorkerLayer(result)
+      })
+      .catch((error) => {
+        console.error('[GerberViewer] Synthetic board outline build failed', error)
       })
   }
 }

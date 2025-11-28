@@ -165,9 +165,11 @@ export function plotBoardShape(
   ])
   let derivedRegionBounds = BoundingBox.fromGraphics(mergedRegions)
   let mergedPolygonArea = multiPolygonArea(mergedPolygons)
-  const derivedBoundsArea = boundingBoxArea(derivedRegionBounds)
-  const polygonCoverageRatio =
-    derivedBoundsArea > 0 ? mergedPolygonArea / derivedBoundsArea : 0
+  const computeCoverageRatio = () => {
+    const derivedBoundsArea = boundingBoxArea(derivedRegionBounds)
+    return derivedBoundsArea > 0 ? mergedPolygonArea / derivedBoundsArea : 0
+  }
+  let polygonCoverageRatio = computeCoverageRatio()
 
   const looksLikeStrokeOnly =
     mergedPolygonArea > 0 &&
@@ -181,6 +183,26 @@ export function plotBoardShape(
       mergedRegions = polygonToRegions(reconstructedPolygons)
       derivedRegionBounds = BoundingBox.fromGraphics(mergedRegions)
       mergedPolygonArea = multiPolygonArea(mergedPolygons)
+      polygonCoverageRatio = computeCoverageRatio()
+    }
+  }
+
+  const coverageTooLow =
+    mergedPolygonArea > 0 &&
+    polygonCoverageRatio > 0 &&
+    polygonCoverageRatio < STROKE_AREA_RATIO_THRESHOLD
+
+  if (coverageTooLow) {
+    const fallbackRegion = createRectangleRegionFromBox(size)
+    const fallbackPolygon = fallbackRegion ? regionToPolygon(fallbackRegion) : null
+    if (fallbackRegion && fallbackPolygon) {
+      return {
+        size,
+        regions: [fallbackRegion],
+        openPaths,
+        polygons: [fallbackPolygon],
+        failureReason: NO_CLOSED_REGIONS_FOUND,
+      }
     }
   }
 

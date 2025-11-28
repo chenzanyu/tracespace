@@ -115,6 +115,24 @@ const extendBounds = (bounds, candidate) => {
   ]
 }
 
+const boundsFromPoint = (point) => {
+  const [x, y] = toXY(point)
+  return [x, y, x, y]
+}
+
+const extendBoundsWithSegment = (bounds, segment) => {
+  if (!segment) return bounds
+  let next = extendBounds(bounds, boundsFromPoint(segment.start))
+  next = extendBounds(next, boundsFromPoint(segment.end))
+  if (segment.type === ARC) {
+    const samples = approximateArcPoints(segment)
+    samples.forEach((pt) => {
+      next = extendBounds(next, boundsFromPoint(pt))
+    })
+  }
+  return next
+}
+
 const describeBounds = (bounds) => {
   if (!Array.isArray(bounds) || bounds.length < 4) return null
   const [minX, minY, maxX, maxY] = bounds
@@ -208,6 +226,30 @@ const buildFallbackFromBounds = (bounds, source) => {
   }
 }
 
+const multiPolygonArea = (polygons) => {
+  if (!Array.isArray(polygons) || polygons.length === 0) return 0
+  const areaForRing = (ring) => {
+    if (!Array.isArray(ring) || ring.length < 3) return 0
+    let area = 0
+    for (let i = 0; i < ring.length - 1; i++) {
+      const [x1, y1] = ring[i]
+      const [x2, y2] = ring[i + 1]
+      area += x1 * y2 - x2 * y1
+    }
+    return area / 2
+  }
+  let total = 0
+  polygons.forEach((polygon) => {
+    if (!Array.isArray(polygon) || polygon.length === 0) return
+    polygon.forEach((ring, index) => {
+      const ringArea = Math.abs(areaForRing(ring))
+      if (ringArea === 0) return
+      total += index === 0 ? ringArea : -ringArea
+    })
+  })
+  return Math.abs(total)
+}
+
 export const resolveBoardOutlineDescriptor = (plotResult) => {
   const boardShape = plotResult?.boardShape ?? null
   const layers = plotResult?.layers ?? []
@@ -226,6 +268,9 @@ export const resolveBoardOutlineDescriptor = (plotResult) => {
       boundingBoxes: {},
       warnings: [],
       polygonStats: [],
+      regionSummaries: [],
+      openPathSummaries: [],
+      coverage: null,
     },
   }
 
@@ -262,31 +307,47 @@ export const resolveBoardOutlineDescriptor = (plotResult) => {
     layerCount: anyLayerBounds.layerCount,
   }
 
-  if ((!descriptor.polygons || descriptor.polygons.length === 0) && primaryBounds.bounds) {
-    const fallback = buildFallbackFromBounds(primaryBounds.bounds, 'primary-layer-bounds')
+  const boundsArea = (bounds) => {
+    if (!Array.isArray(bounds) || bounds.length < 4) return null
+    const width = Math.abs(bounds[2] - bounds[0])
+    const height = Math.abs(bounds[3] - bounds[1])
+    const area = width * height
+    return Number.isFinite(area) ? area : null
+  }
+
+  const applyFallbackFromBounds = (bounds, source, reasonMessage) => {
+    const fallback = buildFallbackFromBounds(bounds, source)
+    if (!fallback) return false
     descriptor.polygons = fallback.polygons
     descriptor.regions = fallback.regionList
-    descriptor.bounds = extendBounds(descriptor.bounds, fallback.bounds)
-    descriptor.fallbackSource = fallback.source
-    descriptor.debug.warnings.push('Board outline fallback applied from copper/mask/silk/outline bounds')
+    descriptor.bounds = fallback.bounds
+    descriptor.fallbackSource = source
+    if (reasonMessage) descriptor.debug.warnings.push(reasonMessage)
+    return true
+  }
+
+  if ((!descriptor.polygons || descriptor.polygons.length === 0) && primaryBounds.bounds) {
+    applyFallbackFromBounds(
+      primaryBounds.bounds,
+      'primary-layer-bounds',
+      'Board outline fallback applied from copper/mask/silk/outline bounds'
+    )
   }
 
   if ((!descriptor.polygons || descriptor.polygons.length === 0) && nonDrillBounds.bounds) {
-    const fallback = buildFallbackFromBounds(nonDrillBounds.bounds, 'non-drill-bounds')
-    descriptor.polygons = fallback.polygons
-    descriptor.regions = fallback.regionList
-    descriptor.bounds = extendBounds(descriptor.bounds, fallback.bounds)
-    descriptor.fallbackSource = fallback.source
-    descriptor.debug.warnings.push('Fallback derived from non-drill layer bounds')
+    applyFallbackFromBounds(
+      nonDrillBounds.bounds,
+      'non-drill-bounds',
+      'Fallback derived from non-drill layer bounds'
+    )
   }
 
   if ((!descriptor.polygons || descriptor.polygons.length === 0) && anyLayerBounds.bounds) {
-    const fallback = buildFallbackFromBounds(anyLayerBounds.bounds, 'all-layer-bounds')
-    descriptor.polygons = fallback.polygons
-    descriptor.regions = fallback.regionList
-    descriptor.bounds = extendBounds(descriptor.bounds, fallback.bounds)
-    descriptor.fallbackSource = fallback.source
-    descriptor.debug.warnings.push('Fallback derived from overall layer bounds')
+    applyFallbackFromBounds(
+      anyLayerBounds.bounds,
+      'all-layer-bounds',
+      'Fallback derived from overall layer bounds'
+    )
   }
 
   if (!descriptor.bounds && descriptor.regions.length) {
@@ -297,6 +358,67 @@ export const resolveBoardOutlineDescriptor = (plotResult) => {
       const ys = polygon[0].map(([, y]) => y)
       return extendBounds(acc, [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)])
     }, null)
+  }
+
+  descriptor.debug.regionSummaries = descriptor.regions.map((region, index) => ({
+    index,
+    segmentCount: region?.segments?.length ?? 0,
+    bounds: describeBounds(
+      (region?.segments || []).reduce((acc, segment) => extendBoundsWithSegment(acc, segment), null)
+    ),
+  }))
+
+  const openPaths = Array.isArray(boardShape?.openPaths) ? boardShape.openPaths : []
+  descriptor.debug.openPathSummaries = openPaths.map((path, index) => ({
+    index,
+    segmentCount: path?.segments?.length ?? 0,
+    width: path?.width ?? null,
+    bounds: describeBounds(
+      (path?.segments || []).reduce((acc, segment) => extendBoundsWithSegment(acc, segment), null)
+    ),
+  }))
+
+  const descriptorBoundsArea = boundsArea(descriptor.bounds)
+  const primaryBoundsArea = boundsArea(primaryBounds.bounds)
+  const boundsAreaRatio =
+    descriptorBoundsArea && primaryBoundsArea && primaryBoundsArea > 0
+      ? descriptorBoundsArea / primaryBoundsArea
+      : null
+  if (
+    !descriptor.fallbackSource &&
+    boundsAreaRatio !== null &&
+    primaryBounds.bounds &&
+    boundsAreaRatio < 0.65
+  ) {
+    const applied = applyFallbackFromBounds(
+      primaryBounds.bounds,
+      'primary-bounds-coverage',
+      `Board outline bounds area (${descriptorBoundsArea?.toFixed(4) ?? 'n/a'}) is only ${
+        (boundsAreaRatio * 100).toFixed(2)
+      }% of copper/mask bounding box; replaced with bounding-box outline.`
+    )
+    if (applied) {
+      descriptor.debug.boundsAreaFallback = {
+        ratio: boundsAreaRatio,
+        descriptorBoundsArea,
+        primaryBoundsArea,
+      }
+    }
+  }
+
+  const polygonArea = multiPolygonArea(descriptor.polygons)
+  const coverageRatio =
+    descriptorBoundsArea && descriptorBoundsArea > 0
+      ? Number((polygonArea / descriptorBoundsArea).toFixed(6))
+      : null
+  descriptor.debug.coverage = {
+    polygonArea,
+    boundsArea: descriptorBoundsArea,
+    primaryBoundsArea,
+    boundsAreaRatio,
+    coverageRatio,
+    regionCount: descriptor.regions.length,
+    openPathCount: descriptor.debug.openPathSummaries.length,
   }
 
   descriptor.debug.polygonStats = describePolygonSet(descriptor.polygons)
@@ -315,7 +437,10 @@ export const buildBoardOutlineDebugPayload = (descriptor, plotResult, extra = {}
     warnings: descriptor.debug.warnings,
     bounds: boundsSummary,
     boundingBoxes: descriptor.debug.boundingBoxes,
+    coverage: descriptor.debug.coverage,
     regionsCount: descriptor.regions.length,
+    regionSummaries: descriptor.debug.regionSummaries,
+    openPaths: descriptor.debug.openPathSummaries,
     layers: (plotResult?.layers || []).map((layer) => ({
       id: layer.id,
       type: layer.type,

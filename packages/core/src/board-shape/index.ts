@@ -193,17 +193,54 @@ export function plotBoardShape(
     polygonCoverageRatio < STROKE_AREA_RATIO_THRESHOLD
 
   if (coverageTooLow) {
-    const fallbackRegion = createRectangleRegionFromBox(size)
-    const fallbackPolygon = fallbackRegion ? regionToPolygon(fallbackRegion) : null
-    if (fallbackRegion && fallbackPolygon) {
-      return {
-        size,
-        regions: [fallbackRegion],
-        openPaths,
-        polygons: [fallbackPolygon],
-        failureReason: NO_CLOSED_REGIONS_FOUND,
+    const applyFallbackRegions = (extraRegions: ImageRegion[]): boolean => {
+      if (!Array.isArray(extraRegions) || extraRegions.length === 0) return false
+      const mergedWithFallback = mergeBoardRegions([
+        ...mergedRegions,
+        ...extraRegions,
+      ])
+      if (!mergedWithFallback.regions.length) return false
+      mergedRegions = mergedWithFallback.regions
+      mergedPolygons = mergedWithFallback.polygons
+      derivedRegionBounds = BoundingBox.fromGraphics(mergedRegions)
+      mergedPolygonArea = multiPolygonArea(mergedPolygons)
+      polygonCoverageRatio = computeCoverageRatio()
+      return true
+    }
+
+    const outlineBoundingFallbacks = buildBoundingRegionsFromOutline(outlineRegions, size)
+    if (applyFallbackRegions(outlineBoundingFallbacks)) {
+      if (polygonCoverageRatio >= STROKE_AREA_RATIO_THRESHOLD) {
+        // accept improved outline
       }
     }
+
+    if (polygonCoverageRatio < STROKE_AREA_RATIO_THRESHOLD) {
+      const openPathFallbackRegions = buildRegionsFromOpenPaths(openPaths, size)
+      if (applyFallbackRegions(openPathFallbackRegions)) {
+        if (polygonCoverageRatio >= STROKE_AREA_RATIO_THRESHOLD) {
+          // outline restored
+        }
+      }
+    }
+
+    if (polygonCoverageRatio >= STROKE_AREA_RATIO_THRESHOLD) {
+      // After integrating fallback regions we now have sufficient coverage;
+      // continue with merged result.
+    } else {
+      const fallbackRegion = createRectangleRegionFromBox(size)
+      const fallbackPolygon = fallbackRegion ? regionToPolygon(fallbackRegion) : null
+      if (fallbackRegion && fallbackPolygon) {
+        return {
+          size,
+          regions: [fallbackRegion],
+          openPaths,
+          polygons: [fallbackPolygon],
+          failureReason: NO_CLOSED_REGIONS_FOUND,
+        }
+      }
+    }
+
   }
 
   if (mergedRegions.length === 0) {
@@ -440,6 +477,42 @@ const boundingBoxArea = (box?: SizeEnvelope | null): number => {
   const height = Math.abs(box[3] - box[1])
   const area = width * height
   return Number.isFinite(area) ? area : 0
+}
+
+const buildRegionsFromOpenPaths = (
+  paths: ImagePath[],
+  boardSize: SizeEnvelope
+): ImageRegion[] => {
+  if (!Array.isArray(paths) || paths.length === 0) return []
+  const boardArea = boundingBoxArea(boardSize)
+  const minArea = boardArea > 0 ? boardArea * 0.01 : 0
+  const regions: ImageRegion[] = []
+  for (const path of paths) {
+    const box = BoundingBox.fromPath(path.segments, path.width)
+    const area = boundingBoxArea(box)
+    if (!area || (minArea > 0 && area < minArea)) continue
+    const rectRegion = createRectangleRegionFromBox(box)
+    if (rectRegion) regions.push(rectRegion)
+  }
+  return regions
+}
+
+const buildBoundingRegionsFromOutline = (
+  outlineRegions: ImageRegion[],
+  boardSize: SizeEnvelope
+): ImageRegion[] => {
+  if (!Array.isArray(outlineRegions) || outlineRegions.length === 0) return []
+  const boardArea = boundingBoxArea(boardSize)
+  const minArea = boardArea > 0 ? boardArea * 0.01 : 0
+  const regions: ImageRegion[] = []
+  for (const region of outlineRegions) {
+    const bbox = BoundingBox.fromGraphics([region])
+    const area = boundingBoxArea(bbox)
+    if (!area || (minArea > 0 && area < minArea)) continue
+    const rectRegion = createRectangleRegionFromBox(bbox)
+    if (rectRegion) regions.push(rectRegion)
+  }
+  return regions
 }
 
 const reconstructStrokeBoardPolygons = (

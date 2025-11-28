@@ -665,6 +665,18 @@ export function renderThree(
       progress
     )
   }
+  if (layerType === 'soldermask') {
+    const optimized = buildSolderMaskGeometryFast(
+      imageTree,
+      color,
+      progress,
+      boardShapeRegions,
+      boardBounds,
+      boardClipRegions,
+      drillTrees
+    )
+    if (optimized) return optimized
+  }
   return buildPlanarLayerGeometry(
     imageTree,
     color,
@@ -1013,6 +1025,80 @@ const buildPlanarLayerGeometry = (
   group.userData = group.userData || {}
   group.userData.planarDebug = planarDebug
 
+  return group
+}
+
+const buildSolderMaskGeometryFast = (
+  imageTree,
+  color,
+  progress,
+  boardShapeRegions,
+  boardBounds,
+  boardClipRegions,
+  drillTrees
+) => {
+  const regionInput =
+    Array.isArray(boardShapeRegions) && boardShapeRegions.length
+      ? boardShapeRegions
+      : null
+  if (!regionInput) return null
+  const boardMaskPolygon = regionsToMultiPolygon(regionInput)
+  if (!boardMaskPolygon) return null
+  const children = Array.isArray(imageTree.children) ? imageTree.children : []
+  let current = 0
+  progress(current)
+  const windowPolygons = []
+  children.forEach((element, index) => {
+    const polygon = elementToMultiPolygon(element)
+    if (polygon) {
+      windowPolygons.push(polygon)
+    }
+    const next = Math.ceil(((index + 1) / children.length) * 100)
+    if (next !== current) {
+      current = next
+      progress(current)
+    }
+  })
+  const windowUnion = unionPolygonList(windowPolygons)
+  let maskPolygon = boardMaskPolygon
+  if (windowUnion) {
+    maskPolygon = subtractMultiPolygon(maskPolygon, windowUnion)
+  }
+  const drillPolygon = drillTreesToMultiPolygon(drillTrees)
+  if (drillPolygon) {
+    maskPolygon = subtractMultiPolygon(maskPolygon, drillPolygon)
+  }
+  const sanitized = sanitizeMultiPolygon(maskPolygon)
+  if (!sanitized) return null
+  if (current < 100) progress(100)
+  const shapes = multiPolygonToShapes(sanitized)
+  if (!shapes.length) return null
+  const group = new THREE.Group()
+  shapes.forEach(shape => {
+    const geometry = new THREE.ShapeGeometry(shape)
+    geometry.deleteAttribute('uv')
+    geometry.translate(0, 0, -PLANE_THICKNESS / 2)
+    const material = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.9,
+    })
+    material.side = THREE.DoubleSide
+    material.depthWrite = true
+    material.polygonOffset = true
+    material.polygonOffsetFactor = -0.2
+    material.polygonOffsetUnits = -0.2
+    const mesh = new THREE.Mesh(geometry, material)
+    mesh.userData = {planar: true, optimizedSoldermask: true}
+    group.add(mesh)
+  })
+  group.userData = {
+    planarDebug: {
+      strategy: 'soldermask-fast',
+      windowCount: windowPolygons.length,
+      polygonStats: computePolygonStats(sanitized),
+    },
+  }
   return group
 }
 

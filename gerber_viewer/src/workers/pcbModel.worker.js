@@ -231,6 +231,9 @@ const buildLayerPayload = payload => {
         }
         return produced
       })
+      drillTrees = measureWorkerStage(metrics, 'clip-drills', () =>
+        filterDrillTrees(drillTrees, boardBounds, boardClipPolygons)
+      )
     }
     let group = null
     let renderDebug = null
@@ -587,4 +590,11 @@ const collectElementPoints = element => {
     }
   }
   return []
+}
+
+const filterDrillTrees = (drillTrees, bounds, clipPolygons) => {
+  if (!Array.isArray(drillTrees) || drillTrees.length === 0) return drillTrees
+  return drillTrees
+    .map(tree => filterImageTree(tree, bounds, clipPolygons))
+    .filter(tree => tree && Array.isArray(tree.children) && tree.children.length > 0)
 }

@@ -254,8 +254,10 @@ export const resolveBoardOutlineDescriptor = (plotResult) => {
   const boardShape = plotResult?.boardShape ?? null
   const layers = plotResult?.layers ?? []
   const plotTreesById = plotResult?.plotTreesById ?? {}
+  const boardShapePolygons = sanitizeMultiPolygon(boardShape?.polygons)
+  const hasSourcePolygons = Array.isArray(boardShapePolygons) && boardShapePolygons.length > 0
   const descriptor = {
-    polygons: sanitizeMultiPolygon(boardShape?.polygons),
+    polygons: boardShapePolygons,
     regions: Array.isArray(boardShape?.regions) ? [...boardShape.regions] : [],
     bounds: extendBounds(null, boardShape?.size),
     failureReason: boardShape?.failureReason ?? null,
@@ -386,6 +388,7 @@ export const resolveBoardOutlineDescriptor = (plotResult) => {
       : null
   if (
     !descriptor.fallbackSource &&
+    !hasSourcePolygons &&
     boundsAreaRatio !== null &&
     primaryBounds.bounds &&
     boundsAreaRatio < 0.65

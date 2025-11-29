@@ -15,7 +15,6 @@ export default defineConfig({
     conditions: ['source'],
     alias: {
       '@tracespace/hybrid-core': fromWorkspace('../packages/hybrid-core/src/index.ts'),
-      '@tracespace/legacy-core': fromWorkspace('../packages/legacy_core/src/index.ts'),
     },
   },
 })

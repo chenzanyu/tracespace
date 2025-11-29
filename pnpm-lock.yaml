@@ -162,9 +162,6 @@ importers:
       '@tracespace/hybrid-core':
         specifier: workspace:*
         version: link:../packages/hybrid-core
-      '@tracespace/legacy-core':
-        specifier: workspace:*
-        version: link:../packages/legacy_core
       '@tracespace/parser':
         specifier: workspace:*
         version: link:../packages/parser
@@ -279,9 +276,6 @@ importers:
       '@tracespace/identify-layers':
         specifier: workspace:*
         version: link:../identify-layers
-      '@tracespace/legacy-core':
-        specifier: workspace:*
-        version: link:../legacy_core
       '@tracespace/parser':
         specifier: workspace:*
         version: link:../parser
@@ -294,62 +288,6 @@ importers:
         version: 4.5.4(@types/node@18.19.130)(rollup@4.52.5)(typescript@5.8.2)(vite@7.1.12(@types/node@18.19.130)(jiti@2.6.1)(lightningcss@1.30.2))
 
   packages/identify-layers: {}
-
-  packages/legacy_core:
-    dependencies:
-      '@tracespace/identify-layers':
-        specifier: workspace:*
-        version: link:../identify-layers
-      '@tracespace/legacy-plotter':
-        specifier: workspace:*
-        version: link:../legacy_plot
-      '@tracespace/legacy-renderer':
-        specifier: workspace:*
-        version: link:../legacy_renderer
-      '@tracespace/parser':
-        specifier: workspace:*
-        version: link:../parser
-      '@tracespace/xml-id':
-        specifier: workspace:*
-        version: link:../xml-id
-    devDependencies:
-      hast-util-to-html:
-        specifier: ^8.0.4
-        version: 8.0.4
-      hastscript:
-        specifier: ^7.2.0
-        version: 7.2.0
-
-  packages/legacy_plot:
-    dependencies:
-      '@tracespace/parser':
-        specifier: workspace:*
-        version: link:../parser
-      '@types/unist':
-        specifier: ^2.0.6
-        version: 2.0.11
-
-  packages/legacy_renderer:
-    dependencies:
-      '@tracespace/legacy-plotter':
-        specifier: workspace:*
-        version: link:../legacy_plot
-      '@tracespace/parser':
-        specifier: workspace:*
-        version: link:../parser
-      '@tracespace/xml-id':
-        specifier: workspace:*
-        version: link:../xml-id
-      '@types/hast':
-        specifier: ^2.3.4
-        version: 2.3.10
-      hastscript:
-        specifier: ^7.2.0
-        version: 7.2.0
-    devDependencies:
-      '@types/unist':
-        specifier: ^2.0.6
-        version: 2.0.11
 
   packages/parser:
     dependencies:

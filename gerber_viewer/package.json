@@ -13,7 +13,6 @@
     "@tailwindcss/vite": "^4.1.12",
     "@tracespace/core": "workspace:*",
     "@tracespace/hybrid-core": "workspace:*",
-    "@tracespace/legacy-core": "workspace:*",
     "@tracespace/parser": "workspace:*",
     "@tracespace/plotter": "workspace:*",
     "@tracespace/renderer": "workspace:*",

@@ -13,7 +13,6 @@ export default defineConfig({
     rollupOptions: {
       external: [
         '@tracespace/core',
-        '@tracespace/legacy-core',
         '@tracespace/parser',
         '@tracespace/xml-id',
         '@tracespace/identify-layers',

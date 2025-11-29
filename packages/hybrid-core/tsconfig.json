@@ -2,7 +2,6 @@
   "extends": "../../config/tsconfig.base.json",
   "references": [
     {"path": "../core"},
-    {"path": "../legacy_core"},
     {"path": "../parser"},
     {"path": "../identify-layers"},
     {"path": "../xml-id"}

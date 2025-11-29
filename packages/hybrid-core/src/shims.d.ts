@@ -31,10 +31,3 @@ declare module '@tracespace/core' {
   export const applyDrillInferenceToTree: (...args: any[]) => any
   export const shouldInferDrillFormat: (...args: any[]) => any
 }
-
-declare module '@tracespace/legacy-core' {
-  export type MemoryRenderOptions = any
-  export type RenderBoardResult = any
-  export type RenderLayersResult = any
-  export const fromParsedLayers: (...args: any[]) => any
-}

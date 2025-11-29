@@ -4,7 +4,7 @@
     "access": "public"
   },
   "version": "0.0.0",
-  "description": "Bridge modern tracespace pipeline with the legacy renderer while reusing parsed Gerber data.",
+  "description": "Bridge tracespace parser output with the modern renderer while reusing parsed Gerber data.",
   "types": "./lib/index.d.ts",
   "exports": {
     "types": "./lib/index.d.ts",
@@ -30,13 +30,11 @@
   "keywords": [
     "pcb",
     "gerber",
-    "tracespace",
-    "legacy"
+    "tracespace"
   ],
   "license": "MIT",
   "dependencies": {
     "@tracespace/core": "workspace:*",
-    "@tracespace/legacy-core": "workspace:*",
     "@tracespace/parser": "workspace:*",
     "@tracespace/xml-id": "workspace:*",
     "@tracespace/identify-layers": "workspace:*"

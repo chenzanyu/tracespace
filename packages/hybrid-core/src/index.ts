@@ -10,25 +10,13 @@ import type {
   FromMemoryLayersResult as ModernResult,
 } from '@tracespace/core'
 import {fromParsedLayers as runModern} from '@tracespace/core'
-import type {
-  MemoryRenderOptions as LegacyRenderOptions,
-  RenderBoardResult as LegacyRenderBoardResult,
-  RenderLayersResult as LegacyRenderLayersResult,
-} from '@tracespace/legacy-core'
-import {fromParsedLayers as runLegacy} from '@tracespace/legacy-core'
-
 export interface HybridPipelineOptions {
   modern?: ModernRenderOptions
-  legacy?: LegacyRenderOptions
 }
 
 export interface HybridPipelineResult {
   parsedLayers: ParsedMemoryLayer[]
   modern: ModernResult
-  legacy: {
-    renderLayersResult: LegacyRenderLayersResult
-    renderBoardResult: LegacyRenderBoardResult
-  }
 }
 
 const toString = (v: string | Uint8Array | ArrayBuffer): string => {
@@ -122,6 +110,5 @@ export function runHybridPipeline(
   return {
     parsedLayers,
     modern: runModern(parsedLayers, options.modern),
-    legacy: runLegacy(parsedLayers, options.legacy),
   }
 }

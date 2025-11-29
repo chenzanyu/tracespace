@@ -403,7 +403,7 @@
  */
 import { ref, reactive, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
-import { runHybridPipeline } from '@tracespace/hybrid-core'
+import { fromMemoryLayers } from '@tracespace/core'
 import UploadPanel from './UploadPanel.vue'
 import LayerStackPreview from './LayerStackPreview.vue'
 import Pcb3dPreview from './Pcb3dPreview.vue'
@@ -1433,11 +1433,11 @@ const handleUploadFile = async (file) => {
       boardThickness.value = defaultBoardThicknessMm
     }
 
-    const pipeline = runPerfSync('upload:hybridPipeline', () =>
-      runHybridPipeline(memoryLayers.value)
+    const pipeline = await runPerfAsync('upload:pipeline', () =>
+      fromMemoryLayers(memoryLayers.value)
     )
-    runPerfSync('upload:buildOrderedLayers', () => applyModernResult(pipeline.modern))
-    const outlineDescriptor = refreshBoardOutlineState(pipeline.modern?.plotResult)
+    runPerfSync('upload:buildOrderedLayers', () => applyModernResult(pipeline))
+    const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
     buildPcbModelFromParsedLayers(
       pipeline.parsedLayers,
       outlineDescriptor
@@ -1565,11 +1565,11 @@ const keyFor = (t, s) => {
     if (target) { target.type = entry.type; target.side = entry.side }
   }
   try {
-    const pipeline = runPerfSync('settings:hybridPipeline', () =>
-      runHybridPipeline(list)
+    const pipeline = await runPerfAsync('settings:pipeline', () =>
+      fromMemoryLayers(list)
     )
-    applyModernResult(pipeline.modern, { preserveVisuals: true })
-    const outlineDescriptor = refreshBoardOutlineState(pipeline.modern?.plotResult)
+    applyModernResult(pipeline, { preserveVisuals: true })
+    const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
     buildPcbModelFromParsedLayers(
       pipeline.parsedLayers,
       outlineDescriptor

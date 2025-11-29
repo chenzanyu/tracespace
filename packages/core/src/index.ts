@@ -305,6 +305,7 @@ export interface ParsedMemoryLayer {
 }
 
 export interface FromMemoryLayersResult {
+  parsedLayers: ParsedMemoryLayer[]
   plotResult: PlotResult
   renderLayersResult: RenderLayersResult
   renderBoardResult: RenderBoardResult
@@ -619,6 +620,7 @@ export function fromParsedLayers(
   const unitsPerMm = 1 / mmPerUnit
 
   return {
+    parsedLayers,
     plotResult,
     renderLayersResult,
     renderBoardResult,

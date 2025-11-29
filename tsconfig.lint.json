@@ -9,7 +9,6 @@
     "./**/*.js",
     "./config/*.ts",
     "./*.config.ts",
-    "./www/*.config.ts",
     "./packages/*/*.config.ts"
   ]
 }

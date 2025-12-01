@@ -690,18 +690,6 @@ export function renderThree(
       progress
     )
   }
-  if (layerType === 'soldermask') {
-    const optimized = buildSolderMaskGeometryFast(
-      imageTree,
-      color,
-      progress,
-      boardShapeRegions,
-      boardBounds,
-      boardClipRegions,
-      drillTrees
-    )
-    if (optimized) return optimized
-  }
   return buildPlanarLayerGeometry(
     imageTree,
     color,

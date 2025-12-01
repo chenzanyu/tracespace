@@ -28,6 +28,12 @@ const normalizeColor = value => {
 const collectMeshChunks = (group) => {
   const chunks = []
   const transferList = []
+  const seenBuffers = new Set()
+  const pushTransferBuffer = buffer => {
+    if (!buffer || seenBuffers.has(buffer)) return
+    seenBuffers.add(buffer)
+    transferList.push(buffer)
+  }
   const chunkSummaries = []
   group.traverse(child => {
     if (!child?.isMesh || !child.geometry) return
@@ -36,27 +42,30 @@ const collectMeshChunks = (group) => {
     const attributes = {}
     const packAttribute = (attribute) => {
       if (!attribute || !attribute.array) return null
-      const copy = attribute.array.slice()
-      transferList.push(copy.buffer)
+      const array = attribute.array
+      const buffer = array.buffer
+      if (!buffer) return null
+      pushTransferBuffer(buffer)
       return {
-        array: copy.buffer,
-        arrayType: attribute.array.constructor.name,
+        array: buffer,
+        arrayType: array.constructor.name,
         itemSize: attribute.itemSize,
         normalized: attribute.normalized ?? false,
-        count: attribute.count ?? copy.length / attribute.itemSize,
+        count: attribute.count ?? array.length / attribute.itemSize,
       }
     }
     attributes.position = packAttribute(geometry.getAttribute('position'))
     attributes.normal = packAttribute(geometry.getAttribute('normal'))
     attributes.uv = packAttribute(geometry.getAttribute('uv'))
     const indexAttr = geometry.getIndex?.() ?? geometry.index
-    if (indexAttr && indexAttr.array) {
-      const copy = indexAttr.array.slice()
-      transferList.push(copy.buffer)
+    if (indexAttr && indexAttr.array && indexAttr.array.buffer) {
+      const indexArray = indexAttr.array
+      const indexBuffer = indexArray.buffer
+      pushTransferBuffer(indexBuffer)
       chunk.index = {
-        array: copy.buffer,
-        arrayType: indexAttr.array.constructor.name,
-        count: indexAttr.count ?? copy.length,
+        array: indexBuffer,
+        arrayType: indexArray.constructor.name,
+        count: indexAttr.count ?? indexArray.length,
       }
     } else {
       chunk.index = null

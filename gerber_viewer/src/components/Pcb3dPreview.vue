@@ -170,6 +170,15 @@ const buildMeshGroupFromData = (meshData, defaultColor) => {
     return new THREE.Group()
   }
 }
+const laminarDefaults = {
+  total: 1.6,
+  copper: 0.035,
+  solderMask: 0.04,
+  silkscreen: 0.01,
+  solderPaste: 0.015,
+  oil: 0.01,
+}
+
 let explosionEntries = []
 const explosionState = { progress: 0, target: 0 }
 const fitState = {
@@ -181,6 +190,7 @@ const fitState = {
 }
 const explosionEpsilon = 1e-3
 const explosionSizeVector = new THREE.Vector3()
+let explosionBaseSpan = laminarDefaults.total
 const topLayerRenderOrders = {
   copper: 90,
   soldermask: 92,
@@ -262,15 +272,6 @@ const configureLayerVisuals = (mesh, type, side) => {
       })
     }
   })
-}
-
-const laminarDefaults = {
-  total: 1.6,
-  copper: 0.035,
-  solderMask: 0.04,
-  silkscreen: 0.01,
-  solderPaste: 0.015,
-  oil: 0.01,
 }
 
 const explosionLayerSequence = [
@@ -477,10 +478,15 @@ const determineExplosionOrder = (type, side) => {
 }
 
 const resolveExplosionStep = () => {
-  const totalThickness = Math.max(props.thickness || laminarDefaults.total, 0.001)
+  const span = explosionBaseSpan
   const rawInput = Number(props.explosionSpacingMultiplier)
   const spacingMultiplier = Number.isFinite(rawInput) ? Math.max(rawInput, 0) : 0
-  return totalThickness * spacingMultiplier
+  if (!Number.isFinite(span) || span <= 0) {
+    const totalThicknessFallback = Math.max(props.thickness || laminarDefaults.total, 0.001)
+    return totalThicknessFallback * spacingMultiplier
+  }
+  const normalizedSpan = span * 0.01
+  return normalizedSpan * spacingMultiplier
 }
 
 const computeExplosionOffset = (type, side) => {
@@ -498,7 +504,11 @@ const refreshExplosionOffsets = () => {
 }
 
 const computeLaminate = () => {
-  const total = Math.max(props.thickness || laminarDefaults.total, 0.001)
+  const providedThickness = Number(props.thickness)
+  const total =
+    Number.isFinite(providedThickness) && providedThickness > 0
+      ? providedThickness
+      : Math.max(laminarDefaults.total, 0.001)
   const scale = total / laminarDefaults.total
   const copper = laminarDefaults.copper * scale
   const solderMask = laminarDefaults.solderMask * scale
@@ -617,8 +627,16 @@ const assembleLayers = (entries) => {
   geometryBox = new THREE.Box3().setFromObject(modelGroup)
   if (geometryBox) {
     geometryBox.getCenter(geometryCenter)
+    geometryBox.getSize(explosionSizeVector)
+    explosionBaseSpan = Math.max(
+      explosionSizeVector.x,
+      explosionSizeVector.y,
+      laminarDefaults.total
+    )
   } else {
     geometryCenter.set(0, 0, 0)
+    explosionSizeVector.set(0, 0, 0)
+    explosionBaseSpan = laminarDefaults.total
   }
   refreshExplosionOffsets()
   updateCameraDepthRange()

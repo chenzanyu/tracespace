@@ -305,6 +305,7 @@ export interface ParsedMemoryLayer {
 }
 
 export interface FromMemoryLayersResult {
+  parsedLayers: ParsedMemoryLayer[]
   plotResult: PlotResult
   renderLayersResult: RenderLayersResult
   renderBoardResult: RenderBoardResult
@@ -476,8 +477,16 @@ export function fromParsedLayers(
       .filter((box): box is plotter.BoundingBox.Box => Boolean(box) && !plotter.BoundingBox.isEmpty(box))
 
   // 从首个图确定文件单位（'mm' 或 'in'）
-  const firstTree: ImageTree | undefined = plotTreesById[layers[0]?.id as string]
-  const fileUnits: 'mm' | 'in' = (firstTree?.units as any) ?? 'mm'
+  const resolveUnitSourceTree = (): ImageTree | undefined => {
+    const outlineLayer = layers.find(layer => layer.type === 'outline')
+    if (outlineLayer) {
+      const outlineTree = plotTreesById[outlineLayer.id]
+      if (outlineTree?.units) return outlineTree
+    }
+    return plotTreesById[layers[0]?.id as string]
+  }
+  const unitSourceTree = resolveUnitSourceTree()
+  const fileUnits: 'mm' | 'in' = (unitSourceTree?.units as any) ?? 'mm'
 
   const mmToUnits = (mm: number): number => (fileUnits === 'mm' ? mm : mm / 25.4)
   const unitsToMm = (val: number): number => (fileUnits === 'mm' ? val : val * 25.4)
@@ -619,6 +628,7 @@ export function fromParsedLayers(
   const unitsPerMm = 1 / mmPerUnit
 
   return {
+    parsedLayers,
     plotResult,
     renderLayersResult,
     renderBoardResult,

@@ -403,11 +403,12 @@
  */
 import { ref, reactive, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
-import { runHybridPipeline } from '@tracespace/hybrid-core'
+import { fromMemoryLayers } from '@tracespace/core'
 import UploadPanel from './UploadPanel.vue'
 import LayerStackPreview from './LayerStackPreview.vue'
 import Pcb3dPreview from './Pcb3dPreview.vue'
 import { orderLayerWeight, randomHexColor } from '../libs/gerber_stack'
+import { resolveBoardOutlineDescriptor } from '../libs/3d/boardOutline'
 
 const resetIcon = new URL('../assets/resetting.svg', import.meta.url).href
 const measureIcon = new URL('../assets/measurement.svg', import.meta.url).href
@@ -417,6 +418,13 @@ const currentStatusIndex = ref(0)
 const activeView = ref('layers')
 const measurementActive = ref(false)
 const recenterSignal = ref(0)
+const props = defineProps({
+  boardThicknessMm: {
+    type: Number,
+    default: 1.6,
+  },
+})
+
 const isLayerPanelOpen = ref(false)
 const layerPanelTransitionEnabled = ref(true)
 const showFilenames = ref(false)
@@ -430,24 +438,34 @@ const boardWidthMm = ref(0)
 const boardHeightMm = ref(0)
 const pcb3dRef = ref(null)
 const defaultBoardThicknessMm = 1.6
-// API historically emitted thickness in meters (e.g. 0.0016 for a 1.6 mm board),
-// so treat any value smaller than 0.01 as meters and convert it to millimeters.
-const boardThickness = ref(defaultBoardThicknessMm)
 const unitMmPerUnit = ref(1)
-const meterToMmThreshold = 0.01
-const convertThicknessToMillimeters = (value) => {
-  const numeric = Number(value)
-  if (!Number.isFinite(numeric) || numeric <= 0) return null
-  if (numeric < meterToMmThreshold) return numeric * 1000
-  return numeric
-}
+const resolvedBoardThicknessMm = computed(() => {
+  const provided = Number(props.boardThicknessMm)
+  if (Number.isFinite(provided) && provided > 0) {
+    return provided
+  }
+  return defaultBoardThicknessMm
+})
 const boardThicknessUnits = computed(() => {
-  const mmValue = Number(boardThickness.value)
-  const normalizedMm = Number.isFinite(mmValue) && mmValue > 0 ? mmValue : defaultBoardThicknessMm
+  const normalizedMm = resolvedBoardThicknessMm.value
   const mmPerUnit = Number(unitMmPerUnit.value)
   if (!Number.isFinite(mmPerUnit) || mmPerUnit <= 0) return normalizedMm
   return normalizedMm / mmPerUnit
 })
+const logBoardScaleSnapshot = (source) => {
+  try {
+    console.log('[GerberViewer] board scale snapshot', {
+      source,
+      unitMmPerUnit: unitMmPerUnit.value,
+      thicknessUnits: boardThicknessUnits.value,
+      boardWidthMm: boardWidthMm.value,
+      boardHeightMm: boardHeightMm.value,
+      viewBox: boardViewBox.value,
+    })
+  } catch (error) {
+    console.warn('[GerberViewer] Failed to log board scale snapshot', error)
+  }
+}
 const pcb3dModel = reactive({
   layers: [],
   version: 0,
@@ -482,7 +500,7 @@ const viewOptions = [
   { label: '3D', value: '3d' },
 ]
 const explosionActive = ref(false)
-const explosionSpacing = ref(2)
+const explosionSpacing = ref(8)
 const spacingPanelVisible = ref(false)
 const spacingPanelInitialized = ref(false)
 const spacingSliderValue = ref(explosionSpacing.value)
@@ -1084,6 +1102,29 @@ const isLayerEligibleFor3d = (layer) => {
   const side = normalizeLayerSide(layer.side)
   return side === 'top' || side === 'bottom'
 }
+
+const hasPositiveBounds = (size) => {
+  if (!Array.isArray(size) || size.length < 4) return false
+  const [minX, minY, maxX, maxY] = size
+  const width = Math.abs(Number(maxX) - Number(minX))
+  const height = Math.abs(Number(maxY) - Number(minY))
+  return Number.isFinite(width) && Number.isFinite(height) && (width > 0 || height > 0)
+}
+
+const layerHasRenderableGeometry = (layer, plotResult) => {
+  if (!layer || !plotResult || !plotResult.plotTreesById) return true
+  const tree = plotResult.plotTreesById[layer.id]
+  if (!tree) return true
+  const childCount = Array.isArray(tree.children) ? tree.children.length : 0
+  if (childCount > 0) return true
+  if (hasPositiveBounds(tree.size)) return true
+  console.warn('[GerberViewer] Skipping 3D layer with no geometry', {
+    id: layer.id,
+    type: layer.type,
+    side: layer.side,
+  })
+  return false
+}
 const detectWorkerConcurrency = () => {
   const envValue = Number(import.meta.env?.VITE_PCB_WORKER_CONCURRENCY)
   if (Number.isFinite(envValue) && envValue >= 1) return Math.floor(envValue)
@@ -1213,7 +1254,10 @@ const resetPcbModelState = () => {
   pcb3dModel.version += 1
 }
 
+let componentDestroyed = false
+
 const updateWorkerLoading = () => {
+  if (componentDestroyed) return
   workerLoading.value = pcbModelJobs.pending > 0
 }
 
@@ -1264,7 +1308,7 @@ const queueWorkerJob = (payload) => {
 }
 
 const applyWorkerLayer = (payload) => {
-  if (!payload) return
+  if (!payload || componentDestroyed) return
   const layers = pcb3dModel.layers.filter((entry) => entry.id !== payload.layerId)
   layers.push({
     id: payload.layerId,
@@ -1279,24 +1323,37 @@ const applyWorkerLayer = (payload) => {
   pcb3dModel.version += 1
 }
 
-const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
+const refreshBoardOutlineState = (plotResult) => {
+  if (!plotResult) return null
+  return resolveBoardOutlineDescriptor(plotResult)
+}
+
+const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = null) => {
   resetPcbModelState()
   pcbModelJobs.total = 0
   pcbModelJobs.pending = 0
   updateWorkerLoading()
   if (!Array.isArray(parsedLayers) || parsedLayers.length === 0) return
-  const boardRegions = Array.isArray(boardShape?.regions) ? boardShape.regions : undefined
-  const boardBounds = Array.isArray(boardShape?.size) ? boardShape.size : undefined
+  const boardRegions = Array.isArray(boardOutline?.regions) ? boardOutline.regions : undefined
+  const boardBounds = Array.isArray(boardOutline?.bounds) ? boardOutline.bounds : undefined
+  const boardPolygons = Array.isArray(boardOutline?.polygons) ? boardOutline.polygons : undefined
+  logBoardScaleSnapshot('buildPcbModelFromParsedLayers')
   const drillParseTrees = parsedLayers
     .filter((layer) => {
       const type = String(layer?.type || '').toLowerCase()
       return type.includes('drill') && layer?.parseTree
     })
     .map((layer) => layer.parseTree)
-  const layersFor3d = parsedLayers.filter(isLayerEligibleFor3d)
-  planPerfWorkerJobs(layersFor3d.length)
-  pcbModelJobs.total = layersFor3d.length
-  if (!layersFor3d.length) return
+  const layersFor3d = parsedLayers.filter(
+    (layer) => isLayerEligibleFor3d(layer) && layerHasRenderableGeometry(layer, plotResult)
+  )
+  const hasOutlineLayer = layersFor3d.some((layer) => layer.type === 'outline')
+  const syntheticOutlineNeeded =
+    !hasOutlineLayer && Array.isArray(boardRegions) && boardRegions.length > 0
+  const totalJobs = layersFor3d.length + (syntheticOutlineNeeded ? 1 : 0)
+  planPerfWorkerJobs(totalJobs)
+  pcbModelJobs.total = totalJobs
+  if (totalJobs === 0) return
   const drillShapePayload = drillParseTrees.length ? drillParseTrees : undefined
   for (const layer of layersFor3d) {
     queueWorkerJob({
@@ -1306,7 +1363,8 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
       side: layer.side ?? null,
       color: getLayerColor(layer.id, layer.type),
       outline: layer.type === 'outline',
-      boardShapeRegions: layer.type === 'outline' ? boardRegions : undefined,
+      boardShapeRegions: boardRegions,
+      boardShapePolygons: boardPolygons,
       boardClipRegions: boardRegions,
       drillShapes: drillShapePayload,
       boardBounds,
@@ -1316,6 +1374,28 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardShape) => {
       })
       .catch((error) => {
         console.error('[GerberViewer] PCB worker failed', error)
+      })
+  }
+  if (syntheticOutlineNeeded) {
+    queueWorkerJob({
+      layerId: '__synthetic-board-outline__',
+      parseTree: null,
+      type: 'outline',
+      side: 'all',
+      color: getLayerColor('__synthetic-board-outline__', 'outline'),
+      outline: true,
+      boardShapeRegions: boardRegions,
+      boardShapePolygons: boardPolygons,
+      boardClipRegions: boardRegions,
+      drillShapes: drillShapePayload,
+      boardBounds,
+      syntheticOutlineRegions: boardRegions,
+    })
+      .then((result) => {
+        applyWorkerLayer(result)
+      })
+      .catch((error) => {
+        console.error('[GerberViewer] Synthetic board outline build failed', error)
       })
   }
 }
@@ -1392,20 +1472,15 @@ const handleUploadFile = async (file) => {
     )
     const result = res.data.Data
     memoryLayers.value = result.Items || []
-    if (typeof result.Thickness === 'number') {
-      const normalizedThickness = convertThicknessToMillimeters(result.Thickness)
-      boardThickness.value = normalizedThickness ?? defaultBoardThicknessMm
-    } else {
-      boardThickness.value = defaultBoardThicknessMm
-    }
-
-    const pipeline = runPerfSync('upload:hybridPipeline', () =>
-      runHybridPipeline(memoryLayers.value)
+    const pipeline = await runPerfAsync('upload:pipeline', () =>
+      fromMemoryLayers(memoryLayers.value)
     )
-    runPerfSync('upload:buildOrderedLayers', () => applyModernResult(pipeline.modern))
+    runPerfSync('upload:buildOrderedLayers', () => applyModernResult(pipeline))
+    const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
     buildPcbModelFromParsedLayers(
       pipeline.parsedLayers,
-      pipeline.modern?.plotResult?.boardShape
+      outlineDescriptor,
+      pipeline.plotResult
     )
     logPerf('upload:layers-ready', {
       count: orderedLayers.length,
@@ -1480,6 +1555,7 @@ const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
     boardWidthMm.value = widthUnits * mmScale
     boardHeightMm.value = heightUnits * mmScale
   }
+  logBoardScaleSnapshot('applyModernResult')
   const keep = preserveVisuals
     ? new Map(orderedLayers.map((layer) => [layer.filename, { color: layer.color, visible: layer.visible, opacity: layer.opacity }]))
     : null
@@ -1530,13 +1606,15 @@ const keyFor = (t, s) => {
     if (target) { target.type = entry.type; target.side = entry.side }
   }
   try {
-    const pipeline = runPerfSync('settings:hybridPipeline', () =>
-      runHybridPipeline(list)
+    const pipeline = await runPerfAsync('settings:pipeline', () =>
+      fromMemoryLayers(list)
     )
-    applyModernResult(pipeline.modern, { preserveVisuals: true })
+    applyModernResult(pipeline, { preserveVisuals: true })
+    const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
     buildPcbModelFromParsedLayers(
       pipeline.parsedLayers,
-      pipeline.modern?.plotResult?.boardShape
+      outlineDescriptor,
+      pipeline.plotResult
     )
     recenterSignal.value += 1
     memoryLayers.value = list
@@ -1569,6 +1647,13 @@ watch(
   }
 )
 
+watch(
+  [() => boardThicknessUnits.value, () => unitMmPerUnit.value],
+  () => {
+    logBoardScaleSnapshot('scale-change')
+  }
+)
+
 watch(activeView, (value) => {
   if (value !== '3d') {
     displayMenuOpen.value = false
@@ -1596,6 +1681,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  componentDestroyed = true
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', updatePreviewSize)
     window.removeEventListener('click', handleGlobalClick)

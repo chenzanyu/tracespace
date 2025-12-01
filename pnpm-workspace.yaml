@@ -1,5 +1,4 @@
 packages:
   - 'packages/*'
-  - 'www'
   - 'gerber_viewer'
   - 'hdi_calculator'

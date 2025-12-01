@@ -4,16 +4,18 @@
 
 ## 功能亮点
 
-- **层叠可视化**：根据所选层数与孔配置自动绘制堆叠示意 SVG。
+- **层叠可视化**：根据所选层数与孔配置自动绘制堆叠 SVG 示意。
 - **多类型钻孔**：支持激光孔（相邻层）与机械孔，自带堆叠识别。
 - **阶数分析**：实时计算 1st/2nd/3rd-order 以及 Any-layer HDI。
 - **事件输出**：通过 `summary-change` 和 `confirm` 事件向父组件回传数据。
+- **多语言界面**：通过 `language` prop 在英文（`en`）与中文（`zh`）之间切换界面文案。
 
 ## Props
 
 | Prop | 类型 | 是否必填 | 说明 |
 |------|------|----------|------|
 | `layers` | `Number` | 是 | 当前 PCB 层数，必须是 `4 / 6 / 8 / 10 / 12` 之一。 |
+| `language` | `String` | 否 | 界面语言，支持 `en`（默认）与 `zh`，会同步影响所有提示。|
 
 ## Emits
 
@@ -52,6 +54,7 @@ import StackPreview from './components/StackPreview.vue'
 
 const layers = ref(6)
 const summary = ref(null)
+const language = ref('zh')
 
 const handleSummary = payload => {
   summary.value = payload
@@ -65,6 +68,7 @@ const handleConfirm = ({ layers: pcbLayers, stage }) => {
 <template>
   <StackPreview
     v-model:layers="layers"
+    :language="language"
     @summary-change="handleSummary"
     @confirm="handleConfirm"
   />
@@ -76,10 +80,10 @@ const handleConfirm = ({ layers: pcbLayers, stage }) => {
 1. **层数控制**：父组件通过 `v-model:layers` 传入合法层数值；组件内部会据此刷新堆叠示意、合法孔范围与阶数上限。
 2. **Via 定义**：
    - 激光孔仅允许跨相邻层。
-   - 勾选 “Allow stacking from this via” 可将连续孔视为堆叠。
-   - 错误信息会即时提示（如层号超界、相同层等）。
+   - 勾选 “Allow stacking from this via / 允许从此孔继续堆叠” 可将连续孔视为堆叠。
+   - 错误信息会即时提示（如层号超界、相同层等），并会随 `language` 自动切换语言。
 3. **实时摘要**：`summary-change` 输出可用于标题栏、报表等外部呈现。
-4. **确认提交**：点击 Confirm 后通过 `confirm` 事件传回 `{ layers, stage }`，由父组件决定后续逻辑。
+4. **确认提交**：点击 Confirm / 确认 后通过 `confirm` 事件传回 `{ layers, stage }`，由父组件决定后续逻辑。
 
 ## 开发提示
 

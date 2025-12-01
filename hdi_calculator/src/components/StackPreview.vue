@@ -13,12 +13,124 @@ const props = defineProps({
     type: Number,
     required: true,
     validator: value => [4, 6, 8, 10, 12].includes(value)
+  },
+  language: {
+    type: String,
+    default: 'en',
+    validator: value => ['en', 'zh'].includes(value)
   }
 })
 
 const LAYER_OPTIONS = [4, 6, 8, 10, 12]
 
+const TRANSLATIONS = {
+  en: {
+    headings: {
+      viaDefinition: 'Via Definition',
+      stacking: 'Stacking',
+      configuredVias: 'Configured Vias'
+    },
+    form: {
+      viaType: 'Via Type',
+      laserVia: 'Laser Via',
+      mechanicalDrill: 'Mechanical Drill',
+      startLayer: 'Start Layer',
+      endLayer: 'End Layer',
+      allowStack: 'Allow stacking from this via'
+    },
+    actions: {
+      addVia: 'Add Via',
+      clear: 'Clear',
+      confirm: 'Confirm'
+    },
+    indicators: {
+      stackFlag: 'Stack',
+      emptyTip: 'No via structures defined yet'
+    },
+    hole: {
+      range: (start, end) => `L${start} -> L${end}`
+    },
+    errors: {
+      missingLayers: 'Please provide both start and end layers.',
+      sameLayer: 'Start and end layers must differ.',
+      invalidMinimum: 'Layer numbers must be greater than 0.',
+      exceedMax: ({ max }) => `Layer numbers cannot exceed ${max}.`,
+      laserAdjacent: 'Laser vias may only connect adjacent layers.'
+    },
+    stage: {
+      none: 'No HDI order detected',
+      anylayer: 'Any-layer HDI',
+      order: order => {
+        const suffixMap = { 1: 'st', 2: 'nd', 3: 'rd' }
+        const suffix = suffixMap[order] || 'th'
+        return `${order}${suffix}-order HDI`
+      },
+      descriptionNone: 'Add laser vias to determine HDI order',
+      descriptionAnylayer: 'High-density any-layer stack structure',
+      descriptionOrder: order => `${order} + N + ${order}`
+    },
+    layerLabels: {
+      top: 'Top',
+      bottom: 'Bot',
+      middle: index => `L${index}`,
+      core: 'Core',
+      pp: 'PP'
+    }
+  },
+  zh: {
+    headings: {
+      viaDefinition: '孔配置',
+      stacking: '堆叠',
+      configuredVias: '已配置孔'
+    },
+    form: {
+      viaType: '孔类型',
+      laserVia: '激光孔',
+      mechanicalDrill: '机械孔',
+      startLayer: '起始层',
+      endLayer: '结束层',
+      allowStack: '允许从此孔继续堆叠'
+    },
+    actions: {
+      addVia: '添加孔',
+      clear: '清空',
+      confirm: '确认'
+    },
+    indicators: {
+      stackFlag: '堆叠',
+      emptyTip: '尚未配置任何孔'
+    },
+    hole: {
+      range: (start, end) => `第${start}层 -> 第${end}层`
+    },
+    errors: {
+      missingLayers: '请输入起始层和终止层。',
+      sameLayer: '起始层与终止层必须不同。',
+      invalidMinimum: '层号必须大于 0。',
+      exceedMax: ({ max }) => `层号不能超过 ${max}。`,
+      laserAdjacent: '激光孔仅可连接相邻层。'
+    },
+    stage: {
+      none: '未检测到 HDI 阶数',
+      anylayer: '任意层互联 HDI',
+      order: order => `${order} 阶 HDI`,
+      descriptionNone: '请添加激光孔以判定 HDI 阶数',
+      descriptionAnylayer: '任意层互联堆叠结构',
+      descriptionOrder: order => `${order} + N + ${order}`
+    },
+    layerLabels: {
+      top: '顶层',
+      bottom: '底层',
+      middle: index => `第${index}层`,
+      core: '芯板',
+      pp: 'pp'
+    }
+  }
+}
+
 const emit = defineEmits(['update:layers', 'confirm', 'summary-change'])
+
+const i18n = computed(() => TRANSLATIONS[props.language] ?? TRANSLATIONS.en)
 
 const layerCount = ref(props.layers)
 watch(
@@ -40,7 +152,20 @@ const holeForm = reactive({
 })
 
 const holes = ref([])
-const errorMessage = ref('')
+const errorState = ref(null)
+const errorMessage = computed(() => {
+  if (!errorState.value) return ''
+  const entry = i18n.value.errors[errorState.value.key]
+  if (typeof entry === 'function') return entry(errorState.value.args || {})
+  return entry || ''
+})
+const setError = (key, args = {}) => {
+  errorState.value = { key, args }
+}
+const clearError = () => {
+  errorState.value = null
+}
+const formatHoleRange = (start, end) => i18n.value.hole.range(start, end)
 const activeHoleId = ref(null)
 let nextHoleId = 1
 
@@ -52,28 +177,28 @@ const resetHoleForm = () => {
 }
 
 const addHole = () => {
-  errorMessage.value = ''
+  clearError()
   const { startLayer, endLayer, type, stacked } = holeForm
   const maxLayer = layerCount.value
 
   if (!startLayer || !endLayer) {
-    errorMessage.value = 'Please provide both start and end layers.'
+    setError('missingLayers')
     return
   }
   if (startLayer === endLayer) {
-    errorMessage.value = 'Start and end layers must differ.'
+    setError('sameLayer')
     return
   }
   if (startLayer < 1 || endLayer < 1) {
-    errorMessage.value = 'Layer numbers must be greater than 0.'
+    setError('invalidMinimum')
     return
   }
   if (startLayer > maxLayer || endLayer > maxLayer) {
-    errorMessage.value = `Layer numbers cannot exceed ${maxLayer}.`
+    setError('exceedMax', { max: maxLayer })
     return
   }
   if (type === 'laser' && Math.abs(startLayer - endLayer) !== 1) {
-    errorMessage.value = 'Laser vias may only connect adjacent layers.'
+    setError('laserAdjacent')
     return
   }
 
@@ -104,17 +229,18 @@ watch(layerCount, value => {
 watch(
   () => ({ ...holeForm }),
   () => {
-    if (errorMessage.value) errorMessage.value = ''
+    if (errorState.value) clearError()
   }
 )
 
 const visualLayers = computed(() => {
   const results = []
   const total = layerCount.value
+  const labels = i18n.value.layerLabels
   for (let i = 1; i <= total; i += 1) {
     results.push({
       id: `cu-${i}`,
-      label: i === 1 ? 'Top' : i === total ? 'Bot' : `L${i}`,
+      label: i === 1 ? labels.top : i === total ? labels.bottom : labels.middle(i),
       type: 'copper',
       copperIndex: i
     })
@@ -124,7 +250,8 @@ const visualLayers = computed(() => {
         id: `die-${i}`,
         label: '',
         type: 'dielectric',
-        material: isCore ? 'Core' : 'PP'
+        material: isCore ? 'Core' : 'PP',
+        materialLabel: isCore ? labels.core : labels.pp
       })
     }
   }
@@ -275,18 +402,17 @@ const stageValue = computed(() => {
 const stageDisplay = computed(() => stageValue.value ?? '0')
 
 const stageTitle = computed(() => {
-  if (stageValue.value === null) return 'No HDI order detected'
-  if (stageValue.value === 'anylayer') return 'Any-layer HDI'
-  const orderNumber = Number(stageValue.value)
-  const suffixMap = { 1: 'st', 2: 'nd', 3: 'rd' }
-  const suffix = suffixMap[orderNumber] || 'th'
-  return `${orderNumber}${suffix}-order HDI`
+  const stage = stageValue.value
+  if (stage === null) return i18n.value.stage.none
+  if (stage === 'anylayer') return i18n.value.stage.anylayer
+  return i18n.value.stage.order(Number(stage))
 })
 
 const stageDescription = computed(() => {
-  if (stageValue.value === null) return 'Add laser vias to determine HDI order'
-  if (stageValue.value === 'anylayer') return 'High-density any-layer stack structure'
-  return `${hdiOrderNumber.value} + N + ${hdiOrderNumber.value}`
+  const stage = stageValue.value
+  if (stage === null) return i18n.value.stage.descriptionNone
+  if (stage === 'anylayer') return i18n.value.stage.descriptionAnylayer
+  return i18n.value.stage.descriptionOrder(hdiOrderNumber.value)
 })
 
 const summaryInfo = computed(() => ({
@@ -312,37 +438,37 @@ const handleConfirm = () => {
       <section class="panel settings">
         <div class="card">
           <div class="card-header">
-            <h3>Via Definition</h3>
-            <span class="muted">Stacking</span>
+            <h3>{{ i18n.headings.viaDefinition }}</h3>
+            <span class="muted">{{ i18n.headings.stacking }}</span>
           </div>
           <div class="form-grid">
-            <label class="label">Via Type</label>
+            <label class="label">{{ i18n.form.viaType }}</label>
             <select v-model="holeForm.type" class="input-select">
-              <option value="laser">Laser Via</option>
-              <option value="mechanical">Mechanical Drill</option>
+              <option value="laser">{{ i18n.form.laserVia }}</option>
+              <option value="mechanical">{{ i18n.form.mechanicalDrill }}</option>
             </select>
 
-            <label class="label">Start Layer</label>
+            <label class="label">{{ i18n.form.startLayer }}</label>
             <input v-model.number="holeForm.startLayer" type="number" min="1" :max="layerCount" class="input-number" />
 
-            <label class="label">End Layer</label>
+            <label class="label">{{ i18n.form.endLayer }}</label>
             <input v-model.number="holeForm.endLayer" type="number" min="1" :max="layerCount" class="input-number" />
           </div>
 
           <label class="checkbox">
             <input v-model="holeForm.stacked" type="checkbox" />
-            <span>Allow stacking from this via</span>
+            <span>{{ i18n.form.allowStack }}</span>
           </label>
 
           <p v-if="errorMessage" class="error-text">{{ errorMessage }}</p>
 
-          <button class="btn" type="button" @click="addHole">Add Via</button>
+          <button class="btn" type="button" @click="addHole">{{ i18n.actions.addVia }}</button>
         </div>
 
         <div class="card hole-card">
           <div class="card-header">
-            <h3>Configured Vias ({{ holes.length }})</h3>
-            <button v-if="holes.length" class="btn-link" type="button" @click="clearHoles">Clear</button>
+            <h3>{{ i18n.headings.configuredVias }} ({{ holes.length }})</h3>
+            <button v-if="holes.length" class="btn-link" type="button" @click="clearHoles">{{ i18n.actions.clear }}</button>
           </div>
 
           <div v-if="holes.length" class="hole-list">
@@ -356,13 +482,13 @@ const handleConfirm = () => {
             >
               <div class="hole-info">
                 <span class="hole-badge" :class="hole.type">{{ hole.type === 'laser' ? 'L' : 'M' }}</span>
-                <span class="hole-text">L{{ hole.startLayer }} → L{{ hole.endLayer }}</span>
-                <span v-if="hole.stacked" class="stack-flag">Stack</span>
+                <span class="hole-text">{{ formatHoleRange(hole.startLayer, hole.endLayer) }}</span>
+                <span v-if="hole.stacked" class="stack-flag">{{ i18n.indicators.stackFlag }}</span>
               </div>
               <button class="btn-remove" type="button" @click="removeHole(hole.id)">×</button>
             </div>
           </div>
-          <div v-else class="empty-tip">No via structures defined yet</div>
+          <div v-else class="empty-tip">{{ i18n.indicators.emptyTip }}</div>
         </div>
       </section>
 
@@ -388,7 +514,7 @@ const handleConfirm = () => {
                 class="label-material"
                 :class="layer.material"
               >
-                {{ layer.material }}
+                {{ layer.materialLabel ?? layer.material }}
               </text>
             </g>
 
@@ -412,7 +538,7 @@ const handleConfirm = () => {
     </div>
 
       <div class="stack-footer">
-        <button class="btn confirm" type="button" @click="handleConfirm">Confirm</button>
+        <button class="btn confirm" type="button" @click="handleConfirm">{{ i18n.actions.confirm }}</button>
       </div>
   </div>
 </template>

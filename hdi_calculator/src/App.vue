@@ -6,6 +6,7 @@ const LAYER_OPTIONS = [4, 6, 8, 10, 12]
 
 const showDialog = ref(true)
 const layers = ref(6)
+const language = 'zh'
 const lastResult = ref(null)
 const headerSummary = ref({
   stageDisplay: '0',
@@ -87,6 +88,7 @@ const handleConfirm = ({ layers: confirmedLayers, stage }) => {
             <StackPreview
               class="stack-component"
               v-model:layers="layers"
+              v-model:language="language"
               @summary-change="handleSummaryChange"
               @confirm="handleConfirm"
             />

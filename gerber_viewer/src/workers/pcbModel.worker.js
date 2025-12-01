@@ -29,10 +29,15 @@ const collectMeshChunks = (group) => {
   const chunks = []
   const transferList = []
   const seenBuffers = new Set()
+  let totalByteLength = 0
   const pushTransferBuffer = buffer => {
-    if (!buffer || seenBuffers.has(buffer)) return
+    if (!buffer || seenBuffers.has(buffer)) return false
     seenBuffers.add(buffer)
     transferList.push(buffer)
+    if (typeof buffer.byteLength === 'number') {
+      totalByteLength += buffer.byteLength
+    }
+    return true
   }
   const chunkSummaries = []
   group.traverse(child => {
@@ -91,7 +96,7 @@ const collectMeshChunks = (group) => {
       obj.material?.dispose?.()
     }
   })
-  return {chunks, transferList, chunkSummaries}
+  return {chunks, transferList, chunkSummaries, totalByteLength}
 }
 
 const logWorker = (event, details = {}) => {
@@ -129,7 +134,7 @@ const createWorkerMetrics = () => ({
   startedAt: Date.now(),
   timeline: [],
   memorySamples: [],
-  peakMemoryBytes: null,
+  peakMemoryBytes: 0,
 })
 const measureWorkerStage = (metrics, name, fn) => {
   const memoryStart = captureWorkerMemoryUsage()
@@ -171,8 +176,11 @@ const buildLayerPayload = payload => {
     const metrics = createWorkerMetrics()
     const perfOrigin = getWorkerPerfNow()
     if (isDrillType(payload.type)) {
+      measureWorkerStage(metrics, 'drill:passthrough', () => null)
       metrics.completedAt = Date.now()
       metrics.totalDurationMs = Number((getWorkerPerfNow() - perfOrigin).toFixed(2))
+      metrics.vertexCount = 0
+      metrics.meshByteLength = 0
       return {
         payload: {
           layerId: payload.layerId,
@@ -301,8 +309,12 @@ const buildLayerPayload = payload => {
       meshCount: group.children?.length ?? 0,
     })
     const meshResult = measureWorkerStage(metrics, 'collect-mesh', () => collectMeshChunks(group))
-    const {chunks, transferList, chunkSummaries} = meshResult
+    const {chunks, transferList, chunkSummaries, totalByteLength = 0} = meshResult
     const summary = summarizeChunks(chunkSummaries)
+    metrics.meshByteLength = totalByteLength
+    if (!metrics.peakMemoryBytes || totalByteLength > metrics.peakMemoryBytes) {
+      metrics.peakMemoryBytes = totalByteLength
+    }
     metrics.completedAt = Date.now()
     metrics.totalDurationMs = Number((getWorkerPerfNow() - perfOrigin).toFixed(2))
     metrics.vertexCount = summary.totalVertices

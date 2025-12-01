@@ -53,7 +53,7 @@ const props = defineProps({
   active: { type: Boolean, default: true },
 })
 
-const emit = defineEmits(['exit-measurement', 'loading-change', 'debug-update'])
+const emit = defineEmits(['exit-measurement', 'loading-change', 'debug-update', 'perf-stats'])
 
 const enablePerfLogs = import.meta.env?.DEV ?? false
 const perfLabel = (phase) => `[perf][LayerStack] ${phase}`
@@ -64,6 +64,37 @@ const startPerf = (phase) => {
 }
 const logPerf = (phase, payload) => {
   if (enablePerfLogs) console.log(perfLabel(phase), payload)
+}
+const getPerfNow = () =>
+  (typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now())
+const captureMemorySnapshot = () => {
+  if (typeof performance === 'undefined' || !performance.memory) return null
+  const { usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit } = performance.memory
+  if (!Number.isFinite(usedJSHeapSize)) return null
+  return {
+    usedBytes: usedJSHeapSize,
+    totalBytes: totalJSHeapSize,
+    limitBytes: jsHeapSizeLimit,
+  }
+}
+const computeMemoryDelta = (start, end) => {
+  if (!start || !end) return null
+  if (!Number.isFinite(start.usedBytes) || !Number.isFinite(end.usedBytes)) return null
+  return end.usedBytes - start.usedBytes
+}
+const emitLayerPerfSample = (stage, durationMs, meta = {}, memoryStart = null, memoryEnd = null) => {
+  emit('perf-stats', {
+    stage,
+    category: 'layer-preview',
+    durationMs: Number.isFinite(durationMs) ? Number(durationMs.toFixed(2)) : null,
+    meta: meta || {},
+    memoryStart,
+    memoryEnd,
+    memoryDeltaBytes: computeMemoryDelta(memoryStart, memoryEnd),
+    timestamp: Date.now(),
+  })
 }
 
 const compositeContainer = ref(null)
@@ -194,6 +225,8 @@ const ensurePixiApp = async () => {
   const height = Math.max(host.clientHeight || 1, 1)
   const resolution = window.devicePixelRatio || 1
   const app = new Application()
+  const initStart = getPerfNow()
+  const initMemoryStart = captureMemorySnapshot()
   pixiInitPromise = (async () => {
     try {
       await app.init({
@@ -224,6 +257,14 @@ const ensurePixiApp = async () => {
       pixiApp.value = app
       pixiCanvas = canvasEl
       applyViewTransform()
+      const initMemoryEnd = captureMemorySnapshot()
+      emitLayerPerfSample(
+        'layers:pixi-init',
+        getPerfNow() - initStart,
+        { width, height, resolution },
+        initMemoryStart,
+        initMemoryEnd
+      )
       return app
     } catch (error) {
       try { app.destroy(true) } catch { /* noop */ }
@@ -275,7 +316,8 @@ const resetLayerDisplays = (destroy = true) => {
 }
 
 const updateComposite = async ({ recenter = false } = {}) => {
-  const updateStart = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
+  const updateStart = getPerfNow()
+  const memoryStart = captureMemorySnapshot()
   logPerf('updateComposite', {
     active: props.active,
     recenter,
@@ -291,6 +333,7 @@ const updateComposite = async ({ recenter = false } = {}) => {
   const endEnsure = startPerf('ensurePixiApp')
   const app = await ensurePixiApp()
   endEnsure()
+  let perfMeta = null
   try {
     if (!app || token !== compositeUpdateToken) return
     if (!pixiRoot) return
@@ -367,7 +410,7 @@ const updateComposite = async ({ recenter = false } = {}) => {
     endRebuild()
     if (recenter) fitToContainer(true)
     else applyViewTransform()
-    const end = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
+    const end = getPerfNow()
     const rendererInfo = app?.renderer?.info ? { ...app.renderer.info } : null
     const jsHeap = typeof performance !== 'undefined' && performance.memory ? performance.memory.usedJSHeapSize : null
     logPerf('stats', {
@@ -380,8 +423,23 @@ const updateComposite = async ({ recenter = false } = {}) => {
       rendererInfo,
       jsHeap,
     })
+    perfMeta = {
+      layerCount: props.orderedLayers.length,
+      pixiChildren: pixiRoot.children.length,
+      reusedDisplays: stats.reused,
+      rebuiltDisplays: stats.rebuilt,
+      removedDisplays: stats.removed,
+      rendererInfo,
+      recenterRequested: recenter,
+      token,
+    }
+    if (jsHeap != null) perfMeta.jsHeapUsedBytes = jsHeap
     emit('debug-update', pixiDebugPayload)
   } finally {
+    if (perfMeta) {
+      const memoryEnd = captureMemorySnapshot()
+      emitLayerPerfSample('layers:update-composite', getPerfNow() - updateStart, perfMeta, memoryStart, memoryEnd)
+    }
     if (token === compositeUpdateToken) setCompositeLoading(false)
   }
 }

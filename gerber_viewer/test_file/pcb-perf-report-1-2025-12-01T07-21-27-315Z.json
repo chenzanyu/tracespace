@@ -1,0 +1,842 @@
+{
+  "sessionId": 1,
+  "source": "upload",
+  "startedAt": 1764573616157,
+  "completedAt": 1764573634900,
+  "exportedAt": 1764573687314,
+  "meta": {
+    "fileName": "S_K3K4 driver board rev1f KIT.zip",
+    "fileSize": 1971779
+  },
+  "summary": {
+    "totalDurationMs": 19259.60009765625,
+    "totalVertices": 271987,
+    "peakWorkerMemoryBytes": null,
+    "workerJobs": {
+      "completed": 10,
+      "expected": 10
+    }
+  },
+  "tracespaceStages": [
+    {
+      "id": "1-stage-1",
+      "phase": "upload:api",
+      "category": "upload",
+      "durationMs": 318.3,
+      "memoryStartUsedBytes": 56504020,
+      "memoryEndUsedBytes": 58873014,
+      "memoryDeltaBytes": 2368994,
+      "timestamp": 1764573616476,
+      "meta": {}
+    },
+    {
+      "id": "1-stage-2",
+      "phase": "upload:pipeline",
+      "category": "upload",
+      "durationMs": 1508.5,
+      "memoryStartUsedBytes": 58873014,
+      "memoryEndUsedBytes": 334187385,
+      "memoryDeltaBytes": 275314371,
+      "timestamp": 1764573617985,
+      "meta": {}
+    },
+    {
+      "id": "1-stage-3",
+      "phase": "upload:buildOrderedLayers",
+      "category": "upload",
+      "durationMs": 0.6,
+      "memoryStartUsedBytes": 334187385,
+      "memoryEndUsedBytes": 334187385,
+      "memoryDeltaBytes": 0,
+      "timestamp": 1764573617985,
+      "meta": {}
+    }
+  ],
+  "layerPreviewStages": [
+    {
+      "id": "1-layer-1",
+      "stage": "layers:pixi-init",
+      "durationMs": 46.1,
+      "memoryStartUsedBytes": 56504020,
+      "memoryEndUsedBytes": 48838811,
+      "memoryDeltaBytes": -7665209,
+      "meta": {
+        "width": 1912,
+        "height": 932,
+        "resolution": 1
+      },
+      "timestamp": 1764573616226
+    },
+    {
+      "id": "1-layer-2",
+      "stage": "layers:update-composite",
+      "durationMs": 1914.8,
+      "memoryStartUsedBytes": 336363492,
+      "memoryEndUsedBytes": 658868160,
+      "memoryDeltaBytes": 322504668,
+      "meta": {
+        "layerCount": 12,
+        "pixiChildren": 12,
+        "reusedDisplays": 0,
+        "rebuiltDisplays": 12,
+        "removedDisplays": 0,
+        "rendererInfo": null,
+        "recenterRequested": true,
+        "token": 3,
+        "jsHeapUsedBytes": 658868160
+      },
+      "timestamp": 1764573620015
+    }
+  ],
+  "workerJobs": [
+    {
+      "id": "1-worker-3",
+      "jobId": 3,
+      "type": "outline",
+      "side": "all",
+      "label": "all outline",
+      "vertexCount": 60300,
+      "chunkCount": 1,
+      "success": true,
+      "startedAt": 1764573618065,
+      "completedAt": 1764573621336,
+      "durationMs": 97.6,
+      "peakMemoryBytes": null,
+      "timeline": [
+        {
+          "name": "clip-polygons",
+          "durationMs": 0.1,
+          "index": 0,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "filter-image-tree",
+          "durationMs": 12.2,
+          "index": 1,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "plot-drills",
+          "durationMs": 4.2,
+          "index": 2,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "clip-drills",
+          "durationMs": 0.5,
+          "index": 3,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "render-three",
+          "durationMs": 79.2,
+          "index": 4,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "collect-mesh",
+          "durationMs": 0.3,
+          "index": 5,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        }
+      ]
+    },
+    {
+      "id": "1-worker-1",
+      "jobId": 1,
+      "type": "copper",
+      "side": "bottom",
+      "label": "bottom copper",
+      "vertexCount": 47576,
+      "chunkCount": 941,
+      "success": true,
+      "startedAt": 1764573617987,
+      "completedAt": 1764573624558,
+      "durationMs": 3206.3,
+      "peakMemoryBytes": null,
+      "timeline": [
+        {
+          "name": "clip-polygons",
+          "durationMs": 0.1,
+          "index": 0,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "filter-image-tree",
+          "durationMs": 38.3,
+          "index": 1,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "plot-drills",
+          "durationMs": 2.2,
+          "index": 2,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "clip-drills",
+          "durationMs": 0.2,
+          "index": 3,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "render-three",
+          "durationMs": 3146,
+          "index": 4,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "collect-mesh",
+          "durationMs": 17.8,
+          "index": 5,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        }
+      ]
+    },
+    {
+      "id": "1-worker-4",
+      "jobId": 4,
+      "type": "silkscreen",
+      "side": "bottom",
+      "label": "bottom silkscreen",
+      "vertexCount": 31710,
+      "chunkCount": 128,
+      "success": true,
+      "startedAt": 1764573618071,
+      "completedAt": 1764573625352,
+      "durationMs": 4067.8,
+      "peakMemoryBytes": null,
+      "timeline": [
+        {
+          "name": "clip-polygons",
+          "durationMs": 0.2,
+          "index": 0,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "filter-image-tree",
+          "durationMs": 83.3,
+          "index": 1,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "plot-drills",
+          "durationMs": 2.5,
+          "index": 2,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "clip-drills",
+          "durationMs": 0.2,
+          "index": 3,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "render-three",
+          "durationMs": 3979.4,
+          "index": 4,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "collect-mesh",
+          "durationMs": 1.2,
+          "index": 5,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        }
+      ]
+    },
+    {
+      "id": "1-worker-6",
+      "jobId": 6,
+      "type": "soldermask",
+      "side": "bottom",
+      "label": "bottom soldermask",
+      "vertexCount": 19398,
+      "chunkCount": 1,
+      "success": true,
+      "startedAt": 1764573618098,
+      "completedAt": 1764573625905,
+      "durationMs": 1300.9,
+      "peakMemoryBytes": null,
+      "timeline": [
+        {
+          "name": "clip-polygons",
+          "durationMs": 0.2,
+          "index": 0,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "filter-image-tree",
+          "durationMs": 32.2,
+          "index": 1,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "plot-drills",
+          "durationMs": 1,
+          "index": 2,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "clip-drills",
+          "durationMs": 0.2,
+          "index": 3,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "render-three",
+          "durationMs": 1266.5,
+          "index": 4,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "collect-mesh",
+          "durationMs": 0.2,
+          "index": 5,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        }
+      ]
+    },
+    {
+      "id": "1-worker-7",
+      "jobId": 7,
+      "type": "soldermask",
+      "side": "top",
+      "label": "top soldermask",
+      "vertexCount": 17719,
+      "chunkCount": 12,
+      "success": true,
+      "startedAt": 1764573618098,
+      "completedAt": 1764573627221,
+      "durationMs": 1812.4,
+      "peakMemoryBytes": null,
+      "timeline": [
+        {
+          "name": "clip-polygons",
+          "durationMs": 0.1,
+          "index": 0,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "filter-image-tree",
+          "durationMs": 21.9,
+          "index": 1,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "plot-drills",
+          "durationMs": 2.3,
+          "index": 2,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "clip-drills",
+          "durationMs": 0.2,
+          "index": 3,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "render-three",
+          "durationMs": 1780,
+          "index": 4,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "collect-mesh",
+          "durationMs": 0.8,
+          "index": 5,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        }
+      ]
+    },
+    {
+      "id": "1-worker-8",
+      "jobId": 8,
+      "type": "soldermask",
+      "side": "bottom",
+      "label": "bottom soldermask",
+      "vertexCount": 13232,
+      "chunkCount": 1,
+      "success": true,
+      "startedAt": 1764573618098,
+      "completedAt": 1764573627702,
+      "durationMs": 1730.6,
+      "peakMemoryBytes": null,
+      "timeline": [
+        {
+          "name": "clip-polygons",
+          "durationMs": 0.1,
+          "index": 0,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "filter-image-tree",
+          "durationMs": 23.4,
+          "index": 1,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "plot-drills",
+          "durationMs": 3.6,
+          "index": 2,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "clip-drills",
+          "durationMs": 0.5,
+          "index": 3,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "render-three",
+          "durationMs": 1701.9,
+          "index": 4,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "collect-mesh",
+          "durationMs": 0.3,
+          "index": 5,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        }
+      ]
+    },
+    {
+      "id": "1-worker-10",
+      "jobId": 10,
+      "type": "drill",
+      "side": "all",
+      "label": "all drill",
+      "vertexCount": 0,
+      "chunkCount": 0,
+      "success": true,
+      "startedAt": 1764573618099,
+      "completedAt": 1764573627849,
+      "durationMs": 0,
+      "peakMemoryBytes": null,
+      "timeline": []
+    },
+    {
+      "id": "1-worker-2",
+      "jobId": 2,
+      "type": "copper",
+      "side": "top",
+      "label": "top copper",
+      "vertexCount": 61438,
+      "chunkCount": 920,
+      "success": true,
+      "startedAt": 1764573618025,
+      "completedAt": 1764573629267,
+      "durationMs": 7889.8,
+      "peakMemoryBytes": null,
+      "timeline": [
+        {
+          "name": "clip-polygons",
+          "durationMs": 0.1,
+          "index": 0,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "filter-image-tree",
+          "durationMs": 62.3,
+          "index": 1,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "plot-drills",
+          "durationMs": 2.5,
+          "index": 2,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "clip-drills",
+          "durationMs": 0.2,
+          "index": 3,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "render-three",
+          "durationMs": 7819.3,
+          "index": 4,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "collect-mesh",
+          "durationMs": 4.6,
+          "index": 5,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        }
+      ]
+    },
+    {
+      "id": "1-worker-5",
+      "jobId": 5,
+      "type": "silkscreen",
+      "side": "top",
+      "label": "top silkscreen",
+      "vertexCount": 4,
+      "chunkCount": 1,
+      "success": true,
+      "startedAt": 1764573618098,
+      "completedAt": 1764573629917,
+      "durationMs": 7165.9,
+      "peakMemoryBytes": null,
+      "timeline": [
+        {
+          "name": "clip-polygons",
+          "durationMs": 0.1,
+          "index": 0,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "filter-image-tree",
+          "durationMs": 440.5,
+          "index": 1,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "plot-drills",
+          "durationMs": 2.2,
+          "index": 2,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "clip-drills",
+          "durationMs": 0.3,
+          "index": 3,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "render-three",
+          "durationMs": 6721.7,
+          "index": 4,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "collect-mesh",
+          "durationMs": 0.1,
+          "index": 5,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        }
+      ]
+    },
+    {
+      "id": "1-worker-9",
+      "jobId": 9,
+      "type": "soldermask",
+      "side": "top",
+      "label": "top soldermask",
+      "vertexCount": 20610,
+      "chunkCount": 1,
+      "success": true,
+      "startedAt": 1764573618098,
+      "completedAt": 1764573634382,
+      "durationMs": 6908,
+      "peakMemoryBytes": null,
+      "timeline": [
+        {
+          "name": "clip-polygons",
+          "durationMs": 0,
+          "index": 0,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "filter-image-tree",
+          "durationMs": 145.3,
+          "index": 1,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "plot-drills",
+          "durationMs": 2.6,
+          "index": 2,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "clip-drills",
+          "durationMs": 0.4,
+          "index": 3,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "render-three",
+          "durationMs": 6759.1,
+          "index": 4,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        },
+        {
+          "name": "collect-mesh",
+          "durationMs": 0.1,
+          "index": 5,
+          "memoryDeltaBytes": null,
+          "memoryStartUsedBytes": null,
+          "memoryEndUsedBytes": null
+        }
+      ]
+    }
+  ],
+  "viewerStages": [
+    {
+      "id": "1-viewer-1",
+      "stage": "three:rebuildModel",
+      "durationMs": 1.3,
+      "memoryStartUsedBytes": 56504020,
+      "memoryEndUsedBytes": 56504020,
+      "memoryDeltaBytes": 0,
+      "meta": {
+        "layerCount": 0,
+        "vertexCount": 0
+      },
+      "timestamp": 1764573616186
+    },
+    {
+      "id": "1-viewer-2",
+      "stage": "three:rebuildModel",
+      "durationMs": 0.1,
+      "memoryStartUsedBytes": 336363492,
+      "memoryEndUsedBytes": 336363492,
+      "memoryDeltaBytes": 0,
+      "meta": {
+        "layerCount": 0,
+        "vertexCount": 0
+      },
+      "timestamp": 1764573618100
+    },
+    {
+      "id": "1-viewer-3",
+      "stage": "three:rebuildModel",
+      "durationMs": 35.6,
+      "memoryStartUsedBytes": 803602490,
+      "memoryEndUsedBytes": 803602490,
+      "memoryDeltaBytes": 0,
+      "meta": {
+        "layerCount": 1,
+        "vertexCount": 60300
+      },
+      "timestamp": 1764573622099
+    },
+    {
+      "id": "1-viewer-4",
+      "stage": "three:rebuildModel",
+      "durationMs": 139,
+      "memoryStartUsedBytes": 819845815,
+      "memoryEndUsedBytes": 834924321,
+      "memoryDeltaBytes": 15078506,
+      "meta": {
+        "layerCount": 2,
+        "vertexCount": 107876
+      },
+      "timestamp": 1764573624726
+    },
+    {
+      "id": "1-viewer-5",
+      "stage": "three:rebuildModel",
+      "durationMs": 108.9,
+      "memoryStartUsedBytes": 814643893,
+      "memoryEndUsedBytes": 832861169,
+      "memoryDeltaBytes": 18217276,
+      "meta": {
+        "layerCount": 3,
+        "vertexCount": 139586
+      },
+      "timestamp": 1764573625499
+    },
+    {
+      "id": "1-viewer-6",
+      "stage": "three:rebuildModel",
+      "durationMs": 113.9,
+      "memoryStartUsedBytes": 834950865,
+      "memoryEndUsedBytes": 824147489,
+      "memoryDeltaBytes": -10803376,
+      "meta": {
+        "layerCount": 4,
+        "vertexCount": 158984
+      },
+      "timestamp": 1764573626060
+    },
+    {
+      "id": "1-viewer-7",
+      "stage": "three:rebuildModel",
+      "durationMs": 98.6,
+      "memoryStartUsedBytes": 826334883,
+      "memoryEndUsedBytes": 846241987,
+      "memoryDeltaBytes": 19907104,
+      "meta": {
+        "layerCount": 5,
+        "vertexCount": 176703
+      },
+      "timestamp": 1764573627515
+    },
+    {
+      "id": "1-viewer-8",
+      "stage": "three:rebuildModel",
+      "durationMs": 137.6,
+      "memoryStartUsedBytes": 821291519,
+      "memoryEndUsedBytes": 840450971,
+      "memoryDeltaBytes": 19159452,
+      "meta": {
+        "layerCount": 6,
+        "vertexCount": 189935
+      },
+      "timestamp": 1764573627841
+    },
+    {
+      "id": "1-viewer-9",
+      "stage": "three:rebuildModel",
+      "durationMs": 40.9,
+      "memoryStartUsedBytes": 840450971,
+      "memoryEndUsedBytes": 826722499,
+      "memoryDeltaBytes": -13728472,
+      "meta": {
+        "layerCount": 7,
+        "vertexCount": 189935
+      },
+      "timestamp": 1764573627892
+    },
+    {
+      "id": "1-viewer-10",
+      "stage": "three:rebuildModel",
+      "durationMs": 110.8,
+      "memoryStartUsedBytes": 837429223,
+      "memoryEndUsedBytes": 839611731,
+      "memoryDeltaBytes": 2182508,
+      "meta": {
+        "layerCount": 8,
+        "vertexCount": 251373
+      },
+      "timestamp": 1764573629380
+    },
+    {
+      "id": "1-viewer-11",
+      "stage": "three:rebuildModel",
+      "durationMs": 100.7,
+      "memoryStartUsedBytes": 850845675,
+      "memoryEndUsedBytes": 860441539,
+      "memoryDeltaBytes": 9595864,
+      "meta": {
+        "layerCount": 9,
+        "vertexCount": 251377
+      },
+      "timestamp": 1764573630019
+    },
+    {
+      "id": "1-viewer-12",
+      "stage": "three:rebuildModel",
+      "durationMs": 516.6,
+      "memoryStartUsedBytes": 867161491,
+      "memoryEndUsedBytes": 914999573,
+      "memoryDeltaBytes": 47838082,
+      "meta": {
+        "layerCount": 10,
+        "vertexCount": 271987
+      },
+      "timestamp": 1764573634900
+    }
+  ]
+}

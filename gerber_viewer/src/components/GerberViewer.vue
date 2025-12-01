@@ -190,7 +190,7 @@
           :board-view-box="boardViewBox" :board-width-mm="boardWidthMm" :board-height-mm="boardHeightMm"
           :measurement-active="measurementActive" :recenter-signal="recenterSignal" :active="activeView === 'layers'"
           @exit-measurement="measurementActive = false" @loading-change="handleLayerPreviewLoading"
-          @debug-update="handlePixiDebugUpdate" />
+          @debug-update="handlePixiDebugUpdate" @perf-stats="handleLayerPerfEvent" />
 
         <div v-if="activeView === 'layers' && showLayerPreviewLoading"
           class="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 bg-black/50 text-white pointer-events-none">
@@ -280,8 +280,8 @@
           <div class="flex items-center gap-2">
             <button
               class="px-3 py-1.5 text-xs border border-gray-600 rounded hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
-              :disabled="!hasPerfData" @click="exportPerfMarkdown">
-              导出 Markdown
+              :disabled="!hasPerfData" @click="exportPerfJson">
+              导出 JSON
             </button>
             <button class="px-3 py-1.5 text-xs border border-gray-600 rounded hover:bg-gray-800" @click="closePerfModal">
               关闭
@@ -327,7 +327,7 @@
             </div>
 
             <div v-if="pipelinePerfSession.stages.length" class="space-y-2">
-              <div class="text-sm font-semibold">前处理阶段</div>
+              <div class="text-sm font-semibold">Tracespace 管线</div>
               <div class="space-y-2">
                 <div v-for="stage in pipelinePerfSession.stages" :key="stage.id"
                   class="bg-white/5 border border-white/5 rounded-lg px-3 py-2">
@@ -339,6 +339,27 @@
                     <span>Δ内存：{{ formatPerfMemory(stage.memoryDeltaBytes) }}</span>
                     <span v-if="stage.memoryEndUsedBytes">
                       结束：{{ formatPerfMemory(stage.memoryEndUsedBytes) }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="pipelinePerfSession.layerStages.length" class="space-y-2">
+              <div class="text-sm font-semibold">层叠预览</div>
+              <div class="space-y-2">
+                <div v-for="stage in pipelinePerfSession.layerStages" :key="stage.id"
+                  class="bg-white/5 border border-white/5 rounded-lg px-3 py-2">
+                  <div class="flex items-center justify-between text-sm font-medium">
+                    <span>{{ resolvePerfStageLabel(stage.stage) }}</span>
+                    <span>{{ formatPerfDuration(stage.durationMs) }}</span>
+                  </div>
+                  <div class="text-[11px] text-gray-400 flex flex-wrap gap-3 mt-1">
+                    <span v-if="stage.meta?.layerCount != null">层：{{ stage.meta.layerCount }}</span>
+                    <span v-if="stage.meta?.pixiChildren != null">Pixi 对象：{{ stage.meta.pixiChildren }}</span>
+                    <span>Δ内存：{{ formatPerfMemory(stage.memoryDeltaBytes) }}</span>
+                    <span v-if="stage.meta?.jsHeapUsedBytes != null">
+                      JS Heap：{{ formatPerfMemory(stage.meta.jsHeapUsedBytes) }}
                     </span>
                   </div>
                 </div>
@@ -360,6 +381,9 @@
                     <span>顶点：{{ job.vertexCount.toLocaleString() }}</span>
                     <span>块：{{ job.chunkCount }}</span>
                     <span>峰值：{{ formatPerfMemory(job.peakMemoryBytes) }}</span>
+                    <span v-if="job.computeDurationMs != null">
+                      纯计算：{{ formatPerfDuration(job.computeDurationMs) }}
+                    </span>
                   </div>
                   <div v-if="job.timeline?.length" class="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     <div v-for="stage in job.timeline" :key="`${job.id}-${stage.index}`"
@@ -602,10 +626,11 @@ const pipelinePerfSession = reactive({
   source: '',
   startedAt: 0,
   completedAt: 0,
-  expectedWorkerJobs: 0,
+  expectedWorkerJobs: null,
   completedWorkerJobs: 0,
   meta: {},
   stages: [],
+  layerStages: [],
   workerJobs: [],
   viewerStages: [],
 })
@@ -618,6 +643,7 @@ const getPerfNow = () =>
 const hasPerfData = computed(
   () =>
     pipelinePerfSession.stages.length > 0 ||
+    pipelinePerfSession.layerStages.length > 0 ||
     pipelinePerfSession.workerJobs.length > 0 ||
     pipelinePerfSession.viewerStages.length > 0
 )
@@ -638,6 +664,7 @@ const computeMemoryDelta = (start, end) => {
 }
 const resetPerfCollections = () => {
   pipelinePerfSession.stages.splice(0)
+  pipelinePerfSession.layerStages.splice(0)
   pipelinePerfSession.workerJobs.splice(0)
   pipelinePerfSession.viewerStages.splice(0)
 }
@@ -647,7 +674,7 @@ const startPerfSession = (source, meta = {}) => {
   pipelinePerfSession.meta = meta
   pipelinePerfSession.startedAt = Date.now()
   pipelinePerfSession.completedAt = 0
-  pipelinePerfSession.expectedWorkerJobs = 0
+  pipelinePerfSession.expectedWorkerJobs = null
   pipelinePerfSession.completedWorkerJobs = 0
   resetPerfCollections()
 }
@@ -656,20 +683,20 @@ const planPerfWorkerJobs = (count) => {
   pipelinePerfSession.expectedWorkerJobs = count
   pipelinePerfSession.completedWorkerJobs = 0
   if (count === 0) {
-    pipelinePerfSession.completedAt = Date.now()
+    finalizePerfSessionIfIdle()
   }
 }
 const finalizePerfSessionIfIdle = () => {
-  if (!pipelinePerfSession.id || pipelinePerfSession.completedAt) return
-  if (
-    pipelinePerfSession.expectedWorkerJobs === 0 ||
-    pipelinePerfSession.completedWorkerJobs >= pipelinePerfSession.expectedWorkerJobs
-  ) {
-    pipelinePerfSession.completedAt = Date.now()
+  if (!pipelinePerfSession.id) return
+  const expected = pipelinePerfSession.expectedWorkerJobs
+  if (expected == null) return
+  if (expected === 0 || pipelinePerfSession.completedWorkerJobs >= expected) {
+    const now = Date.now()
+    pipelinePerfSession.completedAt = Math.max(pipelinePerfSession.completedAt || 0, now)
   }
 }
 const markPerfWorkerJobComplete = () => {
-  if (!pipelinePerfSession.id) return
+  if (!pipelinePerfSession.id || pipelinePerfSession.expectedWorkerJobs == null) return
   pipelinePerfSession.completedWorkerJobs = Math.min(
     pipelinePerfSession.expectedWorkerJobs,
     pipelinePerfSession.completedWorkerJobs + 1
@@ -712,28 +739,44 @@ const recordWorkerPerfMetrics = (entry, result, success, message) => {
     vertexCount: summary?.totalVertices ?? 0,
     chunkCount: summary?.chunkCount ?? summary?.geometryCount ?? 0,
   }
+  const timeline = Array.isArray(result?.metrics?.timeline)
+    ? result.metrics.timeline.map((stage, index) => {
+        const { memoryStart, memoryEnd, ...rest } = stage || {}
+        return {
+          ...rest,
+          index,
+          memoryDeltaBytes: computeMemoryDelta(memoryStart, memoryEnd),
+          memoryStartUsedBytes: memoryStart?.usedBytes ?? null,
+          memoryEndUsedBytes: memoryEnd?.usedBytes ?? null,
+        }
+      })
+    : []
+  const wallDuration =
+    Number.isFinite(entry.completedAt) && Number.isFinite(entry.timestamp)
+      ? Math.max(0, entry.completedAt - entry.timestamp)
+      : result?.metrics?.totalDurationMs ?? null
+  const computeDuration =
+    result?.metrics?.totalDurationMs ??
+    timeline.reduce((sum, stage) => sum + (stage.durationMs || 0), 0)
   if (!success) {
     pipelinePerfSession.workerJobs.push({
       ...common,
       success: false,
-      durationMs: entry.completedAt && entry.timestamp ? entry.completedAt - entry.timestamp : null,
+      startedAt: Number.isFinite(entry.timestamp) ? entry.timestamp : null,
+      completedAt: Number.isFinite(entry.completedAt) ? entry.completedAt : null,
+      durationMs: wallDuration,
+      computeDurationMs: computeDuration || null,
       errorMessage: message || entry.errorMessage || 'worker failure',
     })
     return
   }
-  const timeline = Array.isArray(result?.metrics?.timeline)
-    ? result.metrics.timeline.map((stage, index) => ({
-        ...stage,
-        index,
-        memoryDeltaBytes: computeMemoryDelta(stage.memoryStart, stage.memoryEnd),
-        memoryStartUsedBytes: stage.memoryStart?.usedBytes ?? null,
-        memoryEndUsedBytes: stage.memoryEnd?.usedBytes ?? null,
-      }))
-    : []
   pipelinePerfSession.workerJobs.push({
     ...common,
     success: true,
-    durationMs: result?.metrics?.totalDurationMs ?? timeline.reduce((sum, entry) => sum + (entry.durationMs || 0), 0),
+    startedAt: Number.isFinite(entry.timestamp) ? entry.timestamp : null,
+    completedAt: Number.isFinite(entry.completedAt) ? entry.completedAt : null,
+    durationMs: wallDuration,
+    computeDurationMs: computeDuration || null,
     peakMemoryBytes: result?.metrics?.peakMemoryBytes ?? null,
     timeline,
   })
@@ -765,24 +808,60 @@ const perfStageLabelMap = {
   'render-three': 'Three.js 网格',
   'collect-mesh': 'TypedArray 拷贝',
   'three:rebuildModel': '场景装配',
+  'layers:update-composite': 'Pixi 渲染',
+  'layers:pixi-init': 'Pixi 初始化',
+  'drill:passthrough': '钻孔占位',
 }
 const resolvePerfStageLabel = (value) => perfStageLabelMap[value] ?? value
+const computeStageEndTimestamp = (timestamp) => {
+  if (!Number.isFinite(timestamp)) return null
+  return timestamp
+}
+const deriveSessionEndTimestamp = () => {
+  let latest = Number.isFinite(pipelinePerfSession.completedAt) ? pipelinePerfSession.completedAt : 0
+  const considerTimestamp = (timestamp) => {
+    const end = computeStageEndTimestamp(timestamp)
+    if (end != null) latest = Math.max(latest, end)
+  }
+  pipelinePerfSession.stages.forEach((stage) => considerTimestamp(stage.timestamp))
+  pipelinePerfSession.layerStages.forEach((stage) => considerTimestamp(stage.timestamp))
+  pipelinePerfSession.viewerStages.forEach((stage) => considerTimestamp(stage.timestamp))
+  pipelinePerfSession.workerJobs.forEach((job) => {
+    if (Number.isFinite(job.completedAt)) {
+      considerTimestamp(job.completedAt)
+      return
+    }
+    if (Number.isFinite(job.startedAt) && Number.isFinite(job.durationMs)) {
+      considerTimestamp(job.startedAt + job.durationMs)
+    }
+  })
+  return latest || null
+}
 const pipelinePerfSummary = computed(() => {
   const totalVertices = pipelinePerfSession.workerJobs.reduce((sum, job) => sum + (job.vertexCount || 0), 0)
   const peakWorkerMemory = pipelinePerfSession.workerJobs.reduce(
     (max, job) => Math.max(max, job.peakMemoryBytes ?? 0),
     0
   )
-  const completedAt = pipelinePerfSession.completedAt || Date.now()
-  const totalDurationMs = pipelinePerfSession.startedAt ? completedAt - pipelinePerfSession.startedAt : 0
+  const derivedCompletedAt = deriveSessionEndTimestamp() || Date.now()
+  const totalDurationMs = pipelinePerfSession.startedAt
+    ? Math.max(0, derivedCompletedAt - pipelinePerfSession.startedAt)
+    : 0
+  const expectedWorkerJobs = Number.isFinite(pipelinePerfSession.expectedWorkerJobs)
+    ? pipelinePerfSession.expectedWorkerJobs
+    : pipelinePerfSession.workerJobs.length
+  const completedWorkerJobs = Math.min(
+    expectedWorkerJobs,
+    pipelinePerfSession.completedWorkerJobs ?? pipelinePerfSession.workerJobs.length
+  )
   return {
     totalVertices,
     peakWorkerMemoryBytes: peakWorkerMemory || null,
     totalDurationMs,
     startedAt: pipelinePerfSession.startedAt,
     workerJobCount: pipelinePerfSession.workerJobs.length,
-    expectedWorkerJobs: pipelinePerfSession.expectedWorkerJobs,
-    completedWorkerJobs: pipelinePerfSession.completedWorkerJobs,
+    expectedWorkerJobs,
+    completedWorkerJobs,
   }
 })
 const workerPerfRows = computed(() =>
@@ -799,95 +878,58 @@ const openPerfModal = () => {
 const closePerfModal = () => {
   perfModalOpen.value = false
 }
-const buildPerfMarkdown = () => {
-  if (!hasPerfData.value) return ''
-  const summary = pipelinePerfSummary.value
-  const lines = []
-  lines.push('# PCB 3D 性能报告')
-  lines.push('')
-  lines.push(`- 来源：${perfSourceLabel.value}`)
-  lines.push(`- 会话 ID：${pipelinePerfSession.id}`)
-  lines.push(`- 开始：${formatPerfTimestamp(summary.startedAt)}`)
-  lines.push(`- 导出：${formatPerfTimestamp(Date.now())}`)
-  if (pipelinePerfSession.meta?.fileName) {
-    lines.push(`- 文件：${pipelinePerfSession.meta.fileName}`)
-  }
-  if (pipelinePerfSession.meta?.fileSize) {
-    lines.push(`- 文件大小：${formatPerfMemory(pipelinePerfSession.meta.fileSize)}`)
-  }
-  lines.push('')
-  lines.push('## 汇总')
-  lines.push('')
-  lines.push(`- 总耗时：${formatPerfDuration(summary.totalDurationMs)}`)
-  lines.push(
-    `- Worker：${summary.completedWorkerJobs}/${summary.expectedWorkerJobs} · 顶点总数：${summary.totalVertices.toLocaleString()}`
-  )
-  lines.push(`- Worker 峰值内存：${formatPerfMemory(summary.peakWorkerMemoryBytes)}`)
-  lines.push('')
-  if (pipelinePerfSession.stages.length) {
-    lines.push('## 前处理阶段')
-    lines.push('')
-    lines.push('| 阶段 | 耗时 | Δ内存 | 结束内存 |')
-    lines.push('| --- | --- | --- | --- |')
-    pipelinePerfSession.stages.forEach((stage) => {
-      lines.push(
-        `| ${formatPerfPhase(stage.phase)} | ${formatPerfDuration(stage.durationMs)} | ${formatPerfMemory(stage.memoryDeltaBytes)} | ${formatPerfMemory(stage.memoryEndUsedBytes)} |`
-      )
-    })
-    lines.push('')
-  }
-  if (pipelinePerfSession.workerJobs.length) {
-    lines.push('## Worker 阶段')
-    lines.push('')
-    lines.push('| 图层 | 耗时 | 顶点 | 块数 | 峰值内存 | 结果 |')
-    lines.push('| --- | --- | --- | --- | --- | --- |')
-    pipelinePerfSession.workerJobs.forEach((job) => {
-      lines.push(
-        `| ${job.label} | ${formatPerfDuration(job.durationMs)} | ${job.vertexCount?.toLocaleString?.() ?? '—'} | ${job.chunkCount ?? '—'} | ${formatPerfMemory(job.peakMemoryBytes)} | ${
-          job.success ? '成功' : `失败：${job.errorMessage || 'unknown'}`
-        } |`
-      )
-    })
-    pipelinePerfSession.workerJobs.forEach((job) => {
-      if (!job.timeline?.length) return
-      lines.push('')
-      lines.push(`### Worker 细分 - ${job.label}`)
-      lines.push('')
-      lines.push('| 子阶段 | 耗时 | Δ内存 |')
-      lines.push('| --- | --- | --- |')
-      job.timeline.forEach((stage) => {
-        lines.push(
-          `| ${resolvePerfStageLabel(stage.name)} | ${formatPerfDuration(stage.durationMs)} | ${formatPerfMemory(stage.memoryDeltaBytes)} |`
-        )
-      })
-    })
-    lines.push('')
-  }
-  if (pipelinePerfSession.viewerStages.length) {
-    lines.push('## 3D 场景装配')
-    lines.push('')
-    lines.push('| 阶段 | 耗时 | 层数 | 顶点 | Δ内存 |')
-    lines.push('| --- | --- | --- | --- | --- |')
-    pipelinePerfSession.viewerStages.forEach((entry) => {
-      const layerCount = entry.meta?.layerCount ?? '—'
-      const vertexCount =
-        entry.meta?.vertexCount != null ? entry.meta.vertexCount.toLocaleString() : '—'
-      lines.push(
-        `| ${resolvePerfStageLabel(entry.stage)} | ${formatPerfDuration(entry.durationMs)} | ${layerCount} | ${vertexCount} | ${formatPerfMemory(entry.memoryDeltaBytes)} |`
-      )
-    })
-    lines.push('')
-  }
-  lines.push('> 由 GerberViewer 性能监测导出')
-  return lines.join('\n')
+const cloneStageEntry = (stage) => {
+  if (!stage) return null
+  const base = { ...stage }
+  if (stage.meta) base.meta = { ...stage.meta }
+  return base
 }
-const exportPerfMarkdown = () => {
+const cloneWorkerJob = (job) => {
+  if (!job) return null
+  return {
+    ...job,
+    timeline: Array.isArray(job.timeline)
+      ? job.timeline.map((entry) => {
+          const cloned = { ...entry }
+          if (entry?.meta) cloned.meta = { ...entry.meta }
+          return cloned
+        })
+      : [],
+  }
+}
+const buildPerfReportJson = () => {
+  if (!hasPerfData.value) return null
+  const summary = pipelinePerfSummary.value
+  const payload = {
+    sessionId: pipelinePerfSession.id,
+    source: pipelinePerfSession.source,
+    startedAt: pipelinePerfSession.startedAt,
+    completedAt: pipelinePerfSession.completedAt || null,
+    exportedAt: Date.now(),
+    meta: pipelinePerfSession.meta ? { ...pipelinePerfSession.meta } : {},
+    summary: {
+      totalDurationMs: summary.totalDurationMs,
+      totalVertices: summary.totalVertices,
+      peakWorkerMemoryBytes: summary.peakWorkerMemoryBytes,
+      workerJobs: {
+        completed: summary.completedWorkerJobs,
+        expected: summary.expectedWorkerJobs,
+      },
+    },
+    tracespaceStages: pipelinePerfSession.stages.map((stage) => cloneStageEntry(stage)),
+    layerPreviewStages: pipelinePerfSession.layerStages.map((stage) => cloneStageEntry(stage)),
+    workerJobs: pipelinePerfSession.workerJobs.map((job) => cloneWorkerJob(job)),
+    viewerStages: pipelinePerfSession.viewerStages.map((stage) => cloneStageEntry(stage)),
+  }
+  return JSON.stringify(payload, null, 2)
+}
+const exportPerfJson = () => {
   if (!hasPerfData.value) return
-  const markdown = buildPerfMarkdown()
-  if (!markdown) return
-  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' })
+  const json = buildPerfReportJson()
+  if (!json) return
+  const blob = new Blob([json], { type: 'application/json;charset=utf-8' })
   const timestamp = new Date().toISOString().replace(/[:\\.]/g, '-')
-  const filename = `pcb-perf-report-${pipelinePerfSession.id || 'session'}-${timestamp}.md`
+  const filename = `pcb-perf-report-${pipelinePerfSession.id || 'session'}-${timestamp}.json`
   triggerFileDownload(blob, filename)
 }
 const enablePerfLogs = import.meta.env?.DEV ?? false
@@ -1435,6 +1477,21 @@ const handlePcb3dLoading = (loading) => { viewerLoading.value = loading }
 const handleLayerPreviewLoading = (loading) => { isLayerRenderLoading.value = loading }
 const handlePixiDebugUpdate = (payload) => {
   pixiLayerDebug.value = Array.isArray(payload) ? payload : []
+}
+const handleLayerPerfEvent = (payload) => {
+  if (!payload || !pipelinePerfSession.id) return
+  pipelinePerfSession.layerStages.push({
+    id: `${pipelinePerfSession.id}-layer-${pipelinePerfSession.layerStages.length + 1}`,
+    stage: payload.stage,
+    durationMs: Number.isFinite(payload.durationMs) ? Number(payload.durationMs.toFixed(2)) : null,
+    memoryStartUsedBytes: payload.memoryStart?.usedBytes ?? null,
+    memoryEndUsedBytes: payload.memoryEnd?.usedBytes ?? null,
+    memoryDeltaBytes:
+      payload.memoryDeltaBytes ?? computeMemoryDelta(payload.memoryStart, payload.memoryEnd),
+    meta: payload.meta ?? {},
+    timestamp: payload.timestamp ?? Date.now(),
+  })
+  finalizePerfSessionIfIdle()
 }
 const handleViewerPerfEvent = (payload) => {
   if (!payload || !pipelinePerfSession.id) return

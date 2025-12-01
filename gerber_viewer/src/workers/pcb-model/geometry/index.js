@@ -33,12 +33,7 @@ const reportedUnionFailures = new Set()
 
 const normalizeGeometry = geometry => {
   if (!geometry) return null
-  let result = geometry
-  if (result.index) {
-    const nonIndexed = result.toNonIndexed()
-    geometry.dispose()
-    result = nonIndexed
-  }
+  const result = geometry
   const position = result.getAttribute('position')
   if (!position) {
     console.warn('[pcbModel] Geometry missing position attribute')
@@ -367,11 +362,13 @@ const ringToPath = ring => {
   return path
 }
 
-const polygonToShape = polygon => {
+const polygonToShape = (polygon, {skipNormalization = false} = {}) => {
   if (!Array.isArray(polygon) || polygon.length === 0) return null
-  const normalized = polygon
-    .map(ring => normalizeRing(ring))
-    .filter(Boolean)
+  const normalized = skipNormalization
+    ? polygon
+    : polygon
+        .map(ring => normalizeRing(ring))
+        .filter(Boolean)
   if (normalized.length === 0) return null
   const outer = ringToShape(normalized[0])
   if (!outer) return null
@@ -385,11 +382,11 @@ const polygonToShape = polygon => {
   return outer
 }
 
-const multiPolygonToShapes = multiPolygon => {
+const multiPolygonToShapes = (multiPolygon, options = {}) => {
   if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) return []
   const shapes = []
   multiPolygon.forEach(polygon => {
-    const shape = polygonToShape(polygon)
+    const shape = polygonToShape(polygon, options)
     if (shape) shapes.push(shape)
   })
   return shapes
@@ -914,13 +911,13 @@ const buildPlanarLayerGeometry = (
 
   const emitChunkPolygons = chunk => {
     const finalPolygon = chunk.multiPolygon ?? buildChunkMultiPolygon(chunk)
-    const shapes = multiPolygonToShapes(finalPolygon)
-    shapes.forEach(shape => {
-      const geometry = new THREE.ShapeGeometry(shape)
-      geometry.deleteAttribute('uv')
-      geometry.translate(0, 0, -PLANE_THICKNESS / 2)
-      planarEntries.push({geometry})
-    })
+    if (!finalPolygon) return
+    const shapes = multiPolygonToShapes(finalPolygon, {skipNormalization: true})
+    if (!shapes.length) return
+    const geometry = new THREE.ShapeGeometry(shapes)
+    geometry.deleteAttribute('uv')
+    geometry.translate(0, 0, -PLANE_THICKNESS / 2)
+    planarEntries.push({geometry})
   }
 
   initialDarkPolygons.forEach(entry => applyDarkPolygon(entry.polygon, entry.info))

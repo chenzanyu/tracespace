@@ -192,6 +192,15 @@
           @exit-measurement="measurementActive = false" @loading-change="handleLayerPreviewLoading"
           @debug-update="handlePixiDebugUpdate" />
 
+        <div v-if="activeView === 'layers' && showLayerPreviewLoading"
+          class="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 bg-black/50 text-white pointer-events-none">
+          <div class="loading-spinner"></div>
+          <div class="text-center space-y-1">
+            <p class="text-sm tracking-wide uppercase text-white/70">loading</p>
+            <p class="text-base font-semibold">层叠预览准备中…</p>
+          </div>
+        </div>
+
         <!-- 3D 视图 -->
         <Pcb3dPreview ref="pcb3dRef" v-show="activeView === '3d'" :model-data="pcb3dModel" :thickness="boardThicknessUnits"
           :active="activeView === '3d'" :container-width="previewContainerWidth"
@@ -202,6 +211,15 @@
           :fitPadding="1.55"
           @loading-change="handlePcb3dLoading"
           @perf-stats="handleViewerPerfEvent" />
+
+        <div v-if="activeView === '3d' && showPcb3dPreviewLoading"
+          class="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 bg-black/50 text-white pointer-events-none">
+          <div class="loading-spinner"></div>
+          <div class="text-center space-y-1">
+            <p class="text-sm tracking-wide uppercase text-white/70">loading</p>
+            <p class="text-base font-semibold">3D 预览生成中…</p>
+          </div>
+        </div>
       </section>
     </div>
 
@@ -383,14 +401,6 @@
       </div>
     </div>
 
-    <div v-if="showLoadingOverlay"
-      class="fixed inset-0 z-[80] flex flex-col items-center justify-center gap-6 bg-black/60 backdrop-blur-sm text-white">
-      <div class="loading-spinner"></div>
-      <div class="text-center space-y-1">
-        <p class="text-sm tracking-wide uppercase text-white/70">loading</p>
-        <p class="text-lg font-semibold">{{ loadingMessage }}</p>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -1070,8 +1080,8 @@ const layerPanelVisible = computed(() => activeView.value === 'layers' && isLaye
 const topControlsOffset = computed(() => ({
   left: layerPanelVisible.value ? 'calc(20rem + 1rem)' : '1rem',
 }))
-const showLoadingOverlay = computed(() => isLayerLoading.value || isLayerRenderLoading.value || isPcb3dLoading.value)
-const loadingMessage = computed(() => '加载中')
+const showLayerPreviewLoading = computed(() => isLayerLoading.value || isLayerRenderLoading.value)
+const showPcb3dPreviewLoading = computed(() => isLayerLoading.value || isPcb3dLoading.value)
 
 // 设置面板
 const isSettingsOpen = ref(false)
@@ -1334,6 +1344,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
   pcbModelJobs.pending = 0
   updateWorkerLoading()
   if (!Array.isArray(parsedLayers) || parsedLayers.length === 0) return
+  const plotTreesById = plotResult?.plotTreesById ?? null
   const boardRegions = Array.isArray(boardOutline?.regions) ? boardOutline.regions : undefined
   const boardBounds = Array.isArray(boardOutline?.bounds) ? boardOutline.bounds : undefined
   const boardPolygons = Array.isArray(boardOutline?.polygons) ? boardOutline.polygons : undefined
@@ -1359,6 +1370,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
     queueWorkerJob({
       layerId: layer.id,
       parseTree: layer.parseTree,
+      plotTree: plotTreesById?.[layer.id],
       type: layer.type,
       side: layer.side ?? null,
       color: getLayerColor(layer.id, layer.type),
@@ -1380,6 +1392,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
     queueWorkerJob({
       layerId: '__synthetic-board-outline__',
       parseTree: null,
+      plotTree: null,
       type: 'outline',
       side: 'all',
       color: getLayerColor('__synthetic-board-outline__', 'outline'),
@@ -1456,6 +1469,8 @@ const resetPcb3dView = async () => {
 // 上传处理
 const handleUploadFile = async (file) => {
   isLayerLoading.value = true
+  currentStatusIndex.value = 1
+  activeView.value = 'layers'
   startPerfSession('upload', {
     fileName: file?.name ?? null,
     fileSize: file?.size ?? null,
@@ -1488,11 +1503,11 @@ const handleUploadFile = async (file) => {
       boardWidthMm: boardWidthMm.value,
       boardHeightMm: boardHeightMm.value,
     })
-    currentStatusIndex.value = 1
     isLayerPanelOpen.value = false
     recenterSignal.value += 1
   } catch (error) {
     console.error('[GerberViewer] handleUploadFile failed', error)
+    currentStatusIndex.value = 0
     throw error
   } finally {
     isLayerLoading.value = false

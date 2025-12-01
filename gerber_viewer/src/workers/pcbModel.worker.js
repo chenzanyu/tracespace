@@ -150,6 +150,7 @@ const buildLayerPayload = payload => {
   try {
     const {
       parseTree,
+      plotTree,
       color,
       drillShapes,
       boardShapeRegions,
@@ -189,10 +190,16 @@ const buildLayerPayload = payload => {
       !hasSyntheticOutline
         ? measureWorkerStage(metrics, 'clip-polygons', () => buildClipPolygons(boardClipRegions))
         : null
+    const providedPlotTree = !hasSyntheticOutline && plotTree ? plotTree : null
     const plottedTree = hasSyntheticOutline
       ? { children: syntheticOutlineRegions }
-      : measureWorkerStage(metrics, 'plot', () => plot(parseTree))
-    const plotStage = hasSyntheticOutline ? null : metrics.timeline[metrics.timeline.length - 1]
+      : providedPlotTree
+        ? providedPlotTree
+        : measureWorkerStage(metrics, 'plot', () => plot(parseTree))
+    const plotStage =
+      hasSyntheticOutline || providedPlotTree
+        ? null
+        : metrics.timeline[metrics.timeline.length - 1]
     const imageTree = hasSyntheticOutline
       ? plottedTree
       : measureWorkerStage(metrics, 'filter-image-tree', () =>
@@ -206,11 +213,18 @@ const buildLayerPayload = payload => {
       syntheticOutline: hasSyntheticOutline,
     })
     if (!hasSyntheticOutline) {
-      logWorker('plot-complete', {
-        ...contextBase,
-        childCount: imageTree?.children?.length ?? 0,
-        durationMs: plotStage?.durationMs ?? null,
-      })
+      if (providedPlotTree) {
+        logWorker('plot-reused', {
+          ...contextBase,
+          childCount: imageTree?.children?.length ?? 0,
+        })
+      } else {
+        logWorker('plot-complete', {
+          ...contextBase,
+          childCount: imageTree?.children?.length ?? 0,
+          durationMs: plotStage?.durationMs ?? null,
+        })
+      }
     } else {
       logWorker('plot-skipped-synthetic-outline', {
         ...contextBase,

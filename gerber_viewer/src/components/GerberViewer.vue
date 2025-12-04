@@ -535,8 +535,8 @@ const defaultPcb3dVisibility = Object.freeze({
 })
 const pcb3dVisibility = reactive({ ...defaultPcb3dVisibility })
 const defaultLayerSimplifyTolerancesMm = Object.freeze({
-  copper: 0.01,
-  soldermask: 0.01,
+  copper: 0.02,
+  soldermask: 0.02,
   silkscreen: 0.01,
   drill: 0.01,
   outline: 0.01,

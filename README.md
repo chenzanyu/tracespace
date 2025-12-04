@@ -1,134 +1,85 @@
-<div align="center">
-  <h1>tracespace</h1>
-  <p>Printed circuit board visualization tools for JavaScript</p>
-  <p>
-    <a title="CI Status" href="https://github.com/tracespace/tracespace/actions"><img src="https://img.shields.io/github/actions/workflow/status/tracespace/tracespace/ci.yml?branch=v5&style=flat-square"></a>
-    <a title="Code Coverage" href="https://codecov.io/gh/tracespace/tracespace/branch/v5"><img src="https://img.shields.io/codecov/c/github/tracespace/tracespace/v5?style=flat-square"></a>
-    <a title="License" href="https://github.com/tracespace/tracespace/blob/main/LICENSE"><img src="https://img.shields.io/github/license/tracespace/tracespace?style=flat-square"></a>
-    <a title="Chat room" href="https://gitter.im/tracespace/Lobby"><img src="https://img.shields.io/gitter/room/tracespace/tracespace?style=flat-square"></a>
-  </p>
-  <p>
-    <a href="https://tracespace.io">https://tracespace.io</a>
-  </p>
-</div>
+# gerber_viewer 组件文档
 
-> [!IMPORTANT]
-> The tracespace project is on an ✨indefinite hiatus✨, because I ([@mcous](https://github.com/mcous)):
->
-> - Haven't designed a PCB myself in years, so it's really hard to maintain my interest.
-> - No longer think JS nor SVG are the correct tools for the job of rendering PCBs on the web.
-> - Don't get paid to work on tracespace, nor do I have the energy/desire to seek out such sponsorship.
->
-> For these reasons, tracespace v5 is likely dead in the water, especially considering I've soured on the fundamental technical approach. I will not be taking tracespace v4 offline, but I will not be opening nor accepting new PRs for v5. See the [main branch][] for the source code for the v4.
->
-> Since I'd like to jealously guard my ability to come back to this project at a future date with a wildly different approach, I am not interested in seeking new maintainers nor passing this project off to anyone else. Please fork the project if you're interested in taking tracespace forward in your own way! I'm happy to link to any forks here.
+此文档仅涵盖 `gerber_viewer` 中暴露的两个核心 Vue 组件：`<GerberViewer>` 与 `<Pcb3dPreview>`。示例代码均基于 `setup` 语法糖，所有尺寸单位默认使用 **毫米**。
 
-## Work in progress
+## `<GerberViewer>`
 
-**Welcome to tracespace v5!** This version of tracespace is still in development, so documentation may not be accurate and package APIs may change without warning.
+| 参数名 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `boardThicknessMm` | `Number` | `1.6` | 可选，指定整块 PCB 的物理厚度（毫米）。若未提供，则使用默认 1.6 mm；该值会影响 3D 视图中各层的厚度缩放。 |
 
-See the [main branch][] for the current v4 release.
+### 用法
 
-[main branch]: https://github.com/tracespace/tracespace/tree/main
+```vue
+<template>
+  <GerberViewer :board-thickness-mm="2.0" />
+</template>
 
-## Packages
+<script setup>
+import GerberViewer from './gerber_viewer/src/components/GerberViewer.vue'
+</script>
+```
 
-| package                                             |                                 | description                                                                                 |
-| --------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------- |
-| [![cli version][]][cli npm]                         | [@tracespace/cli][]             | Use Gerber/drill files to create an SVG render of a finished PCB from the command line.     |
-| [![core version][]][core npm]                       | [@tracespace/core][]            | Use Gerber/drill files to create an SVG render of a finished PCB in Node.js or the browser. |
-| [![fixtures version][]][fixtures npm]               | [@tracespace/fixtures][]        | Sample Gerber/drill files for use as test fixtures.                                         |
-| [![identify-layers version][]][identify-layers npm] | [@tracespace/identify-layers][] | Try to guess Gerber files' layer types based on filenames.                                  |
-| [![parser version][]][parser npm]                   | [@tracespace/parser][]          | Parse Gerber/drill files into abstract syntax trees.                                        |
-| [![plotter version][]][plotter npm]                 | [@tracespace/plotter][]         | Plot @tracespace/parser ASTs into image trees.                                              |
-| [![renderer version][]][renderer npm]               | [@tracespace/renderer][]        | Render @tracespace/plotter image trees as SVGs                                              |
-| [![xml-id version][]][xml-id npm]                   | [@tracespace/xml-id][]          | XML element ID generation and sanitation utilities.                                         |
+### 注意事项
 
-[@tracespace/cli]: ./packages/cli
-[@tracespace/core]: ./packages/parser
-[@tracespace/fixtures]: ./packages/fixtures
-[@tracespace/identify-layers]: ./packages/identify-layers
-[@tracespace/parser]: ./packages/parser
-[@tracespace/plotter]: ./packages/plotter
-[@tracespace/renderer]: ./packages/renderer
-[@tracespace/xml-id]: ./packages/xml-id
-[cli npm]: https://www.npmjs.com/package/@tracespace/cli/v/next
-[core npm]: https://www.npmjs.com/package/@tracespace/core/v/next
-[fixtures npm]: https://www.npmjs.com/package/@tracespace/fixtures/v/next
-[identify-layers npm]: https://www.npmjs.com/package/@tracespace/identify-layers/v/next
-[parser npm]: https://www.npmjs.com/package/@tracespace/parser/v/next
-[plotter npm]: https://www.npmjs.com/package/@tracespace/plotter/v/next
-[renderer npm]: https://www.npmjs.com/package/@tracespace/renderer/v/next
-[xml-id npm]: https://www.npmjs.com/package/@tracespace/xml-id/v/next
-[cli version]: https://img.shields.io/npm/v/@tracespace/cli/next?style=flat-square
-[core version]: https://img.shields.io/npm/v/@tracespace/core/next?style=flat-square
-[fixtures version]: https://img.shields.io/npm/v/@tracespace/fixtures/next?style=flat-square
-[identify-layers version]: https://img.shields.io/npm/v/@tracespace/identify-layers/next?style=flat-square
-[parser version]: https://img.shields.io/npm/v/@tracespace/parser/next?style=flat-square
-[plotter version]: https://img.shields.io/npm/v/@tracespace/plotter/next?style=flat-square
-[renderer version]: https://img.shields.io/npm/v/@tracespace/renderer/next?style=flat-square
-[xml-id version]: https://img.shields.io/npm/v/@tracespace/xml-id/next?style=flat-square
+- 组件内置上传、图层排序、Pixi/Three 渲染等完整流程；无需手工与 worker 通讯。
+- 会通过 `perf-stats`、`loading-change` 等事件在内部流转性能数据，不建议直接监听。若确有需要，可参考源码实现。
+- 层的顶点简化容差通过 `<Pcb3dPreview>` 控制（参见下文）。
 
-## Roadmap
+## `<Pcb3dPreview>`
 
-[I][] work on tracespace in my free time, so this roadmap should be taken with several grains of salt. While the new version is in development, pre-production versions of libraries will be periodically released under the `next` tag in npm.
+| 参数名 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `modelData` | `Object` | `{ layers: [], version: 0 }` | PCB 3D 模型数据。`layers` 为 worker 产出的 mesh 列表。 |
+| `thickness` | `Number` | `1.6` | 核心层厚度，单位与 `modelData` 的坐标系一致（通常是 Gerber 单位）。 |
+| `borderColor` | `String` | `rgb(255, 235, 150)` | 板边及裸露铜色。 |
+| `coreColor` | `String` | `rgb(234, 226, 118)` | 板芯颜色。 |
+| `layerColors` | `Object` | `{}` | 覆盖 `copper / soldermask / silkscreen / solderpaste` 等层的默认颜色。 |
+| `layerVisibility` | `Object` | `{}` | 控制各层是否可见（布尔值）。 |
+| `backgroundColor` | `String` | `#0f1220` | Three.js 场景背景色。 |
+| `containerWidth` / `containerHeight` | `String` | `100%` | 容器宽高，可用 CSS 长度。 |
+| `displayWidth` / `displayHeight` | `Number` | `0` | 外部布局系统传入的实际像素尺寸；为 `0` 时自动测量。 |
+| `explosionActive` | `Boolean` | `false` | 是否启用层间爆炸视图。 |
+| `fitPadding` | `Number` | `1.1` | 相机自适应时的边距放大倍数。 |
+| `fitLerpMs` | `Number` | `150` | 相机自动平移的插值时长，单位毫秒。 |
+| `explosionSpacingMultiplier` | `Number` | `4` | 爆炸视图的层间距系数。 |
+| `active` | `Boolean` | `true` | 控制组件是否渲染（`false` 时释放 GPU 资源）。 |
+| `layerSimplifyTolerancesMm` | `Object` | `{ copper: 0.5, soldermask: 0.5, silkscreen: 0.5, drill: 0.5, outline: 0.5 }` | **新增**。以毫米表示的顶点简化容差。键名为层类型，若未提供则使用 `default` 或内建 0.5 mm。渲染前会按 Gerber 坐标单位自动换算为内部容差。数值越大，网格越粗糙但生成速度更快。 |
 
-- [x] New build tools based on [vite][] and [TypeScript][]
-- [x] Create [@tracespace/parser][] package to generate [unist][] abstract syntax trees
-  - Replaces gerber-parser from tracespace v4
-- [x] Create [@tracespace/plotter][] package convert ASTs to image trees
-  - Replaces gerber-plotter from tracespace v4
-- [x] Create [@tracespace/renderer][] package convert image trees to [hast][] SVG trees
-  - Replaces gerber-to-svg from tracespace v4
-- [x] Rename whats-that-gerber to [@tracespace/identify-layers][]
-- [x] Create [@tracespace/core][] package to hold the core render pipeline
-  - Replaces pcb-stackup and pcb-stackup-core from tracespace v4
-- [x] Rewrite [@tracespace/cli] to use new render pipeline
-- [ ] Rewrite <https://tracespace.io/view/> to use new render pipeline
-- [ ] Build documentation website for tracespace libraries
-- [ ] Ensure all important Gerber / drill features are supported
-- [ ] Release tracespace v5
+#### 事件
 
-[i]: https://github.com/mcous
-[vite]: https://vitejs.dev/
-[typescript]: https://www.typescriptlang.org/
-[unist]: https://unifiedjs.com/
-[hast]: https://github.com/syntax-tree/hast
+| 事件名 | 参数 | 说明 |
+| --- | --- | --- |
+| `loading-change` | `Boolean` | 渲染任务开始/结束。 |
+| `perf-stats` | `{ stage, durationMs, meta, ... }` | 输出 viewer 端性能采样。 |
 
-### Issues to fix
+### 用法示例
 
-The v5 release will attempt to fix / address the following open issues:
+```vue
+<template>
+  <Pcb3dPreview
+    :model-data="pcbModel"
+    :layer-simplify-tolerances-mm="{
+      copper: 0.05,
+      soldermask: 0.2,
+      silkscreen: 0.2,
+      drill: 0.02,
+      outline: 0.02,
+      default: 0.1
+    }"
+    :explosion-active="explode"
+  />
+</template>
 
-- [x] Handle disagreements between filename type vs parsed type ([#49][])
-- [x] Reduce number of `<use>` tags in SVG output ([#80][])
-- [x] Arc plotting should be more lenient ([#82][])
-- [x] Operation with non-existent tool should no-op with a warning ([#83][])
-- [x] Fails to detect units if format spec combined with units spec ([#234][])
-- [x] clipPath for outline breaks in Firefox if outline has clear layers ([#302][])
-- [x] gerberParser.parseSync clobbers filetype option ([#306][])
-- [x] Gerber file starting with newline incorrectly identified as drill file ([#307][])
-- [x] Generate consistent document size for all layers. ([#324][])
-- [ ] G93 code in drill file rendered as drilled hole ([#353][])
-- [x] Allow soldermask layer to cover vias in board render ([#399][])
+<script setup>
+import Pcb3dPreview from './gerber_viewer/src/components/Pcb3dPreview.vue'
+const pcbModel = reactive({ layers: [], version: 0 })
+const explode = ref(false)
+</script>
+```
 
-[#49]: https://github.com/tracespace/tracespace/issues/49
-[#80]: https://github.com/tracespace/tracespace/issues/80
-[#82]: https://github.com/tracespace/tracespace/issues/82
-[#83]: https://github.com/tracespace/tracespace/issues/83
-[#234]: https://github.com/tracespace/tracespace/issues/234
-[#302]: https://github.com/tracespace/tracespace/issues/302
-[#306]: https://github.com/tracespace/tracespace/issues/306
-[#307]: https://github.com/tracespace/tracespace/issues/307
-[#324]: https://github.com/tracespace/tracespace/issues/324
-[#353]: https://github.com/tracespace/tracespace/issues/353
-[#399]: https://github.com/tracespace/tracespace/issues/399
+### 注意事项
 
-## tracespace in the wild
-
-- [tracespace.io/view][tracespace-view] - A Gerber viewer powered by the tracespace libraries
-- [kitspace.org][kitspace] - An electronics project sharing site with links to easily buy the required parts
-- [OpenHardware.io][openhardware] - A social site around open source hardware. Enables authors to sell and manufacture their boards.
-
-[tracespace-view]: https://tracespace.io/view
-[kitspace]: https://kitspace.org
-[openhardware]: https://www.openhardware.io
+- 容差越大，布线、文字等细节越容易失真；推荐铜层/钻孔/轮廓保持 0.005 mm 以下，阻焊/丝印可酌情增大。
+- `modelData.layers` 来自 worker 线程，更新 `version` 可强制 Pcb3dPreview 重建 Three.js 场景。
+- 由于 renderer 默认开启抗锯齿和多光源，当顶点数超过数十万时建议在非活动状态下将 `active` 设为 `false` 以避免 GPU 长时间占用。 

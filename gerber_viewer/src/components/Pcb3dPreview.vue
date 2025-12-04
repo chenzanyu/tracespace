@@ -30,6 +30,16 @@ const props = defineProps({
   fitLerpMs: { type: Number, default: 150 },
   explosionSpacingMultiplier: { type: Number, default: 4 },
   active: { type: Boolean, default: true },
+  layerSimplifyTolerancesMm: {
+    type: Object,
+    default: () => ({
+      copper: 0.5,
+      soldermask: 0.5,
+      silkscreen: 0.5,
+      drill: 0.5,
+      outline: 0.5,
+    }),
+  },
 })
 
 const emit = defineEmits(['loading-change', 'perf-stats'])

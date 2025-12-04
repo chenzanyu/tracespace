@@ -208,6 +208,7 @@
           :display-height="previewSize.height" :explosion-active="explosionActive"
           :explosion-spacing-multiplier="explosionSpacing" :border-color="pcb3dColors.core"
           :core-color="pcb3dColors.core" :layer-colors="pcb3dColors" :layer-visibility="pcb3dVisibility"
+          :layer-simplify-tolerances-mm="layerSimplifyTolerancesMm"
           :fitPadding="1.55"
           @loading-change="handlePcb3dLoading"
           @perf-stats="handleViewerPerfEvent" />
@@ -503,6 +504,18 @@ const logBoardScaleSnapshot = (source) => {
     console.warn('[GerberViewer] Failed to log board scale snapshot', error)
   }
 }
+const buildSimplifyTolerancePayload = () => {
+  const mmPerUnit = Number(unitMmPerUnit.value)
+  const unitScale = Number.isFinite(mmPerUnit) && mmPerUnit > 0 ? mmPerUnit : 1
+  const payload = {}
+  Object.entries(layerSimplifyTolerancesMm).forEach(([key, value]) => {
+    const mmValue = Number(value)
+    if (Number.isFinite(mmValue) && mmValue >= 0) {
+      payload[key] = mmValue / unitScale
+    }
+  })
+  return payload
+}
 const pcb3dModel = reactive({
   layers: [],
   version: 0,
@@ -521,6 +534,14 @@ const defaultPcb3dVisibility = Object.freeze({
   core: true,
 })
 const pcb3dVisibility = reactive({ ...defaultPcb3dVisibility })
+const defaultLayerSimplifyTolerancesMm = Object.freeze({
+  copper: 0.01,
+  soldermask: 0.01,
+  silkscreen: 0.01,
+  drill: 0.01,
+  outline: 0.01,
+})
+const layerSimplifyTolerancesMm = reactive({ ...defaultLayerSimplifyTolerancesMm })
 const pcb3dColorOptions = [
   { key: 'copper', label: '铜层', toggleable: true },
   { key: 'soldermask', label: '阻焊', toggleable: true },
@@ -1439,6 +1460,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
   const boardBounds = Array.isArray(boardOutline?.bounds) ? boardOutline.bounds : undefined
   const boardPolygons = Array.isArray(boardOutline?.polygons) ? boardOutline.polygons : undefined
   logBoardScaleSnapshot('buildPcbModelFromParsedLayers')
+  const simplifyTolerancePayload = buildSimplifyTolerancePayload()
   const drillLayers = parsedLayers.filter((layer) => {
     const type = String(layer?.type || '').toLowerCase()
     return type.includes('drill')
@@ -1470,6 +1492,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
       boardClipRegions: boardRegions,
       drillShapes,
       boardBounds,
+      simplifyTolerances: simplifyTolerancePayload,
     })
       .then((result) => {
         applyWorkerLayer(result)
@@ -1493,6 +1516,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
       drillShapes: drillShapePayload,
       boardBounds,
       syntheticOutlineRegions: boardRegions,
+      simplifyTolerances: simplifyTolerancePayload,
     })
       .then((result) => {
         applyWorkerLayer(result)

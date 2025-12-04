@@ -28,6 +28,7 @@ const PLANE_THICKNESS = 0.0005
 const SNAP_PRECISION = 1e7
 const RING_AREA_EPSILON = 1e-12
 const RING_POINT_EPSILON = 1e-8
+const SIMPLIFY_ABSOLUTE_TOLERANCE = 5e-4
 const SHAPE_SAMPLING_DIVISIONS = 16
 const reportedUnionFailures = new Set()
 
@@ -317,6 +318,100 @@ const normalizeRing = (ring) => {
 
 const vectorToPoint = vector => snapPoint([vector?.x, vector?.y])
 
+const pointSegmentDistance = (point, start, end) => {
+  const px = Number(point?.[0]) || 0
+  const py = Number(point?.[1]) || 0
+  const sx = Number(start?.[0]) || 0
+  const sy = Number(start?.[1]) || 0
+  const ex = Number(end?.[0]) || 0
+  const ey = Number(end?.[1]) || 0
+  const dx = ex - sx
+  const dy = ey - sy
+  if (Math.abs(dx) < POINT_TOLERANCE && Math.abs(dy) < POINT_TOLERANCE) {
+    return Math.sqrt((px - sx) ** 2 + (py - sy) ** 2)
+  }
+  const t = Math.max(0, Math.min(1, ((px - sx) * dx + (py - sy) * dy) / (dx * dx + dy * dy)))
+  const projX = sx + t * dx
+  const projY = sy + t * dy
+  return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2)
+}
+
+const simplifyPolylineDouglasPeucker = (points, tolerance) => {
+  if (!Array.isArray(points) || points.length < 2) return points ? points.slice() : []
+  const result = []
+  const stack = [[0, points.length - 1]]
+  const included = new Array(points.length).fill(false)
+  included[0] = true
+  included[points.length - 1] = true
+  while (stack.length) {
+    const [startIndex, endIndex] = stack.pop()
+    if (endIndex <= startIndex + 1) continue
+    const startPoint = points[startIndex]
+    const endPoint = points[endIndex]
+    let maxDistance = 0
+    let index = startIndex
+    for (let i = startIndex + 1; i < endIndex; i++) {
+      const distance = pointSegmentDistance(points[i], startPoint, endPoint)
+      if (distance > maxDistance) {
+        maxDistance = distance
+        index = i
+      }
+    }
+    if (maxDistance > tolerance && index > startIndex && index < endIndex) {
+      included[index] = true
+      stack.push([startIndex, index])
+      stack.push([index, endIndex])
+    }
+  }
+  for (let i = 0; i < points.length; i++) {
+    if (included[i]) result.push(points[i])
+  }
+  if (!included[points.length - 1]) {
+    result.push(points[points.length - 1])
+  }
+  return result
+}
+
+const simplifyRingWithTolerance = (ring, tolerance) => {
+  if (!Array.isArray(ring) || ring.length < 5) return ring
+  if (!Number.isFinite(tolerance) || tolerance <= 0) return ring
+  const openPoints = ring.slice(0, ring.length - 1)
+  if (openPoints.length < 3) return ring
+  const simplified = simplifyPolylineDouglasPeucker(openPoints, tolerance)
+  if (!simplified || simplified.length < 3) return ring
+  const closed = simplified.slice()
+  const first = simplified[0]
+  const last = simplified[simplified.length - 1]
+  if (!pointsClose(first, last, POINT_TOLERANCE)) {
+    closed.push([...first])
+  } else {
+    closed[closed.length - 1] = [...first]
+  }
+  return closed.length >= 4 ? closed : ring
+}
+
+const ringBounds = (ring) => {
+  if (!Array.isArray(ring) || ring.length === 0) return null
+  let minX = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  for (const point of ring) {
+    if (!Array.isArray(point)) continue
+    const x = Number(point[0])
+    const y = Number(point[1])
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    minX = Math.min(minX, x)
+    maxX = Math.max(maxX, x)
+    minY = Math.min(minY, y)
+    maxY = Math.max(maxY, y)
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return null
+  }
+  return {minX, maxX, minY, maxY}
+}
+
 const vectorsToRing = vectors => normalizeRing(vectors?.map(vectorToPoint))
 
 const shapeToMultiPolygon = (shape, divisions = SHAPE_SAMPLING_DIVISIONS) => {
@@ -418,20 +513,64 @@ const sanitizeMultiPolygon = value => {
         .map(ring => normalizeRing(ring))
         .filter(Boolean)
       return rings.length ? rings : null
-    })
+  })
     .filter(Boolean)
   return polygons.length ? polygons : null
 }
 
-const unionMultiPolygon = (existing, addition) => {
+const resolveLayerSimplifyTolerance = (layerType, toleranceMap) => {
+  const candidate =
+    toleranceMap && layerType && Number.isFinite(toleranceMap[layerType])
+      ? toleranceMap[layerType]
+      : null
+  if (Number.isFinite(candidate) && candidate >= 0) return candidate
+  if (toleranceMap && Number.isFinite(toleranceMap.default) && toleranceMap.default >= 0) {
+    return toleranceMap.default
+  }
+  return SIMPLIFY_ABSOLUTE_TOLERANCE
+}
+
+const simplifyMultiPolygonForLayer = (multiPolygon, layerType, toleranceMap = null) => {
+  const baseTolerance = resolveLayerSimplifyTolerance(layerType, toleranceMap)
+  if (!Number.isFinite(baseTolerance) || baseTolerance <= 0) {
+    return multiPolygon
+  }
+  if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) return multiPolygon
+  let changed = false
+  const simplifiedPolygons = multiPolygon.map(polygon => {
+    if (!Array.isArray(polygon) || polygon.length === 0) return polygon
+    const simplifiedRings = polygon.map(ring => {
+      if (!Array.isArray(ring) || ring.length < 10) return ring
+      const bounds = ringBounds(ring)
+      if (!bounds) return ring
+      const tolerance = baseTolerance
+      const simplified = simplifyRingWithTolerance(ring, tolerance)
+      if (simplified && simplified !== ring && simplified.length < ring.length) {
+        changed = true
+        return simplified
+      }
+      return ring
+    })
+    return simplifiedRings
+  })
+  if (!changed) return multiPolygon
+  return sanitizeMultiPolygon(simplifiedPolygons) || multiPolygon
+}
+
+const unionMultiPolygon = (existing, addition, stats = null) => {
   if (!addition || addition.length === 0) {
     return existing || null
   }
   if (!existing || existing.length === 0) {
     return addition || null
   }
+  const start = typeof performance !== 'undefined' ? performance.now() : null
   try {
     const result = polygonClipping.union(existing, addition)
+    if (start !== null && stats) {
+      stats.unionCount = (stats.unionCount || 0) + 1
+      stats.unionTime = (stats.unionTime || 0) + (performance.now() - start)
+    }
     return sanitizeMultiPolygon(result)
   } catch (error) {
     const message = error?.message || 'unknown'
@@ -447,11 +586,16 @@ const unionMultiPolygon = (existing, addition) => {
   }
 }
 
-const subtractMultiPolygon = (subject, removal) => {
+const subtractMultiPolygon = (subject, removal, stats = null) => {
   if (!subject || subject.length === 0) return null
   if (!removal || removal.length === 0) return cloneMultiPolygon(subject)
+  const start = typeof performance !== 'undefined' ? performance.now() : null
   try {
     const result = polygonClipping.difference(subject, removal)
+    if (start !== null && stats) {
+      stats.diffCount = (stats.diffCount || 0) + 1
+      stats.diffTime = (stats.diffTime || 0) + (performance.now() - start)
+    }
     return sanitizeMultiPolygon(result)
   } catch (error) {
     const message = error?.message || 'unknown'
@@ -495,13 +639,19 @@ const getMultiPolygonBounds = multiPolygon => {
   return bounds
 }
 
-const unionPolygonList = polygons => {
+const unionPolygonList = (polygons, stats = null) => {
   if (!Array.isArray(polygons) || polygons.length === 0) return null
   const valid = polygons.filter(Boolean)
   if (valid.length === 0) return null
   if (valid.length === 1) return valid[0]
+  const start = typeof performance !== 'undefined' ? performance.now() : null
   try {
-    return sanitizeMultiPolygon(polygonClipping.union(...valid))
+    const result = sanitizeMultiPolygon(polygonClipping.union(...valid))
+    if (start !== null && stats) {
+      stats.unionCount = (stats.unionCount || 0) + 1
+      stats.unionTime = (stats.unionTime || 0) + (performance.now() - start)
+    }
+    return result
   } catch (error) {
     const message = error?.message || 'unknown'
     if (!reportedUnionFailures.has(`list:${message}`)) {
@@ -672,7 +822,8 @@ export function renderThree(
   layerType = null,
   boardBounds = null,
   boardClipRegions = null,
-  boardShapePolygons = null
+  boardShapePolygons = null,
+  simplifyTolerances = null
 ) {
   if (!imageTree) {
     return new THREE.Group()
@@ -684,7 +835,8 @@ export function renderThree(
       drillTrees,
       boardShapeRegions,
       boardShapePolygons,
-      progress
+      progress,
+      simplifyTolerances
     )
   }
   return buildPlanarLayerGeometry(
@@ -696,7 +848,8 @@ export function renderThree(
     boardBounds,
     boardClipRegions,
     drillTrees,
-    boardShapePolygons
+    boardShapePolygons,
+    simplifyTolerances
   )
 }
 
@@ -709,7 +862,8 @@ const buildPlanarLayerGeometry = (
   boardBounds = null,
   boardClipRegions = null,
   drillTrees = null,
-  boardShapePolygons = null
+  boardShapePolygons = null,
+  simplifyTolerances = null
 ) => {
   const group = new THREE.Group()
   let current = 0
@@ -753,8 +907,9 @@ const buildPlanarLayerGeometry = (
 
   let currentChunk = createChunk()
 
-  const boardHolePolygon = buildBoardHolePolygon(boardShapePolygons, boardShapeRegions)
-  const boardHoleBounds = boardHolePolygon ? getMultiPolygonBounds(boardHolePolygon) : null
+let boardHolePolygon = buildBoardHolePolygon(boardShapePolygons, boardShapeRegions)
+boardHolePolygon = simplifyMultiPolygonForLayer(boardHolePolygon, 'outline', simplifyTolerances)
+const boardHoleBounds = boardHolePolygon ? getMultiPolygonBounds(boardHolePolygon) : null
 
   if (isSolderMaskLayer) {
     const regionInput =
@@ -879,7 +1034,7 @@ const buildPlanarLayerGeometry = (
     ).map(entry => entry.polygon)
     const clearUnion = unionPolygonList(relevantClears)
     if (clearUnion) {
-      result = subtractMultiPolygon(result, clearUnion)
+        result = subtractMultiPolygon(result, clearUnion)
       resultBounds = getMultiPolygonBounds(result)
     }
     if (result && drillHolePolygon) {
@@ -896,6 +1051,13 @@ const buildPlanarLayerGeometry = (
         !resultBounds || !boardHoleBounds || boundsOverlap(resultBounds, boardHoleBounds)
       if (shouldApplyBoardHole) {
         result = subtractMultiPolygon(result, boardHolePolygon)
+        resultBounds = getMultiPolygonBounds(result)
+      }
+    }
+    if (result) {
+      const simplifiedResult = simplifyMultiPolygonForLayer(result, layerType, simplifyTolerances)
+      if (simplifiedResult && simplifiedResult !== result) {
+        result = simplifiedResult
         resultBounds = getMultiPolygonBounds(result)
       }
     }
@@ -922,8 +1084,9 @@ const buildPlanarLayerGeometry = (
 
   initialDarkPolygons.forEach(entry => applyDarkPolygon(entry.polygon, entry.info))
 
-  const drillHolePolygon = drillTreesToMultiPolygon(drillTrees)
-  const drillHoleBounds = drillHolePolygon ? getMultiPolygonBounds(drillHolePolygon) : null
+let drillHolePolygon = drillTreesToMultiPolygon(drillTrees)
+drillHolePolygon = simplifyMultiPolygonForLayer(drillHolePolygon, 'drill', simplifyTolerances)
+const drillHoleBounds = drillHolePolygon ? getMultiPolygonBounds(drillHolePolygon) : null
 
   for (let index = 0; index < children.length; index++) {
     const element = children[index]
@@ -1047,20 +1210,32 @@ const buildPlanarLayerGeometry = (
 
   group.userData = group.userData || {}
   group.userData.planarDebug = planarDebug
-
   return group
 }
 
-const buildBoardGeometry = (imageTree, color, drillTrees, boardShapeRegions, boardShapePolygons, progress) => {
+const buildBoardGeometry = (
+  imageTree,
+  color,
+  drillTrees,
+  boardShapeRegions,
+  boardShapePolygons,
+  progress,
+  simplifyTolerances = null
+) => {
   const region = []
   const path = []
   const shape = []
   const polygonShapes = []
   let current = 0
   progress(current)
+  const simplifiedBoardPolygons = simplifyMultiPolygonForLayer(
+    boardShapePolygons,
+    'outline',
+    simplifyTolerances
+  )
   const polygonShapeList =
-    Array.isArray(boardShapePolygons) && boardShapePolygons.length
-      ? multiPolygonToShapes(boardShapePolygons)
+    Array.isArray(simplifiedBoardPolygons) && simplifiedBoardPolygons.length
+      ? multiPolygonToShapes(simplifiedBoardPolygons)
       : null
   const regionShapeList = Array.isArray(boardShapeRegions)
     ? boardShapeRegions

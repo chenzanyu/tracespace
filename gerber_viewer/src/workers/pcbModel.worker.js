@@ -173,6 +173,7 @@ const buildLayerPayload = payload => {
       boardClipRegions,
       boardShapePolygons,
       syntheticOutlineRegions: syntheticOutlineInput,
+      simplifyTolerances,
     } = payload
     const metrics = createWorkerMetrics()
     const perfOrigin = getWorkerPerfNow()
@@ -292,7 +293,8 @@ const buildLayerPayload = payload => {
           payload.type,
           boardBounds,
           boardClipRegions,
-          boardShapePolygons
+          boardShapePolygons,
+          simplifyTolerances
         )
       )
       renderDebug = group?.userData?.planarDebug || null

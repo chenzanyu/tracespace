@@ -244,6 +244,7 @@
                 @change="item.side = coerceSideForType(item.type, item.side)">
                 <option value="copper">copper</option>
                 <option value="soldermask">soldermask</option>
+                <option value="solderpaste">solderpaste</option>
                 <option value="silkscreen">silkscreen</option>
                 <option value="drill">drill</option>
                 <option value="outline">outline</option>

@@ -1004,6 +1004,18 @@ const handleGlobalClick = () => {
   downloadMenuOpen.value = false
   displayMenuOpen.value = false
 }
+const countDrillShapesInPayload = (payload) => {
+  if (!payload) return 0
+  if (Array.isArray(payload)) return payload.length
+  if (
+    typeof payload === 'object'
+    && payload.format === DRILL_SHAPE_FORMAT_IMAGE_TREES
+    && Array.isArray(payload.imageTrees)
+  ) {
+    return payload.imageTrees.length
+  }
+  return 0
+}
 const recordWorkerJobStart = (jobId, payload) => {
   workerDebugLog.jobs.push({
     jobId,
@@ -1015,7 +1027,7 @@ const recordWorkerJobStart = (jobId, payload) => {
     outline: Boolean(payload.outline),
     hasParseTree: Boolean(payload.parseTree),
     parseTreeSummary: summarizeParseTree(payload.parseTree),
-    drillShapeCount: Array.isArray(payload.drillShapes) ? payload.drillShapes.length : 0,
+    drillShapeCount: countDrillShapesInPayload(payload.drillShapes),
   })
   trimDebugEntries(workerDebugLog.jobs)
 }
@@ -1138,6 +1150,7 @@ const defaultLayerColors = {
   outline: '#bfa782',
 }
 const structural3dTypes = new Set(['copper', 'soldermask', 'silkscreen'])
+const DRILL_SHAPE_FORMAT_IMAGE_TREES = 'drill-image-trees'
 const normalizeLayerType = (value) => {
   if (typeof value !== 'string') return ''
   return value.toLowerCase()
@@ -1391,6 +1404,30 @@ const refreshBoardOutlineState = (plotResult) => {
   return resolveBoardOutlineDescriptor(plotResult)
 }
 
+const buildDrillShapePayload = (drillLayers, plotTreesById) => {
+  if (!Array.isArray(drillLayers) || drillLayers.length === 0) return undefined
+  const imageEntries = []
+  const fallbackParseTrees = []
+  for (const layer of drillLayers) {
+    if (!layer?.id) continue
+    const cachedTree = plotTreesById?.[layer.id]
+    if (cachedTree && Array.isArray(cachedTree.children) && cachedTree.children.length) {
+      imageEntries.push({layerId: layer.id, tree: cachedTree})
+    } else if (layer?.parseTree) {
+      fallbackParseTrees.push(layer.parseTree)
+    }
+  }
+  if (imageEntries.length) {
+    return {
+      format: DRILL_SHAPE_FORMAT_IMAGE_TREES,
+      version: 1,
+      layerIds: imageEntries.map(entry => entry.layerId),
+      imageTrees: imageEntries.map(entry => entry.tree),
+    }
+  }
+  return fallbackParseTrees.length ? fallbackParseTrees : undefined
+}
+
 const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = null) => {
   resetPcbModelState()
   pcbModelJobs.total = 0
@@ -1402,12 +1439,10 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
   const boardBounds = Array.isArray(boardOutline?.bounds) ? boardOutline.bounds : undefined
   const boardPolygons = Array.isArray(boardOutline?.polygons) ? boardOutline.polygons : undefined
   logBoardScaleSnapshot('buildPcbModelFromParsedLayers')
-  const drillParseTrees = parsedLayers
-    .filter((layer) => {
-      const type = String(layer?.type || '').toLowerCase()
-      return type.includes('drill') && layer?.parseTree
-    })
-    .map((layer) => layer.parseTree)
+  const drillLayers = parsedLayers.filter((layer) => {
+    const type = String(layer?.type || '').toLowerCase()
+    return type.includes('drill')
+  })
   const layersFor3d = parsedLayers.filter(
     (layer) => isLayerEligibleFor3d(layer) && layerHasRenderableGeometry(layer, plotResult)
   )
@@ -1418,7 +1453,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
   planPerfWorkerJobs(totalJobs)
   pcbModelJobs.total = totalJobs
   if (totalJobs === 0) return
-  const drillShapePayload = drillParseTrees.length ? drillParseTrees : undefined
+  const drillShapePayload = buildDrillShapePayload(drillLayers, plotTreesById)
   for (const layer of layersFor3d) {
     const drillShapes =
       drillShapePayload && shouldLayerUseDrillShapes(layer.type) ? drillShapePayload : undefined

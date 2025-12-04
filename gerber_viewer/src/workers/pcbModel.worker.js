@@ -16,6 +16,7 @@ import {renderThree} from './pcb-model/geometry/index.js'
 const ACTION_BUILD_LAYER = 'build-layer'
 const normalizeType = (value) => (typeof value === 'string' ? value.toLowerCase() : '')
 const isDrillType = (value) => normalizeType(value).includes('drill')
+const DRILL_SHAPE_FORMAT_IMAGE_TREES = 'drill-image-trees'
 
 const normalizeColor = value => {
   try {
@@ -249,7 +250,18 @@ const buildLayerPayload = payload => {
       })
     }
     let drillTrees = null
-    if (Array.isArray(drillShapes) && drillShapes.length) {
+    if (
+      drillShapes
+      && typeof drillShapes === 'object'
+      && drillShapes.format === DRILL_SHAPE_FORMAT_IMAGE_TREES
+      && Array.isArray(drillShapes.imageTrees)
+      && drillShapes.imageTrees.length
+    ) {
+      drillTrees = measureWorkerStage(metrics, 'drill:reuse', () => drillShapes.imageTrees)
+      drillTrees = measureWorkerStage(metrics, 'clip-drills', () =>
+        filterDrillTrees(drillTrees, boardBounds, boardClipPolygons)
+      )
+    } else if (Array.isArray(drillShapes) && drillShapes.length) {
       drillTrees = measureWorkerStage(metrics, 'plot-drills', () => {
         const produced = []
         for (const tree of drillShapes) {

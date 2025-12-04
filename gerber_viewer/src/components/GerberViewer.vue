@@ -1147,6 +1147,11 @@ const normalizeLayerSide = (value) => {
   const normalized = value.toLowerCase()
   return normalized === 'top' || normalized === 'bottom' ? normalized : null
 }
+const shouldLayerUseDrillShapes = (layerType) => {
+  const normalized = normalizeLayerType(layerType)
+  if (!normalized) return false
+  return normalized !== 'drill'
+}
 const isLayerEligibleFor3d = (layer) => {
   if (!layer) return false
   const type = normalizeLayerType(layer.type)
@@ -1415,6 +1420,8 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
   if (totalJobs === 0) return
   const drillShapePayload = drillParseTrees.length ? drillParseTrees : undefined
   for (const layer of layersFor3d) {
+    const drillShapes =
+      drillShapePayload && shouldLayerUseDrillShapes(layer.type) ? drillShapePayload : undefined
     queueWorkerJob({
       layerId: layer.id,
       parseTree: layer.parseTree,
@@ -1426,7 +1433,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
       boardShapeRegions: boardRegions,
       boardShapePolygons: boardPolygons,
       boardClipRegions: boardRegions,
-      drillShapes: drillShapePayload,
+      drillShapes,
       boardBounds,
     })
       .then((result) => {

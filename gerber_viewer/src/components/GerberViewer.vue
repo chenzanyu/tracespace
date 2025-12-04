@@ -453,6 +453,7 @@ const currentStatusIndex = ref(0)
 const activeView = ref('layers')
 const measurementActive = ref(false)
 const recenterSignal = ref(0)
+const enablePerfLogs = import.meta.env?.DEV ?? false
 const props = defineProps({
   boardThicknessMm: {
     type: Number,
@@ -488,6 +489,7 @@ const boardThicknessUnits = computed(() => {
   return normalizedMm / mmPerUnit
 })
 const logBoardScaleSnapshot = (source) => {
+  if (!enablePerfLogs) return
   try {
     console.log('[GerberViewer] board scale snapshot', {
       source,
@@ -933,7 +935,6 @@ const exportPerfJson = () => {
   const filename = `pcb-perf-report-${pipelinePerfSession.id || 'session'}-${timestamp}.json`
   triggerFileDownload(blob, filename)
 }
-const enablePerfLogs = import.meta.env?.DEV ?? false
 const perfLabel = (phase) => `[perf][GerberViewer] ${phase}`
 const runPerfSync = (phase, fn, options = {}) => {
   const label = perfLabel(phase)
@@ -1320,24 +1321,28 @@ const queueWorkerJob = (payload) => {
   updateWorkerLoading()
   recordWorkerJobStart(jobId, payload)
   const startTime = performance.now()
-  console.log('[GerberViewer] queue worker job', {
-    jobId,
-    layerId: payload.layerId,
-    type: payload.type,
-    side: payload.side,
-  })
+  if (enablePerfLogs) {
+    console.log('[GerberViewer] queue worker job', {
+      jobId,
+      layerId: payload.layerId,
+      type: payload.type,
+      side: payload.side,
+    })
+  }
   return new Promise((resolve, reject) => {
     pcbWorkerJobs.set(jobId, {
       resolve: (result) => {
         pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
         updateWorkerLoading()
         recordWorkerJobResult(jobId, { success: true, result })
-        console.log('[GerberViewer] worker job finished', {
-          jobId,
-          layerId: payload.layerId,
-          type: payload.type,
-          durationMs: Number((performance.now() - startTime).toFixed(2)),
-        })
+        if (enablePerfLogs) {
+          console.log('[GerberViewer] worker job finished', {
+            jobId,
+            layerId: payload.layerId,
+            type: payload.type,
+            durationMs: Number((performance.now() - startTime).toFixed(2)),
+          })
+        }
         resolve(result)
       },
       reject: (error) => {

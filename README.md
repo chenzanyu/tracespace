@@ -45,6 +45,7 @@ import GerberViewer from './gerber_viewer/src/components/GerberViewer.vue'
 | `explosionSpacingMultiplier` | `Number` | `4` | 爆炸视图的层间距系数。 |
 | `active` | `Boolean` | `true` | 控制组件是否渲染（`false` 时释放 GPU 资源）。 |
 | `layerSimplifyTolerancesMm` | `Object` | `{ copper: 0.5, soldermask: 0.5, silkscreen: 0.5, drill: 0.5, outline: 0.5 }` | **新增**。以毫米表示的顶点简化容差。键名为层类型，若未提供则使用 `default` 或内建 0.5 mm。渲染前会按 Gerber 坐标单位自动换算为内部容差。数值越大，网格越粗糙但生成速度更快。 |
+| `drillLimit` | `Number` | `Infinity` | **新增**。限制参与钻孔布尔裁剪与渲染的钻孔图形数量。若输入超过该值，会按包围盒最长边由大到小排序，仅保留前 `drillLimit` 个孔洞；设为 `Infinity` 则不做限制，可提升极端大钻孔数据集的交付确定性。 |
 
 #### 事件
 

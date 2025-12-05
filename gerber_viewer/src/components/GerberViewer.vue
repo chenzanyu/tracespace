@@ -210,6 +210,7 @@
           :core-color="pcb3dColors.core" :layer-colors="pcb3dColors" :layer-visibility="pcb3dVisibility"
           :layer-simplify-tolerances-mm="layerSimplifyTolerancesMm"
           :fitPadding="1.55"
+          :drillLimit="drillLimit"
           @loading-change="handlePcb3dLoading"
           @perf-stats="handleViewerPerfEvent" />
 
@@ -443,6 +444,18 @@ import { fromMemoryLayers } from '@tracespace/core'
 import UploadPanel from './UploadPanel.vue'
 import LayerStackPreview from './LayerStackPreview.vue'
 import Pcb3dPreview from './Pcb3dPreview.vue'
+import {
+  IMAGE_PATH,
+  IMAGE_REGION,
+  IMAGE_SHAPE,
+  CIRCLE,
+  RECTANGLE,
+  POLYGON,
+  LAYERED_SHAPE,
+  OUTLINE,
+  ARC,
+  LINE,
+} from '@tracespace/plotter'
 import { orderLayerWeight, randomHexColor } from '../libs/gerber_stack'
 import { resolveBoardOutlineDescriptor } from '../libs/3d/boardOutline'
 
@@ -548,6 +561,7 @@ const pcb3dColorOptions = [
   { key: 'silkscreen', label: '丝印', toggleable: true },
   { key: 'core', label: '芯板', toggleable: false },
 ]
+const drillLimit = ref(500)
 const displayMenuOpen = ref(false)
 const pcbModelJobs = reactive({ pending: 0, total: 0 })
 const workerLoading = ref(false)
@@ -601,6 +615,127 @@ const summarizeParseTree = (tree) => {
     hasBoundingBox: Boolean(tree.boundingBox),
     units: tree.units ?? tree.format?.units ?? null,
   }
+}
+const toPoint = (position) => [
+  Number(position?.[0]) || 0,
+  Number(position?.[1]) || 0,
+]
+const extendBoundsWithPoint = (bounds, point) => {
+  if (!point) return bounds
+  if (!bounds) {
+    return {
+      minX: point[0],
+      maxX: point[0],
+      minY: point[1],
+      maxY: point[1],
+    }
+  }
+  return {
+    minX: Math.min(bounds.minX, point[0]),
+    maxX: Math.max(bounds.maxX, point[0]),
+    minY: Math.min(bounds.minY, point[1]),
+    maxY: Math.max(bounds.maxY, point[1]),
+  }
+}
+const positionsClose = (a, b, eps = 1e-6) =>
+  Math.abs(a[0] - b[0]) <= eps && Math.abs(a[1] - b[1]) <= eps
+const approximateArcPointsForBounds = (segment) => {
+  const startAngle = Number(segment?.start?.[2])
+  const endAngle = Number(segment?.end?.[2])
+  if (!Number.isFinite(startAngle) || !Number.isFinite(endAngle)) return []
+  let sweep = endAngle - startAngle
+  const startRaw = toPoint(segment.start)
+  const endRaw = toPoint(segment.end)
+  if (Math.abs(sweep) < 1e-7 && positionsClose(startRaw, endRaw)) {
+    sweep = sweep >= 0 ? Math.PI * 2 : -Math.PI * 2
+  }
+  const absSweep = Math.abs(sweep)
+  if (absSweep === 0) return []
+  const steps = Math.max(6, Math.ceil(absSweep / (Math.PI / 16)))
+  const center = toPoint(segment.center)
+  const radius = Number(segment.radius) || 0
+  const points = []
+  for (let i = 0; i <= steps; i += 1) {
+    const angle = startAngle + (sweep * i) / steps
+    points.push([
+      center[0] + radius * Math.cos(angle),
+      center[1] + radius * Math.sin(angle),
+    ])
+  }
+  return points
+}
+const boundsFromSegments = (segments) => {
+  if (!Array.isArray(segments) || segments.length === 0) return null
+  let bounds = null
+  for (const segment of segments) {
+    bounds = extendBoundsWithPoint(bounds, toPoint(segment.start))
+    bounds = extendBoundsWithPoint(bounds, toPoint(segment.end))
+    if (segment.type === ARC) {
+      const arcPoints = approximateArcPointsForBounds(segment)
+      for (const pt of arcPoints) {
+        bounds = extendBoundsWithPoint(bounds, pt)
+      }
+    }
+  }
+  return bounds
+}
+const shapeBounds = (shape) => {
+  if (!shape) return null
+  switch (shape.type) {
+    case CIRCLE:
+      return {
+        minX: shape.cx - shape.r,
+        minY: shape.cy - shape.r,
+        maxX: shape.cx + shape.r,
+        maxY: shape.cy + shape.r,
+      }
+    case RECTANGLE:
+      return {
+        minX: shape.x,
+        minY: shape.y,
+        maxX: shape.x + shape.width,
+        maxY: shape.y + shape.height,
+      }
+    case POLYGON: {
+      const entries = Array.isArray(shape.points) ? shape.points : []
+      let bounds = null
+      for (const point of entries) {
+        bounds = extendBoundsWithPoint(bounds, toPoint(point))
+      }
+      return bounds
+    }
+    case LAYERED_SHAPE: {
+      let merged = null
+      for (const sub of shape.shapes || []) {
+        const subBounds = shapeBounds(sub)
+        if (subBounds) {
+          merged = merged
+            ? {
+                minX: Math.min(merged.minX, subBounds.minX),
+                minY: Math.min(merged.minY, subBounds.minY),
+                maxX: Math.max(merged.maxX, subBounds.maxX),
+                maxY: Math.max(merged.maxY, subBounds.maxY),
+              }
+            : subBounds
+        }
+      }
+      return merged
+    }
+    case OUTLINE:
+      return boundsFromSegments(shape.segments)
+    default:
+      return null
+  }
+}
+const elementBounds = (element) => {
+  if (!element) return null
+  if (element.type === IMAGE_PATH || element.type === IMAGE_REGION) {
+    return boundsFromSegments(element.segments)
+  }
+  if (element.type === IMAGE_SHAPE) {
+    return shapeBounds(element.shape)
+  }
+  return null
 }
 const computeBoundsFromArray = (arr) => {
   if (!Array.isArray(arr) || arr.length < 3) return null
@@ -1425,6 +1560,88 @@ const refreshBoardOutlineState = (plotResult) => {
   return resolveBoardOutlineDescriptor(plotResult)
 }
 
+const limitDrillImageEntries = (entries) => {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return { entries: [], limitedStats: null }
+  }
+  const totalElements = entries.reduce((sum, entry) => {
+    const count = Array.isArray(entry.tree?.children) ? entry.tree.children.length : 0
+    return sum + count
+  }, 0)
+  if (totalElements === 0) {
+    return { entries, limitedStats: null }
+  }
+  let limit = Number(drillLimit.value)
+  if (!Number.isFinite(limit)) limit = Infinity
+  if (limit === Infinity || limit >= totalElements) {
+    return { entries, limitedStats: { applied: false, total: totalElements } }
+  }
+  limit = Math.max(0, Math.floor(limit))
+  if (limit <= 0) {
+    return {
+      entries: [],
+      limitedStats: {
+        applied: true,
+        total: totalElements,
+        kept: 0,
+        dropped: totalElements,
+      },
+    }
+  }
+  const flattened = []
+  entries.forEach((entry, entryIndex) => {
+    const children = Array.isArray(entry.tree?.children) ? entry.tree.children : []
+    children.forEach((child, childIndex) => {
+      const bounds = elementBounds(child)
+      const spanX = bounds ? Math.abs(bounds.maxX - bounds.minX) : 0
+      const spanY = bounds ? Math.abs(bounds.maxY - bounds.minY) : 0
+      const maxEdge = Math.max(spanX, spanY, 0)
+      flattened.push({
+        entryIndex,
+        childIndex,
+        maxEdge,
+      })
+    })
+  })
+  flattened.sort((a, b) => {
+    if (b.maxEdge === a.maxEdge) return a.entryIndex - b.entryIndex
+    return b.maxEdge - a.maxEdge
+  })
+  const keepSlice = flattened.slice(0, limit)
+  const keepMap = new Map()
+  keepSlice.forEach(({ entryIndex, childIndex }) => {
+    if (!keepMap.has(entryIndex)) keepMap.set(entryIndex, new Set())
+    keepMap.get(entryIndex).add(childIndex)
+  })
+  const filteredEntries = entries
+    .map((entry, index) => {
+      const allowed = keepMap.get(index)
+      if (!allowed || allowed.size === 0) return null
+      const children = Array.isArray(entry.tree?.children) ? entry.tree.children : []
+      const filteredChildren = children.filter((_, idx) => allowed.has(idx))
+      if (!filteredChildren.length) return null
+      return {
+        layerId: entry.layerId,
+        tree: {
+          ...entry.tree,
+          children: filteredChildren,
+        },
+      }
+    })
+    .filter(Boolean)
+  const dropped = totalElements - keepSlice.length
+  return {
+    entries: filteredEntries,
+    limitedStats: {
+      applied: true,
+      total: totalElements,
+      kept: keepSlice.length,
+      dropped,
+      limit,
+    },
+  }
+}
+
 const buildDrillShapePayload = (drillLayers, plotTreesById) => {
   if (!Array.isArray(drillLayers) || drillLayers.length === 0) return undefined
   const imageEntries = []
@@ -1438,12 +1655,16 @@ const buildDrillShapePayload = (drillLayers, plotTreesById) => {
       fallbackParseTrees.push(layer.parseTree)
     }
   }
-  if (imageEntries.length) {
+  const { entries: limitedEntries, limitedStats } = limitDrillImageEntries(imageEntries)
+  if (limitedEntries.length) {
+    if (limitedStats && limitedStats.applied) {
+      console.info('[GerberViewer] Drill geometry limited', limitedStats)
+    }
     return {
       format: DRILL_SHAPE_FORMAT_IMAGE_TREES,
       version: 1,
-      layerIds: imageEntries.map(entry => entry.layerId),
-      imageTrees: imageEntries.map(entry => entry.tree),
+      layerIds: limitedEntries.map(entry => entry.layerId),
+      imageTrees: limitedEntries.map(entry => entry.tree),
     }
   }
   return fallbackParseTrees.length ? fallbackParseTrees : undefined

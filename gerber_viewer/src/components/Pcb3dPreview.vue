@@ -40,6 +40,7 @@ const props = defineProps({
       outline: 0.5,
     }),
   },
+  drillLimit: { type: Number, default: Infinity },
 })
 
 const emit = defineEmits(['loading-change', 'perf-stats'])
@@ -561,7 +562,8 @@ const classifyLayers = (entries) => {
       top[entry.type] = mesh
     }
   }
-  return { outline: outline[0] || null, top, bottom, drills }
+  const limitedDrills = limitDrillMeshesIfNeeded(drills)
+  return { outline: outline[0] || null, top, bottom, drills: limitedDrills }
 }
 
 const explosionEntriesForMesh = (mesh, type, side, baseZ) => {
@@ -581,6 +583,31 @@ const placeLayer = (group, mesh, z, thickness, type, side) => {
   mesh.scale.setZ(Math.max(thickness, 0.0001))
   group.add(mesh)
   explosionEntriesForMesh(mesh, type, side, z)
+}
+
+const limitDrillMeshesIfNeeded = (drillMeshes) => {
+  if (!Array.isArray(drillMeshes) || drillMeshes.length === 0) return []
+  const limitRaw = Number(props.drillLimit)
+  if (!Number.isFinite(limitRaw) || limitRaw <= 0) return []
+  if (drillMeshes.length <= limitRaw) return drillMeshes
+  const limit = Math.max(0, Math.floor(limitRaw))
+  const sizeVector = new THREE.Vector3()
+  const box = new THREE.Box3()
+  const entries = drillMeshes.map((mesh, index) => {
+    let maxEdge = 0
+    if (mesh) {
+      box.setFromObject(mesh)
+      box.getSize(sizeVector)
+      maxEdge = Math.max(sizeVector.x || 0, sizeVector.y || 0, sizeVector.z || 0)
+    }
+    return { mesh, maxEdge, index }
+  })
+  entries.sort((a, b) => {
+    if (b.maxEdge === a.maxEdge) return a.index - b.index
+    return b.maxEdge - a.maxEdge
+  })
+  if (limit <= 0) return []
+  return entries.slice(0, limit).map((entry) => entry.mesh)
 }
 
 const assembleLayers = (entries) => {
@@ -912,6 +939,13 @@ watch(
     props.layerVisibility?.solderpaste,
   ],
   () => applyLayerVisibility()
+)
+watch(
+  () => props.drillLimit,
+  () => {
+    if (!scene) return
+    rebuildModel()
+  }
 )
 watch(() => props.explosionActive, (isActive) => {
   explosionState.target = isActive ? 1 : 0

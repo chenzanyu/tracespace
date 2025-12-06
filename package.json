@@ -21,7 +21,6 @@
   },
   "packageManager": "pnpm@10.13.1",
   "dependencies": {
-    "@tracespace/cli": "workspace:*",
     "@tracespace/core": "workspace:*",
     "@tracespace/fixtures": "workspace:*",
     "@tracespace/identify-layers": "workspace:*",

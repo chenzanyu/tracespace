@@ -13,7 +13,6 @@ import {
   TYPE_SOLDERPASTE,
   TYPE_OUTLINE,
 } from '@tracespace/identify-layers'
-import {renderGraphic, sizeToViewBox} from '@tracespace/renderer'
 import polygonClipping from 'polygon-clipping'
 
 import type {
@@ -24,12 +23,13 @@ import type {
   PathSegment,
   Position,
 } from '@tracespace/plotter'
-import type {SvgElement, ViewBox} from '@tracespace/renderer'
 
 import type {Layer} from '..'
 import {getOutlineLayer} from '../sort-layers'
 import {walkPaths} from './walk-paths'
 import {fillGaps} from './fill-gaps'
+
+export type ViewBox = [number, number, number, number]
 
 export const MISSING_OUTLINE_LAYER = 'missingOutlineLayer'
 export const NO_PATHS_IN_OUTLINE_LAYER = 'noPathsInOutlineLayer'
@@ -49,7 +49,6 @@ export interface BoardShape {
 
 export interface BoardShapeRender {
   viewBox: ViewBox
-  path?: SvgElement
   failureReason?: BoardShapeFailureReason
 }
 
@@ -320,22 +319,23 @@ export function plotBoardShape(
 }
 
 export function renderBoardShape(boardShape: BoardShape): BoardShapeRender {
-  const {regions, size, failureReason} = boardShape
-  const viewBox = sizeToViewBox(size)
-  const segments = regions.flatMap(r => r.segments)
-  const path =
-    segments.length > 0 ? renderGraphic({type: IMAGE_REGION, segments}) : undefined
-
-  if (failureReason && !path) {
-    return {viewBox, failureReason}
+  const {size, failureReason} = boardShape
+  return {
+    viewBox: sizeToViewBox(size),
+    failureReason,
   }
-
-  return failureReason
-    ? {viewBox, failureReason, path}
-    : {viewBox, path}
 }
 
 const REGION_POINT_TOLERANCE = 1e-6
+
+const sizeToViewBox = (size: SizeEnvelope): ViewBox => {
+  if (!Array.isArray(size) || size.length < 4 || BoundingBox.isEmpty(size)) {
+    return [0, 0, 0, 0]
+  }
+
+  const [minX, minY, maxX, maxY] = size
+  return [minX, -maxY, maxX - minX, maxY - minY]
+}
 
 const toXY = (pos?: Position): [number, number] => [
   Number(pos?.[0]) || 0,

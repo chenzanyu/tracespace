@@ -14,7 +14,6 @@
     "@tracespace/core": "workspace:*",
     "@tracespace/parser": "workspace:*",
     "@tracespace/plotter": "workspace:*",
-    "@tracespace/renderer": "workspace:*",
     "axios": "^1.11.0",
     "polygon-clipping": "^0.15.7",
     "pixi.js": "^8.2.2",

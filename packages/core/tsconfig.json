@@ -4,7 +4,6 @@
     {"path": "../identify-layers"},
     {"path": "../parser"},
     {"path": "../plotter"},
-    {"path": "../renderer"},
     {"path": "../xml-id"}
   ],
   "compilerOptions": {

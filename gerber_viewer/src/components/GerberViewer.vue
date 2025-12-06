@@ -190,7 +190,7 @@
           :board-view-box="boardViewBox" :board-width-mm="boardWidthMm" :board-height-mm="boardHeightMm"
           :measurement-active="measurementActive" :recenter-signal="recenterSignal" :active="activeView === 'layers'"
           @exit-measurement="measurementActive = false" @loading-change="handleLayerPreviewLoading"
-          @debug-update="handlePixiDebugUpdate" @perf-stats="handleLayerPerfEvent" />
+          @perf-stats="handleLayerPerfEvent" />
 
         <div v-if="activeView === 'layers' && showLayerPreviewLoading"
           class="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 bg-black/50 text-white pointer-events-none">
@@ -631,7 +631,6 @@ const workerDebugLog = reactive({
   jobs: [],
   errors: [],
 })
-const pixiLayerDebug = ref([])
 const maxDebugEntries = 50
 const triggerFileDownload = (blob, filename) => {
   if (!blob) return
@@ -1836,9 +1835,6 @@ const openLayerPanel = () => { isLayerPanelOpen.value = true }
 const collapseLayerPanel = () => { isLayerPanelOpen.value = false }
 const handlePcb3dLoading = (loading) => { viewerLoading.value = loading }
 const handleLayerPreviewLoading = (loading) => { isLayerRenderLoading.value = loading }
-const handlePixiDebugUpdate = (payload) => {
-  pixiLayerDebug.value = Array.isArray(payload) ? payload : []
-}
 const handleLayerPerfEvent = (payload) => {
   if (!payload || !pipelinePerfSession.id) return
   pipelinePerfSession.layerStages.push({

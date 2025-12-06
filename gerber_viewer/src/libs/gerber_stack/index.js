@@ -238,16 +238,9 @@ const drawGraphicRecursive = (graphic, ctx, chunk, mode) => {
 }
 
 // 将 PlotTree 转换为 Pixi 可渲染对象
-export function createLayerDisplay(tree, ctx, colorValue, opacity = 1, options = {}) {
+export function createLayerDisplay(tree, ctx, colorValue, opacity = 1) {
   const layerContainer = new Container()
   layerContainer.eventMode = 'none'
-
-  const enableDebug = options?.debug === true
-  const debugData = enableDebug ? {chunks: [], elements: []} : null
-  const recordElement = (info) => {
-    if (!debugData) return
-    debugData.elements.push(info)
-  }
 
   const chunks = []
   const createChunk = () => {
@@ -266,14 +259,7 @@ export function createLayerDisplay(tree, ctx, colorValue, opacity = 1, options =
     container.setMask({ mask, inverse: true })
 
     layerContainer.addChild(container)
-    const chunk = { container, solid, mask, hasClear: false, debugIndex: chunks.length }
-    if (debugData) {
-      debugData.chunks.push({
-        index: chunk.debugIndex,
-        createdAt: debugData.elements.length,
-        hasClear: false,
-      })
-    }
+    const chunk = { container, solid, mask, hasClear: false }
     chunks.push(chunk)
     return chunk
   }
@@ -286,23 +272,11 @@ export function createLayerDisplay(tree, ctx, colorValue, opacity = 1, options =
     const isClear = graphic.polarity === CLEAR
 
     if (isClear) {
-      const affected = []
       for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
         const target = chunks[chunkIndex]
         drawGraphicRecursive(graphic, ctx, target, 'mask')
         target.hasClear = true
-        if (debugData) {
-          affected.push(chunkIndex)
-          if (debugData.chunks[chunkIndex]) debugData.chunks[chunkIndex].hasClear = true
-        }
       }
-      recordElement({
-        index,
-        type: graphic.type,
-        polarity: graphic.polarity ?? 'clear',
-        action: 'clear',
-        chunkIndices: affected,
-      })
       continue
     }
 
@@ -311,15 +285,7 @@ export function createLayerDisplay(tree, ctx, colorValue, opacity = 1, options =
     }
 
     drawGraphicRecursive(graphic, ctx, chunk, 'solid')
-    recordElement({
-      index,
-      type: graphic.type,
-      polarity: graphic.polarity ?? 'dark',
-      action: 'dark',
-      chunkIndices: [chunk.debugIndex],
-    })
   }
 
-  if (enableDebug) layerContainer.__debug = debugData
   return layerContainer
 }

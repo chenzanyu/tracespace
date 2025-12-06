@@ -235,10 +235,20 @@
           <button class="px-2 py-1 border rounded" @click="isSettingsOpen = false">关闭</button>
         </div>
         <div class="p-4 overflow-auto max-h-[60vh] space-y-3">
-          <div v-for="item in editableLayers" :key="item.id"
-            class="border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            v-for="item in editableLayers"
+            :key="item.id"
+            class="rounded p-3 flex items-center gap-3 transition-all"
+            :class="duplicateLayerIds.has(item.id) ? 'border border-rose-500 bg-rose-500/10 shadow-[0_0_0_1px_rgba(244,63,94,0.4)]' : 'border border-gray-700'"
+          >
             <div class="flex-1 min-w-0">
               <div class="text-xs font-medium truncate">{{ item.filename }}</div>
+              <div
+                v-if="duplicateLayerIds.has(item.id)"
+                class="text-[11px] font-semibold text-rose-300 mt-1 tracking-wide"
+              >
+                唯一层冲突
+              </div>
             </div>
             <div class="flex items-center gap-2">
               <label class="text-xs text-gray-300">type</label>
@@ -262,9 +272,20 @@
             </div>
           </div>
         </div>
-        <div class="p-3 border-t border-gray-700 flex items-center justify-end gap-2">
-          <button class="px-3 py-1 border rounded" @click="isSettingsOpen = false">取消</button>
-          <button class="px-3 py-1 border rounded bg-cyan-600 text-white" @click="applySettings">保存</button>
+        <div class="p-3 border-t border-gray-700 flex flex-col gap-2">
+          <div v-if="settingsSaveDisabledReason" class="text-xs text-amber-400 text-right">
+            {{ settingsSaveDisabledReason }}
+          </div>
+          <div class="flex items-center justify-end gap-2">
+            <button class="px-3 py-1 border rounded" @click="isSettingsOpen = false">取消</button>
+            <button
+              class="px-3 py-1 border rounded bg-cyan-600 text-white"
+              :class="{ 'opacity-50 cursor-not-allowed': settingsSaveDisabledReason }"
+              :disabled="Boolean(settingsSaveDisabledReason)"
+              @click="applySettings">
+              保存
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -438,9 +459,19 @@
  * - 调用 LayerStackPreview（Pixi）与 Pcb3dPreview（Three）渲染
  * - 负责旧版 tracespace 结果到新版组件的数据转换
  */
-import { ref, reactive, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
+import {
+  ref,
+  reactive,
+  nextTick,
+  watch,
+  computed,
+  onMounted,
+  onBeforeUnmount,
+  markRaw,
+  toRaw,
+} from 'vue'
 import axios from 'axios'
-import { fromMemoryLayers } from '@tracespace/core'
+import { fromMemoryLayers, fromParsedLayers } from '@tracespace/core'
 import UploadPanel from './UploadPanel.vue'
 import LayerStackPreview from './LayerStackPreview.vue'
 import Pcb3dPreview from './Pcb3dPreview.vue'
@@ -564,6 +595,15 @@ const pcb3dColorOptions = [
 const drillLimit = ref(500)
 const displayMenuOpen = ref(false)
 const pcbModelJobs = reactive({ pending: 0, total: 0 })
+const modelUpdateLockReason = ref(null)
+watch(
+  () => pcbModelJobs.pending,
+  (pending) => {
+    if (pending === 0) {
+      modelUpdateLockReason.value = null
+    }
+  }
+)
 const workerLoading = ref(false)
 const viewerLoading = ref(false)
 const isPcb3dLoading = computed(() => workerLoading.value || viewerLoading.value)
@@ -1642,7 +1682,7 @@ const limitDrillImageEntries = (entries) => {
   }
 }
 
-const buildDrillShapePayload = (drillLayers, plotTreesById) => {
+const buildDrillShapePayload = (drillLayers, plotTreesById, parseTreesById) => {
   if (!Array.isArray(drillLayers) || drillLayers.length === 0) return undefined
   const imageEntries = []
   const fallbackParseTrees = []
@@ -1651,8 +1691,9 @@ const buildDrillShapePayload = (drillLayers, plotTreesById) => {
     const cachedTree = plotTreesById?.[layer.id]
     if (cachedTree && Array.isArray(cachedTree.children) && cachedTree.children.length) {
       imageEntries.push({layerId: layer.id, tree: cachedTree})
-    } else if (layer?.parseTree) {
-      fallbackParseTrees.push(layer.parseTree)
+    } else {
+      const layerParseTree = parseTreesById?.[layer.id]
+      if (layerParseTree) fallbackParseTrees.push(layerParseTree)
     }
   }
   const { entries: limitedEntries, limitedStats } = limitDrillImageEntries(imageEntries)
@@ -1670,39 +1711,65 @@ const buildDrillShapePayload = (drillLayers, plotTreesById) => {
   return fallbackParseTrees.length ? fallbackParseTrees : undefined
 }
 
-const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = null) => {
-  resetPcbModelState()
-  pcbModelJobs.total = 0
-  pcbModelJobs.pending = 0
-  updateWorkerLoading()
-  if (!Array.isArray(parsedLayers) || parsedLayers.length === 0) return
+const buildPcbModelFromLayers = (
+  layers,
+  parseTreesById,
+  boardOutline,
+  plotResult = null,
+  options = {}
+) => {
+  if (!Array.isArray(layers) || layers.length === 0) return false
+  const {
+    reset = true,
+    targetLayerIds = null,
+    reason = reset ? 'pcb-model' : 'pcb-model-partial',
+  } = options
+  const targetLayerSet =
+    Array.isArray(targetLayerIds) && targetLayerIds.length > 0
+      ? new Set(targetLayerIds)
+      : null
+  const candidateLayers = targetLayerSet
+    ? layers.filter((layer) => targetLayerSet.has(layer.id))
+    : layers
+  if (!reset && candidateLayers.length === 0) return false
+  if (reset) {
+    resetPcbModelState()
+    pcbModelJobs.total = 0
+    pcbModelJobs.pending = 0
+    updateWorkerLoading()
+  }
   const plotTreesById = plotResult?.plotTreesById ?? null
   const boardRegions = Array.isArray(boardOutline?.regions) ? boardOutline.regions : undefined
   const boardBounds = Array.isArray(boardOutline?.bounds) ? boardOutline.bounds : undefined
   const boardPolygons = Array.isArray(boardOutline?.polygons) ? boardOutline.polygons : undefined
-  logBoardScaleSnapshot('buildPcbModelFromParsedLayers')
+  logBoardScaleSnapshot(reset ? 'buildPcbModelFromLayers' : 'updatePcbModelLayers')
   const simplifyTolerancePayload = buildSimplifyTolerancePayload()
-  const drillLayers = parsedLayers.filter((layer) => {
+  const drillLayers = layers.filter((layer) => {
     const type = String(layer?.type || '').toLowerCase()
     return type.includes('drill')
   })
-  const layersFor3d = parsedLayers.filter(
+  const layersFor3d = candidateLayers.filter(
     (layer) => isLayerEligibleFor3d(layer) && layerHasRenderableGeometry(layer, plotResult)
   )
   const hasOutlineLayer = layersFor3d.some((layer) => layer.type === 'outline')
   const syntheticOutlineNeeded =
-    !hasOutlineLayer && Array.isArray(boardRegions) && boardRegions.length > 0
+    reset && !hasOutlineLayer && Array.isArray(boardRegions) && boardRegions.length > 0
   const totalJobs = layersFor3d.length + (syntheticOutlineNeeded ? 1 : 0)
+  if (totalJobs === 0) {
+    planPerfWorkerJobs(0)
+    pcbModelJobs.total = 0
+    return false
+  }
   planPerfWorkerJobs(totalJobs)
   pcbModelJobs.total = totalJobs
-  if (totalJobs === 0) return
-  const drillShapePayload = buildDrillShapePayload(drillLayers, plotTreesById)
+  modelUpdateLockReason.value = reason
+  const drillShapePayload = buildDrillShapePayload(drillLayers, plotTreesById, parseTreesById)
   for (const layer of layersFor3d) {
     const drillShapes =
       drillShapePayload && shouldLayerUseDrillShapes(layer.type) ? drillShapePayload : undefined
     queueWorkerJob({
       layerId: layer.id,
-      parseTree: layer.parseTree,
+      parseTree: parseTreesById?.[layer.id],
       plotTree: plotTreesById?.[layer.id],
       type: layer.type,
       side: layer.side ?? null,
@@ -1746,6 +1813,7 @@ const buildPcbModelFromParsedLayers = (parsedLayers, boardOutline, plotResult = 
         console.error('[GerberViewer] Synthetic board outline build failed', error)
       })
   }
+  return true
 }
 
 const setActiveView = (mode) => {
@@ -1842,10 +1910,12 @@ const handleUploadFile = async (file) => {
     )
     runPerfSync('upload:buildOrderedLayers', () => applyModernResult(pipeline))
     const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
-    buildPcbModelFromParsedLayers(
-      pipeline.parsedLayers,
+    buildPcbModelFromLayers(
+      pipeline.plotResult?.layers,
+      pipeline.parseTreesById,
       outlineDescriptor,
-      pipeline.plotResult
+      pipeline.plotResult,
+      { reset: true, reason: 'initializing' }
     )
     logPerf('upload:layers-ready', {
       count: orderedLayers.length,
@@ -1909,10 +1979,13 @@ const coerceSideForType = (type, side) => {
 
 const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
   if (!fm) return
-  fmRef.value = fm
+  fmRef.value = markRaw(fm)
   const mmPerUnit = Number(fm?.unitMeta?.mmPerUnit)
   unitMmPerUnit.value = Number.isFinite(mmPerUnit) && mmPerUnit > 0 ? mmPerUnit : 1
-  boardViewBox.value = fm.renderLayersResult.boardShapeRender.viewBox
+  const boardViewBoxSource = Array.isArray(fm.boardViewBox)
+    ? fm.boardViewBox
+    : fm.compositeViewBox
+  boardViewBox.value = Array.isArray(boardViewBoxSource) ? boardViewBoxSource : [0, 0, 0, 0]
   if (Array.isArray(boardViewBox.value) && boardViewBox.value.length >= 4) {
     const widthUnits = boardViewBox.value[2] || 0
     const heightUnits = boardViewBox.value[3] || 0
@@ -1925,7 +1998,8 @@ const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
     ? new Map(orderedLayers.map((layer) => [layer.filename, { color: layer.color, visible: layer.visible, opacity: layer.opacity }]))
     : null
   orderedLayers.splice(0)
-  for (const layer of fm.renderLayersResult.layers) {
+  const fmLayers = fm.plotResult?.layers ?? []
+  for (const layer of fmLayers) {
     const retained = keep?.get(layer.filename)
     const color = retained?.color ?? randomHexColor()
     const visible = retained?.visible ?? true
@@ -1944,51 +2018,265 @@ const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
   orderedLayers.sort((a, b) => a.weight - b.weight)
 }
 
+const collectLayerTypeSideChanges = (editedEntries, fmLayers) => {
+  if (!Array.isArray(editedEntries) || !Array.isArray(fmLayers)) return []
+  const baseline = new Map(
+    fmLayers.map((layer) => [layer.id, { type: layer.type, side: layer.side }])
+  )
+  const changes = []
+  for (const entry of editedEntries) {
+    if (!entry?.id) continue
+    const snapshot = baseline.get(entry.id)
+    if (!snapshot) continue
+    const nextType = entry.type ?? undefined
+    const nextSide = entry.side ?? undefined
+    if (snapshot.type === nextType && snapshot.side === nextSide) continue
+    changes.push({
+      id: entry.id,
+      filename: entry.filename,
+      prev: snapshot,
+      next: { type: nextType, side: nextSide },
+    })
+  }
+  return changes
+}
+
+const layerConfigEligibleFor3d = (type, side) => {
+  const normalizedType = normalizeLayerType(type)
+  if (!normalizedType) return false
+  if (normalizedType.includes('drill') || normalizedType === 'outline') return true
+  if (!structural3dTypes.has(normalizedType) && normalizedType !== 'copper') return false
+  const normalizedSide = normalizeLayerSide(side)
+  return normalizedSide === 'top' || normalizedSide === 'bottom'
+}
+
+const changeAffectsPcbModel = (change) => {
+  if (!change) return false
+  return (
+    layerConfigEligibleFor3d(change.prev?.type, change.prev?.side) ||
+    layerConfigEligibleFor3d(change.next?.type, change.next?.side)
+  )
+}
+
+const uniquenessKeyForLayer = (type, side) => {
+  const normalizedType = normalizeLayerType(type)
+  if (!normalizedType) return null
+  if (normalizedType === 'outline') return 'outline'
+  const needsSideUniqueness = ['copper', 'soldermask', 'silkscreen', 'solderpaste'].includes(normalizedType)
+  if (!needsSideUniqueness) return null
+  const normalizedSide = normalizeLayerSide(side)
+  if (normalizedSide === 'top' || normalizedSide === 'bottom') {
+    return `${normalizedSide}:${normalizedType}`
+  }
+  return null
+}
+
+const describeLayerKey = (key) => {
+  if (key === 'outline') return 'outline'
+  if (!key) return 'layer'
+  const [side, type] = key.split(':')
+  return `${side} ${type}`
+}
+
+const layerUniquenessSummary = computed(() => {
+  const buckets = new Map()
+  for (const entry of editableLayers) {
+    const key = uniquenessKeyForLayer(entry.type, entry.side)
+    if (!key) continue
+    const set = buckets.get(key) ?? new Set()
+    set.add(entry.id)
+    buckets.set(key, set)
+  }
+  const duplicateIds = new Set()
+  const duplicateKeys = []
+  for (const [key, set] of buckets.entries()) {
+    if (set.size > 1) {
+      duplicateKeys.push(key)
+      set.forEach(id => duplicateIds.add(id))
+    }
+  }
+  return {
+    duplicateIds,
+    message: duplicateKeys.length ? `以下层必须唯一：${duplicateKeys.map(describeLayerKey).join('，')}` : null,
+  }
+})
+
+const duplicateLayerIds = computed(() => layerUniquenessSummary.value.duplicateIds)
+const layerSettingsValidationError = computed(() => layerUniquenessSummary.value.message)
+
+const buildParsedLayerCache = (fm) => {
+  if (!fm?.plotResult?.layers || !fm?.parseTreesById) return null
+  const colorMap = new Map(
+    orderedLayers.map((layer) => [layer.id, { color: layer.color, opacity: layer.opacity }])
+  )
+  const parsed = []
+  for (const layer of fm.plotResult.layers) {
+    const sourceTree = fm.parseTreesById?.[layer.id]
+    if (!sourceTree) continue
+    const rawTree = toRaw(sourceTree)
+    const parseTree = rawTree ? JSON.parse(JSON.stringify(rawTree)) : null
+    if (!parseTree) continue
+    const visual = colorMap.get(layer.id)
+    parsed.push({
+      id: layer.id,
+      filename: layer.filename,
+      type: layer.type,
+      side: layer.side,
+      parseTree,
+      color: visual?.color,
+      opacity: typeof visual?.opacity === 'number' ? visual.opacity : undefined,
+    })
+  }
+  return parsed.length > 0 ? parsed : null
+}
+
+const rebuildPipelineFromCache = (fm) => {
+  const parsedLayers = buildParsedLayerCache(fm)
+  if (!parsedLayers) return null
+  return runPerfSync('settings:cache-pipeline', () => fromParsedLayers(parsedLayers))
+}
+
+const settingsSaveDisabledReason = computed(() => {
+  if (modelUpdateLockReason.value) {
+    return '3D模型正在构建，完成后才能再次保存'
+  }
+  if (pcbModelJobs.pending > 0) {
+    return '等待3D模型构建完成后再保存'
+  }
+  if (isLayerLoading.value) {
+    return '正在保存...'
+  }
+  if (layerSettingsValidationError.value) {
+    return layerSettingsValidationError.value
+  }
+  return null
+})
+
 const applySettings = async () => {
+  if (settingsSaveDisabledReason.value) return
   isLayerLoading.value = true
   startPerfSession('settings', { reason: 'settings-panel' })
   const list = (memoryLayers.value || []).map((x) => ({ ...x }))
   for (const entry of editableLayers) entry.side = coerceSideForType(entry.type, entry.side)
-const keyFor = (t, s) => {
-    if (t === 'outline') return 'all:outline'
-    if (['copper', 'soldermask', 'silkscreen'].includes(t) && (s === 'top' || s === 'bottom')) return `${s}:${t}`
-    return null
-  }
-  const seen = new Map()
-  for (let i = 0; i < editableLayers.length; i++) {
-    const entry = editableLayers[i]
-    const key = keyFor(entry.type, entry.side)
-    if (!key) continue
-    if (seen.has(key)) {
-      const prev = editableLayers[seen.get(key)]
-      prev.type = 'drawing'
-      prev.side = undefined
-    }
-    seen.set(key, i)
-  }
   for (const entry of editableLayers) {
     const target = list.find((it) => it.filename === entry.filename)
-    if (target) { target.type = entry.type; target.side = entry.side }
+    if (target) {
+      target.type = entry.type
+      target.side = entry.side
+    }
+  }
+  const fm = fmRef.value
+  const hasCachedPipeline = Boolean(fm?.plotResult?.layers?.length)
+  let jobsQueued = false
+  if (isSettingsOpen.value) {
+    isSettingsOpen.value = false
   }
   try {
-    const pipeline = await runPerfAsync('settings:pipeline', () =>
-      fromMemoryLayers(list)
-    )
-    applyModernResult(pipeline, { preserveVisuals: true })
-    const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
-    buildPcbModelFromParsedLayers(
-      pipeline.parsedLayers,
-      outlineDescriptor,
-      pipeline.plotResult
-    )
-    recenterSignal.value += 1
+    if (!hasCachedPipeline) {
+      const pipeline = await runPerfAsync('settings:pipeline', () =>
+        fromMemoryLayers(list)
+      )
+      applyModernResult(pipeline, { preserveVisuals: true })
+      const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
+      jobsQueued = Boolean(
+        buildPcbModelFromLayers(
+          pipeline.plotResult?.layers,
+          pipeline.parseTreesById,
+          outlineDescriptor,
+          pipeline.plotResult,
+          { reset: true, reason: 'settings-full-rebuild' }
+        )
+      )
+      recenterSignal.value += 1
+      memoryLayers.value = list
+      if (!jobsQueued) finalizePerfSessionIfIdle()
+      return
+    }
+    const fmLayers = fm.plotResult?.layers ?? []
+    const changes = collectLayerTypeSideChanges(editableLayers, fmLayers)
+    if (changes.length === 0) {
+      memoryLayers.value = list
+      isSettingsOpen.value = false
+      finalizePerfSessionIfIdle()
+      return
+    }
+    const structuralChanges = changes.filter(changeAffectsPcbModel)
+    const changeMap = new Map(changes.map((change) => [change.id, change]))
+    for (const layer of fmLayers) {
+      const change = changeMap.get(layer.id)
+      if (change) {
+        layer.type = change.next.type
+        layer.side = change.next.side
+      }
+    }
     memoryLayers.value = list
-    isSettingsOpen.value = false
+    if (structuralChanges.length > 0) {
+      const rebuiltPipeline = rebuildPipelineFromCache(fm)
+      if (rebuiltPipeline) {
+        applyModernResult(rebuiltPipeline, { preserveVisuals: true })
+        recenterSignal.value += 1
+        const outlineDescriptor = refreshBoardOutlineState(rebuiltPipeline.plotResult)
+        jobsQueued = Boolean(
+          buildPcbModelFromLayers(
+            rebuiltPipeline.plotResult?.layers,
+            rebuiltPipeline.parseTreesById,
+            outlineDescriptor,
+            rebuiltPipeline.plotResult,
+            { reset: true, reason: 'settings-structural-rebuild' }
+          )
+        )
+        if (!jobsQueued) finalizePerfSessionIfIdle()
+        return
+      } else {
+        console.warn('[GerberViewer] Failed to rebuild pipeline from cache, falling back to stale geometry')
+      }
+    }
+    applyModernResult(fm, { preserveVisuals: true })
+    recenterSignal.value += 1
+    const removedLayerIds = changes
+      .filter(
+        (change) =>
+          layerConfigEligibleFor3d(change.prev?.type, change.prev?.side) &&
+          !layerConfigEligibleFor3d(change.next?.type, change.next?.side)
+      )
+      .map((change) => change.id)
+    if (removedLayerIds.length > 0) {
+      const removeSet = new Set(removedLayerIds)
+      const nextLayers = pcb3dModel.layers.filter((layer) => !removeSet.has(layer.id))
+      if (nextLayers.length !== pcb3dModel.layers.length) {
+        pcb3dModel.layers = nextLayers
+        pcb3dModel.version += 1
+      }
+    }
+    const outlineDescriptor = refreshBoardOutlineState(fm.plotResult)
+    if (structuralChanges.length > 0) {
+      jobsQueued = Boolean(
+        buildPcbModelFromLayers(
+          fm.plotResult?.layers ?? [],
+          fm.parseTreesById,
+          outlineDescriptor,
+          fm.plotResult,
+          { reset: true, reason: 'settings-structural-rebuild' }
+        )
+      )
+    } else {
+      const layerIds = changes.map((change) => change.id)
+      jobsQueued = Boolean(
+        buildPcbModelFromLayers(
+          fm.plotResult?.layers ?? [],
+          fm.parseTreesById,
+          outlineDescriptor,
+          fm.plotResult,
+          { reset: false, targetLayerIds: layerIds, reason: 'settings-update' }
+        )
+      )
+    }
+    if (!jobsQueued) finalizePerfSessionIfIdle()
   } catch (error) {
     console.error('[GerberViewer] applySettings failed', error)
+    if (!jobsQueued) finalizePerfSessionIfIdle()
   } finally {
     isLayerLoading.value = false
-    finalizePerfSessionIfIdle()
   }
 }
 

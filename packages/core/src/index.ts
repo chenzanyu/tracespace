@@ -9,10 +9,10 @@ import type { GerberType, GerberSide } from '@tracespace/identify-layers'
 
 import { readFile } from './read-file'
 import { determineLayerTypes } from './determine-layer-types'
-import { plotBoardShape, renderBoardShape } from './board-shape'
+import { plotBoardShape } from './board-shape'
 
 import type { ParsedLayer } from './determine-layer-types'
-import type { BoardShape, BoardShapeRender, ViewBox } from './board-shape'
+import type { BoardShape, ViewBox } from './board-shape'
 
 export interface Layer {
   id: string
@@ -30,11 +30,6 @@ export interface PlotResult {
   layers: Layer[]
   plotTreesById: Record<string, ImageTree>
   boardShape: BoardShape
-}
-
-export interface RenderLayersResult {
-  layers: Layer[]
-  boardShapeRender: BoardShapeRender
 }
 
 export async function read(files: File[] | string[]): Promise<ReadResult> {
@@ -97,9 +92,9 @@ export interface ParsedMemoryLayer {
 }
 
 export interface FromMemoryLayersResult {
-  parsedLayers: ParsedMemoryLayer[]
   plotResult: PlotResult
-  renderLayersResult: RenderLayersResult
+  parseTreesById: Record<string, GerberTree>
+  boardViewBox: ViewBox
   compositeViewBox: ViewBox
   compositeWidthMm: string
   compositeHeightMm: string
@@ -133,7 +128,7 @@ const measurePhase = <T>(phase: string, fn: () => T): T => {
 }
 
 /**
- * 从内存层列表（字符串/二进制）构建 renderLayersResult
+ * 从内存层列表（字符串/二进制）构建 tracespace 管道输出
  */
 export async function fromMemoryLayers(
   layersInput: MemoryLayerInput[]
@@ -303,11 +298,7 @@ export function fromParsedLayers(
     : collectCompositeBoxes(() => true)
   const compositeBox = plotter.BoundingBox.sum(fallbackBoxes)
   const compositeViewBox = sizeToViewBox(compositeBox)
-  const boardShapeRender = renderBoardShape(boardShape)
-  const renderLayersResult: RenderLayersResult = {
-    layers,
-    boardShapeRender,
-  }
+  const boardViewBox = sizeToViewBox(boardShape.size as plotter.BoundingBox.Box)
 
   const compositeWidthMm = `${unitsToMm(compositeViewBox[2])}mm`
   const compositeHeightMm = `${unitsToMm(compositeViewBox[3])}mm`
@@ -316,9 +307,9 @@ export function fromParsedLayers(
   const unitsPerMm = 1 / mmPerUnit
 
   return {
-    parsedLayers,
     plotResult,
-    renderLayersResult,
+    parseTreesById,
+    boardViewBox,
     compositeViewBox,
     compositeWidthMm,
     compositeHeightMm,

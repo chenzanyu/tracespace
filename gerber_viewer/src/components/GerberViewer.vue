@@ -265,7 +265,7 @@
               <label class="text-sm text-gray-300 uppercase tracking-wide">type</label>
               <select
                 v-model="item.type"
-                class="bg-gray-800/90 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
+                class="settings-select bg-gray-800/90 border border-gray-700 rounded-lg px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
                 @change="item.side = coerceSideForType(item.type, item.side)">
                 <option value="copper">copper</option>
                 <option value="soldermask">soldermask</option>
@@ -280,7 +280,7 @@
               <label class="text-sm text-gray-300 uppercase tracking-wide">side</label>
               <select
                 v-model="item.side"
-                class="bg-gray-800/90 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500/50">
+                class="settings-select bg-gray-800/90 border border-gray-700 rounded-lg px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-cyan-500/50">
                 <option v-for="opt in allowedSides(item.type)" :key="(opt ?? 'na')" :value="opt">{{ opt ?? 'n/a' }}
                 </option>
               </select>
@@ -2388,6 +2388,11 @@ onBeforeUnmount(() => {
 
 .layer-list-scroll::-webkit-scrollbar {
   display: none;
+}
+
+.settings-select option {
+  font-size: 15px;
+  padding: 0.35rem 0.5rem;
 }
 
 .loading-spinner {

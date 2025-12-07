@@ -162,11 +162,62 @@ let pixiInitPromise = null
 let compositeUpdateToken = 0
 let resizeObserver = null
 let compositeLoading = false
+let liveRenderDesired = true
+let compositeSettlePending = true
+let manualRenderScheduled = false
 
 const setCompositeLoading = (state) => {
   if (compositeLoading === state) return
   compositeLoading = state
   emit('loading-change', state)
+}
+
+const ensureLiveRendering = () => {
+  liveRenderDesired = true
+  const app = pixiApp.value
+  if (!app) return
+  if (app.ticker) app.ticker.start()
+}
+
+const disableLiveRendering = () => {
+  liveRenderDesired = false
+  manualRenderScheduled = false
+  const app = pixiApp.value
+  if (!app) return
+  if (app.ticker) app.ticker.stop()
+}
+
+const requestManualRender = () => {
+  if (liveRenderDesired || manualRenderScheduled) return
+  const app = pixiApp.value
+  if (!app) return
+  manualRenderScheduled = true
+  const schedule = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+    ? window.requestAnimationFrame
+    : (cb) => setTimeout(cb, 0)
+  schedule(() => {
+    manualRenderScheduled = false
+    if (liveRenderDesired || !pixiApp.value) return
+    try {
+      pixiApp.value.render()
+    } catch (error) {
+      console.warn('[LayerStackPreview] manual render failed', error)
+    }
+  })
+}
+
+const settleLiveRenderingIfReady = () => {
+  if (!compositeSettlePending) return
+  compositeSettlePending = false
+  disableLiveRendering()
+  requestManualRender()
+}
+
+const requestCompositeRender = (options = {}) => {
+  if (!props.active) return
+  compositeSettlePending = true
+  ensureLiveRendering()
+  updateComposite(options)
 }
 
 const fmData = computed(() => unref(props.fmResult))
@@ -203,6 +254,7 @@ const applyViewTransform = () => {
   if (!app || !pixiRoot) return
   pixiRoot.scale.set(viewScale.value)
   pixiRoot.position.set(viewTranslate.x, viewTranslate.y)
+  requestManualRender()
 }
 
 const resizePixiToHost = () => {
@@ -213,6 +265,7 @@ const resizePixiToHost = () => {
   const height = Math.max(host.clientHeight, 1)
   if (app.renderer.width !== width || app.renderer.height !== height) {
     app.renderer.resize(width, height)
+    requestManualRender()
   }
 }
 
@@ -256,6 +309,24 @@ const ensurePixiApp = async () => {
       resizePixiToHost()
       pixiApp.value = app
       pixiCanvas = canvasEl
+
+      // --- START OF FIX ---
+      // 移除下面这段强制停止 ticker 的代码。
+      // Pixi 的 Application 默认会自动启动 ticker，
+      // 这正是我们在繁重的初始化过程中所需要的。
+      /*
+      if (app.ticker) {
+        app.ticker.stop()
+        if (typeof app.ticker.autoStart === 'boolean') {
+          app.ticker.autoStart = false
+        }
+        if (liveRenderDesired) {
+          app.ticker.start()
+        }
+      }
+      */
+      // --- END OF FIX ---
+      
       applyViewTransform()
       const initMemoryEnd = captureMemorySnapshot()
       emitLayerPerfSample(
@@ -276,19 +347,34 @@ const ensurePixiApp = async () => {
   return pixiInitPromise
 }
 
-const destroyPixi = () => {
-  const app = pixiApp.value
-  if (app) {
-    try { app.destroy(true) } catch (err) { console.warn('销毁 Pixi 应用失败', err) }
-  }
-  if (pixiCanvas?.parentNode) pixiCanvas.parentNode.removeChild(pixiCanvas)
-  resetLayerDisplays()
-  pixiApp.value = null
-  pixiRoot = null
-  pixiCanvas = null
-  pixiInitPromise = null
-}
-
+const destroyPixi = () => {
+
+  disableLiveRendering()
+
+  const app = pixiApp.value
+
+  if (app) {
+
+    try { app.destroy(true) } catch (err) { console.warn('销毁 Pixi 应用失败', err) }
+
+  }
+
+  if (pixiCanvas?.parentNode) pixiCanvas.parentNode.removeChild(pixiCanvas)
+
+  resetLayerDisplays()
+
+  pixiApp.value = null
+
+  pixiRoot = null
+
+  pixiCanvas = null
+
+  pixiInitPromise = null
+
+}
+
+
+
 const layerDisplayCache = new Map()
 
 const disposeLayerDisplay = (layerId, entry, { destroy = true } = {}) => {
@@ -360,16 +446,27 @@ const updateComposite = async ({ recenter = false } = {}) => {
         if (weightB !== weightA) return weightB - weightA
         return b.index - a.index
       })
+      
+    // --- NEW: 异步批处理逻辑 ---
     let zIndex = 0
     const nextActiveIds = new Set()
     const stats = { reused: 0, rebuilt: 0, removed: 0 }
+    let layersProcessedInBatch = 0
+    const BATCH_SIZE = 5; // 可调整的批处理大小。可以试试 3, 5, 或 10，找到最佳体验
+
     for (const { layer } of stackingOrder) {
+      // 如果在处理过程中有新的更新请求，则中止当前任务
+      if (token !== compositeUpdateToken) {
+        console.warn('[LayerStackPreview] Update cancelled during async processing.')
+        return
+      }
+
       nextActiveIds.add(layer.id)
       const visible = layer.visible !== false
       const tree = plotTrees[layer.id]
-    if (!tree) continue
-    const colorValue = parseHexColor(layer.color)
-    const layerOpacity = typeof layer.opacity === 'number' ? layer.opacity : 1
+      if (!tree) continue
+      const colorValue = parseHexColor(layer.color)
+      const layerOpacity = typeof layer.opacity === 'number' ? layer.opacity : 1
       const cached = layerDisplayCache.get(layer.id)
       const needsRebuild = !cached || cached.tree !== tree || cached.color !== colorValue || cached.opacity !== layerOpacity
       if (needsRebuild) {
@@ -390,13 +487,23 @@ const updateComposite = async ({ recenter = false } = {}) => {
       entry.display.zIndex = zIndex++
       entry.display.visible = visible
       if (entry.display.parent !== pixiRoot) pixiRoot.addChild(entry.display)
+      
+      layersProcessedInBatch++;
+      if (layersProcessedInBatch >= BATCH_SIZE) {
+        layersProcessedInBatch = 0;
+        // 把控制权交还给浏览器，让它有机会渲染和响应
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
     }
+    // --- END: 异步批处理逻辑 ---
+
     for (const [layerId, entry] of layerDisplayCache.entries()) {
       if (nextActiveIds.has(layerId)) continue
       disposeLayerDisplay(layerId, entry)
       layerDisplayCache.delete(layerId)
       stats.removed += 1
     }
+
     pixiRoot.sortDirty = true
     endRebuild()
     if (recenter) fitToContainer(true)
@@ -430,7 +537,10 @@ const updateComposite = async ({ recenter = false } = {}) => {
       const memoryEnd = captureMemorySnapshot()
       emitLayerPerfSample('layers:update-composite', getPerfNow() - updateStart, perfMeta, memoryStart, memoryEnd)
     }
-    if (token === compositeUpdateToken) setCompositeLoading(false)
+    if (token === compositeUpdateToken) {
+      setCompositeLoading(false)
+      settleLiveRenderingIfReady() // 这个逻辑现在是正确的，在所有批处理都完成后才停止实时渲染
+    }
   }
 }
 
@@ -591,12 +701,12 @@ const layerSignatureSource = () => {
 
 watch(layerSignatureSource, () => {
   if (!props.active) return
-  updateComposite()
+  requestCompositeRender()
 })
 
 watch(fmData, () => {
   if (!props.active) return
-  updateComposite({ recenter: true })
+  requestCompositeRender({ recenter: true })
 })
 
 watch(compositeSizeMm, () => {
@@ -612,12 +722,14 @@ watch(() => props.active, async (active) => {
   if (!active) {
     if (props.measurementActive) exitMeasurementMode(true)
     setCompositeLoading(false)
+    compositeSettlePending = false
+    disableLiveRendering()
     return
   }
   await nextTick()
   resizePixiToHost()
   fitToContainer(true)
-  updateComposite({ recenter: true })
+  requestCompositeRender({ recenter: true })
 })
 
 onMounted(() => {
@@ -625,7 +737,7 @@ onMounted(() => {
     observeContainerResize()
     resizePixiToHost()
     fitToContainer(true)
-    updateComposite({ recenter: true })
+    requestCompositeRender({ recenter: true })
   })
   if (typeof window !== 'undefined') window.addEventListener('resize', handleResize)
 })

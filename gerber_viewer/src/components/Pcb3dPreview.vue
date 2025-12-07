@@ -891,13 +891,72 @@ const updateStructuralColors = () => {
   requestRender()
 }
 
+const SOLDER_MASK_EXPORT_OPACITY = 0.98
+const SOLDER_MASK_SATURATION_BOOST = 0.3
+const SOLDER_MASK_LIGHTNESS_BOOST = 0.1
+
+const enhanceSoldermaskMaterialForExport = (material) => {
+  if (!material) return
+  const targetOpacity = Math.max(SOLDER_MASK_EXPORT_OPACITY, material.opacity ?? 1)
+  material.opacity = Math.min(1, targetOpacity)
+  material.transparent = material.opacity < 1
+  if (material.color) {
+    const hsl = { h: 0, s: 0, l: 0 }
+    material.color.getHSL(hsl)
+    hsl.s = Math.min(1, hsl.s + SOLDER_MASK_SATURATION_BOOST)
+    hsl.l = Math.min(1, hsl.l + SOLDER_MASK_LIGHTNESS_BOOST)
+    material.color.setHSL(hsl.h, hsl.s, hsl.l)
+  }
+  material.needsUpdate = true
+}
+
+const adjustExportMaterials = (object) => {
+  if (!object) return
+  object.traverse((child) => {
+    if (!child.isMesh) return
+    if (Array.isArray(child.material)) {
+      child.material = child.material.map((mat) => (mat?.clone ? mat.clone() : mat))
+    } else if (child.material?.clone) {
+      child.material = child.material.clone()
+    }
+    if (child.userData?.layerType !== 'soldermask') return
+    if (Array.isArray(child.material)) {
+      child.material.forEach((mat) => enhanceSoldermaskMaterialForExport(mat))
+    } else {
+      enhanceSoldermaskMaterialForExport(child.material)
+    }
+  })
+}
+
+const createExportSnapshot = () => {
+  const clone = modelGroup.clone(true)
+  adjustExportMaterials(clone)
+  return clone
+}
+
+const disposeExportSnapshot = (root) => {
+  if (!root) return
+  root.traverse((child) => {
+    if (child.isMesh) {
+      child.geometry?.dispose?.()
+      if (Array.isArray(child.material)) {
+        child.material.forEach((mat) => mat?.dispose?.())
+      } else {
+        child.material?.dispose?.()
+      }
+    }
+  })
+}
+
 const exportGltfBlob = () => {
   if (!modelGroup) throw new Error('?????')
   const exporter = new GLTFExporter()
+  const snapshot = createExportSnapshot()
   return new Promise((resolve, reject) => {
     exporter.parse(
-      modelGroup,
+      snapshot,
       (result) => {
+        disposeExportSnapshot(snapshot)
         if (result instanceof ArrayBuffer) {
           resolve(new Blob([result], { type: 'model/gltf-binary' }))
           return
@@ -905,7 +964,10 @@ const exportGltfBlob = () => {
         const json = typeof result === 'string' ? result : JSON.stringify(result)
         resolve(new Blob([json], { type: 'model/gltf+json' }))
       },
-      (error) => reject(error),
+      (error) => {
+        disposeExportSnapshot(snapshot)
+        reject(error)
+      },
       { binary: true, embedImages: true }
     )
   })

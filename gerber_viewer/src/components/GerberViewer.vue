@@ -21,15 +21,17 @@
                 折叠
               </button>
             </div>
-            <div class="p-4 flex flex-col flex-1 overflow-y-auto space-y-4">
-              <div class="flex items-center gap-2 text-xs text-gray-300 flex-wrap">
-                <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(true)">全部显示</button>
-                <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(false)">全部隐藏</button>
-                <label class="flex items-center gap-1 select-none cursor-pointer ml-auto">
-                  <input type="checkbox" v-model="showFilenames" /> 显示文件名
-                </label>
+            <div class="layer-list-scroll flex flex-col flex-1 overflow-y-auto px-4 pb-4">
+              <div class="sticky top-0 -mx-4 px-4 py-3 bg-gradient-to-b from-gray-900 to-gray-800 border-b border-gray-800 z-10">
+                <div class="flex items-center gap-2 text-xs text-gray-300 flex-wrap">
+                  <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(true)">全部显示</button>
+                  <button class="px-2 py-1 border rounded text-gray-100" @click="setAllVisible(false)">全部隐藏</button>
+                  <label class="flex items-center gap-1 select-none cursor-pointer ml-auto">
+                    <input type="checkbox" v-model="showFilenames" /> 显示文件名
+                  </label>
+                </div>
               </div>
-              <div class="space-y-2">
+              <div class="space-y-2 mt-3">
                 <div v-for="layer in orderedLayers" :key="layer.id"
                   class="py-2 border-b border-gray-800 flex items-center gap-2">
                   <button
@@ -2366,6 +2368,14 @@ onBeforeUnmount(() => {
 .layer-panel-fade-leave-to {
   opacity: 0;
   transform: translateX(-12px);
+}
+
+.layer-list-scroll {
+  scrollbar-width: none;
+}
+
+.layer-list-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 .loading-spinner {

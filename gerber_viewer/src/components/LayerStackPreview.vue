@@ -165,6 +165,7 @@ let compositeLoading = false
 let liveRenderDesired = true
 let compositeSettlePending = true
 let manualRenderScheduled = false
+let compositeInitialized = false
 
 const setCompositeLoading = (state) => {
   if (compositeLoading === state) return
@@ -348,29 +349,18 @@ const ensurePixiApp = async () => {
 }
 
 const destroyPixi = () => {
-
   disableLiveRendering()
-
   const app = pixiApp.value
-
   if (app) {
-
     try { app.destroy(true) } catch (err) { console.warn('销毁 Pixi 应用失败', err) }
-
   }
-
   if (pixiCanvas?.parentNode) pixiCanvas.parentNode.removeChild(pixiCanvas)
-
   resetLayerDisplays()
-
   pixiApp.value = null
-
   pixiRoot = null
-
   pixiCanvas = null
-
   pixiInitPromise = null
-
+  compositeInitialized = false
 }
 
 
@@ -401,7 +391,8 @@ const resetLayerDisplays = (destroy = true) => {
   pixiRoot?.removeChildren()
 }
 
-const updateComposite = async ({ recenter = false } = {}) => {
+const updateComposite = async ({ recenter = false, skipLoading = false } = {}) => {
+  const showLoadingOverlay = !skipLoading
   const updateStart = getPerfNow()
   const memoryStart = captureMemorySnapshot()
   logPerf('updateComposite', {
@@ -414,7 +405,7 @@ const updateComposite = async ({ recenter = false } = {}) => {
   if (!props.active) return
   compositeUpdateToken += 1
   const token = compositeUpdateToken
-  setCompositeLoading(true)
+  if (showLoadingOverlay) setCompositeLoading(true)
   const fm = getFm()
   const endEnsure = startPerf('ensurePixiApp')
   const app = await ensurePixiApp()
@@ -538,8 +529,9 @@ const updateComposite = async ({ recenter = false } = {}) => {
       emitLayerPerfSample('layers:update-composite', getPerfNow() - updateStart, perfMeta, memoryStart, memoryEnd)
     }
     if (token === compositeUpdateToken) {
-      setCompositeLoading(false)
+      if (showLoadingOverlay) setCompositeLoading(false)
       settleLiveRenderingIfReady() // 这个逻辑现在是正确的，在所有批处理都完成后才停止实时渲染
+      compositeInitialized = true
     }
   }
 }
@@ -701,10 +693,11 @@ const layerSignatureSource = () => {
 
 watch(layerSignatureSource, () => {
   if (!props.active) return
-  requestCompositeRender()
+  requestCompositeRender({ skipLoading: compositeInitialized })
 })
 
 watch(fmData, () => {
+  compositeInitialized = false
   if (!props.active) return
   requestCompositeRender({ recenter: true })
 })

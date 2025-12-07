@@ -236,30 +236,36 @@
     <div v-if="isSettingsOpen" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/50" @click="isSettingsOpen = false"></div>
       <div
-        class="relative bg-gray-900 text-gray-100 w-[720px] max-w-[95vw] max-h-[80vh] rounded-lg border border-gray-700 shadow-lg overflow-hidden">
-        <div class="px-4 py-3 border-b border-gray-700 flex items-center justify-between">
-          <div class="font-semibold">图层设置</div>
-          <button class="px-2 py-1 border rounded" @click="isSettingsOpen = false">关闭</button>
+        class="relative bg-gray-900 text-gray-100 w-[900px] max-w-[92vw] max-h-[85vh] rounded-2xl border border-gray-700 shadow-2xl overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-700 flex items-center justify-between">
+          <div class="text-lg font-semibold tracking-wide">图层设置</div>
+          <button
+            class="px-4 py-2 text-sm border border-gray-600 rounded-lg hover:bg-gray-800 transition"
+            @click="isSettingsOpen = false">
+            关闭
+          </button>
         </div>
-        <div class="p-4 overflow-auto max-h-[60vh] space-y-3">
+        <div class="p-6 overflow-auto max-h-[65vh] space-y-4">
           <div
             v-for="item in editableLayers"
             :key="item.id"
-            class="rounded p-3 flex items-center gap-3 transition-all"
+            class="rounded-xl p-4 md:p-5 flex flex-wrap items-center gap-4 transition-all"
             :class="duplicateLayerIds.has(item.id) ? 'border border-rose-500 bg-rose-500/10 shadow-[0_0_0_1px_rgba(244,63,94,0.4)]' : 'border border-gray-700'"
           >
-            <div class="flex-1 min-w-0">
-              <div class="text-xs font-medium truncate">{{ item.filename }}</div>
+            <div class="flex-1 min-w-[240px] space-y-1">
+              <div class="text-sm font-semibold truncate">{{ item.filename }}</div>
               <div
                 v-if="duplicateLayerIds.has(item.id)"
-                class="text-[11px] font-semibold text-rose-300 mt-1 tracking-wide"
+                class="text-sm font-semibold text-rose-300 tracking-wide"
               >
                 唯一层冲突
               </div>
             </div>
-            <div class="flex items-center gap-2">
-              <label class="text-xs text-gray-300">type</label>
-              <select v-model="item.type" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+            <div class="flex items-center gap-3">
+              <label class="text-sm text-gray-300 uppercase tracking-wide">type</label>
+              <select
+                v-model="item.type"
+                class="bg-gray-800/90 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
                 @change="item.side = coerceSideForType(item.type, item.side)">
                 <option value="copper">copper</option>
                 <option value="soldermask">soldermask</option>
@@ -270,23 +276,29 @@
                 <option value="drawing">drawing</option>
               </select>
             </div>
-            <div class="flex items-center gap-2">
-              <label class="text-xs text-gray-300">side</label>
-              <select v-model="item.side" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs">
+            <div class="flex items-center gap-3">
+              <label class="text-sm text-gray-300 uppercase tracking-wide">side</label>
+              <select
+                v-model="item.side"
+                class="bg-gray-800/90 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500/50">
                 <option v-for="opt in allowedSides(item.type)" :key="(opt ?? 'na')" :value="opt">{{ opt ?? 'n/a' }}
                 </option>
               </select>
             </div>
           </div>
         </div>
-        <div class="p-3 border-t border-gray-700 flex flex-col gap-2">
-          <div v-if="settingsSaveDisabledReason" class="text-xs text-amber-400 text-right">
+        <div class="px-6 py-4 border-t border-gray-700 flex flex-col gap-3">
+          <div v-if="settingsSaveDisabledReason" class="text-sm text-amber-400 text-right leading-relaxed">
             {{ settingsSaveDisabledReason }}
           </div>
-          <div class="flex items-center justify-end gap-2">
-            <button class="px-3 py-1 border rounded" @click="isSettingsOpen = false">取消</button>
+          <div class="flex items-center justify-end gap-3">
             <button
-              class="px-3 py-1 border rounded bg-cyan-600 text-white"
+              class="px-4 py-2 text-sm border border-gray-600 rounded-lg hover:bg-gray-800 transition"
+              @click="isSettingsOpen = false">
+              取消
+            </button>
+            <button
+              class="px-5 py-2.5 text-sm font-semibold border border-transparent rounded-lg bg-cyan-600 text-white hover:bg-cyan-500 transition"
               :class="{ 'opacity-50 cursor-not-allowed': settingsSaveDisabledReason }"
               :disabled="Boolean(settingsSaveDisabledReason)"
               @click="applySettings">

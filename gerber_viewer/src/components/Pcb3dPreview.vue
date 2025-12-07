@@ -948,6 +948,21 @@ const disposeExportSnapshot = (root) => {
   })
 }
 
+const captureCurrentViewImageBlob = async () => {
+  if (!renderer || !scene || !camera) throw new Error('Viewer not ready')
+  renderer.render(scene, camera)
+  return new Promise((resolve, reject) => {
+    renderer.domElement.toBlob(
+      (blob) => {
+        if (blob) resolve(blob)
+        else reject(new Error('Failed to capture image'))
+      },
+      'image/png',
+      1
+    )
+  })
+}
+
 const exportGltfBlob = () => {
   if (!modelGroup) throw new Error('?????')
   const exporter = new GLTFExporter()
@@ -1055,6 +1070,9 @@ defineExpose({
   },
   async exportGltf() {
     return exportGltfBlob()
+  },
+  async exportCurrentImage() {
+    return captureCurrentViewImageBlob()
   },
 })
 </script>

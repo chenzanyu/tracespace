@@ -152,14 +152,19 @@
             <div class="relative">
               <button
                 class="px-4 py-3.5 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
-                title="下载 3D 模型" @click.stop="toggleDownloadMenu">
-                <span class="pi pi-download"></span>
+                title="导出" @click.stop="toggleDownloadMenu">
+                <span class="pi pi-download mr-1"></span>
+                <span class="text-xs font-semibold tracking-wide uppercase">导出</span>
               </button>
               <div v-if="downloadMenuOpen"
-                class="absolute mt-2 w-44 rounded-md border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50">
+                class="absolute mt-2 w-56 rounded-md border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50 overflow-hidden">
+                <button class="block w-full text-left px-3 py-2 hover:bg-gray-800 border-b border-gray-800/60"
+                  @click.stop="downloadPcbAsset('image-current')">
+                  导出图片
+                </button>
                 <button class="block w-full text-left px-3 py-2 hover:bg-gray-800"
                   @click.stop="downloadPcbAsset('gltf')">
-                  下载 glTF 模型
+                  导出 glTF 模型
                 </button>
               </div>
             </div>
@@ -1298,6 +1303,14 @@ const downloadPcbAsset = async (type) => {
       const blob = await pcb3dRef.value?.exportGltf?.()
       if (!blob) throw new Error('glTF 导出失败')
       triggerFileDownload(blob, 'pcb-preview.glb')
+      return
+    }
+    if (type === 'image-current') {
+      const exportFn = pcb3dRef.value?.exportCurrentImage
+      if (typeof exportFn !== 'function') throw new Error('截图导出不可用')
+      const blob = await exportFn()
+      if (!blob) throw new Error('图片导出失败')
+      triggerFileDownload(blob, 'pcb-preview-current.png')
       return
     }
     throw new Error(`未知导出类型: ${type}`)

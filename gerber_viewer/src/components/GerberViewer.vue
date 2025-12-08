@@ -86,7 +86,7 @@
               <button
                 class="px-4 py-3.5 rounded-md bg-gray-900/80 text-white border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
                 title="显示设置" @click.stop="toggleDisplayMenu">
-                <span class="pi pi-eye text-lg"></span>
+                <span class="pi pi-palette text-lg"></span>
               </button>
               <div v-if="displayMenuOpen"
                 class="absolute left-0 mt-3 ml-2 w-[320px] rounded-xl border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50 px-3 py-2.5 space-y-3"
@@ -155,8 +155,7 @@
               <button
                 class="px-4 py-3.5 rounded-md bg-gray-900/80 text-white text-[15px] border border-white/30 flex items-center justify-center shadow-[0_4px_12px_rgba(0,0,0,0.35)] hover:bg-gray-800 transition"
                 title="导出" @click.stop="toggleDownloadMenu">
-                <span class="pi pi-download mr-1"></span>
-                <span class="text-xs font-semibold tracking-wide uppercase">导出</span>
+                <span class="pi pi-download"></span>
               </button>
               <div v-if="downloadMenuOpen"
                 class="absolute mt-2 w-56 rounded-md border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50 overflow-hidden">
@@ -1289,7 +1288,7 @@ const clearSpacingHideTimer = () => {
   }
 }
 const showSpacingPanel = () => {
-  if (!canExplode.value) return
+  if (!canExplode.value || !explosionActive.value) return
   if (displayMenuOpen.value) displayMenuOpen.value = false
   clearSpacingHideTimer()
   spacingPanelVisible.value = true
@@ -1921,7 +1920,7 @@ const handleUploadFile = async (file) => {
     formData.append('UploadFile', file, file.name)
     const res = await runPerfAsync('upload:api', () =>
       axios.post(
-        'http://localhost:5256/api/PCBParse/Parse?Mode=0',
+        'http://localhost:5004/api/PCBParse/Parse?Mode=0',
         formData,
         { headers: { 'Content-Type': 'multipart/form-data', accept: '*/*' } },
       )
@@ -2339,6 +2338,14 @@ watch(activeView, (value) => {
 
 watch(canExplode, (value) => {
   if (!value) {
+    spacingPanelVisible.value = false
+    spacingPanelInitialized.value = false
+    clearSpacingHideTimer()
+  }
+})
+
+watch(explosionActive, (active) => {
+  if (!active) {
     spacingPanelVisible.value = false
     spacingPanelInitialized.value = false
     clearSpacingHideTimer()

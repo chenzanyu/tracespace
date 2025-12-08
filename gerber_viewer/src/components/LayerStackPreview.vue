@@ -162,15 +162,84 @@ let pixiInitPromise = null
 let compositeUpdateToken = 0
 let resizeObserver = null
 let compositeLoading = false
+let compositeProgressValue = 0
+let compositeProgressTotals = { total: 0, completed: 0 }
 let liveRenderDesired = true
 let compositeSettlePending = true
 let manualRenderScheduled = false
 let compositeInitialized = false
 
-const setCompositeLoading = (state) => {
-  if (compositeLoading === state) return
+const clamp01 = (value, fallback = 0) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return fallback
+  if (numeric <= 0) return 0
+  if (numeric >= 1) return 1
+  return numeric
+}
+
+const emitCompositeLoadingEvent = (payload = {}) => {
+  const activeState = payload.active ?? compositeLoading
+  const normalizedProgress = clamp01(
+    payload.progress ?? (activeState ? compositeProgressValue : 1),
+    activeState ? compositeProgressValue : 1
+  )
+  const total = Number.isFinite(payload.total) ? payload.total : compositeProgressTotals.total
+  const completed = Number.isFinite(payload.completed)
+    ? payload.completed
+    : compositeProgressTotals.completed
+  emit('loading-change', {
+    source: 'layer-stack',
+    label: '叠层初始化构建',
+    active: activeState,
+    progress: normalizedProgress,
+    detail: payload.detail ?? '',
+    message: payload.message ?? (activeState ? '正在初始化叠层' : '叠层构建完成'),
+    total,
+    completed,
+  })
+}
+
+const resetCompositeProgressTotals = (total = 0) => {
+  const safeTotal = Number.isFinite(total) && total > 0 ? total : 0
+  compositeProgressTotals = { total: safeTotal, completed: 0 }
+  compositeProgressValue = safeTotal > 0 ? 0 : 1
+}
+
+const reportCompositeProgress = (completed, total, detail = '') => {
+  if (!compositeLoading) return
+  const safeTotal = Number.isFinite(total) && total > 0 ? total : compositeProgressTotals.total
+  compositeProgressTotals.total = safeTotal
+  const safeCompleted = Math.min(
+    safeTotal > 0 ? safeTotal : 0,
+    Number.isFinite(completed) && completed >= 0 ? completed : compositeProgressTotals.completed
+  )
+  compositeProgressTotals.completed = safeCompleted
+  if (safeTotal > 0) {
+    const normalized = safeCompleted / safeTotal
+    compositeProgressValue = Math.min(0.995, clamp01(normalized))
+  } else {
+    compositeProgressValue = 1
+  }
+  emitCompositeLoadingEvent({
+    active: true,
+    progress: compositeProgressValue,
+    detail,
+    total: safeTotal,
+    completed: safeCompleted,
+  })
+}
+
+const setCompositeLoading = (state, detail = {}) => {
+  if (compositeLoading === state) {
+    if (state) emitCompositeLoadingEvent({ active: true, ...detail })
+    return
+  }
   compositeLoading = state
-  emit('loading-change', state)
+  if (!state) {
+    compositeProgressValue = 1
+    compositeProgressTotals = { total: 0, completed: 0 }
+  }
+  emitCompositeLoadingEvent({ active: state, ...detail })
 }
 
 const ensureLiveRendering = () => {
@@ -405,7 +474,6 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
   if (!props.active) return
   compositeUpdateToken += 1
   const token = compositeUpdateToken
-  if (showLoadingOverlay) setCompositeLoading(true)
 
   const fm = getFm()
   const app = await ensurePixiApp()
@@ -440,6 +508,16 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
         if (weightB !== weightA) return weightB - weightA
         return b.index - a.index
       })
+    const totalLayers = stackingOrder.length
+    if (showLoadingOverlay) {
+      resetCompositeProgressTotals(totalLayers)
+      setCompositeLoading(true, {
+        detail: totalLayers > 0 ? `准备 ${totalLayers} 个图层` : '等待渲染数据',
+        total: totalLayers,
+        completed: 0,
+        progress: totalLayers > 0 ? 0 : 1,
+      })
+    }
       
     // --- 核心修正 2: 将同步循环改为异步批处理 ---
     // 这可以防止 JS 计算本身阻塞 UI，让加载动画等能够平滑播放。
@@ -447,6 +525,7 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
     const nextActiveIds = new Set()
     const stats = { reused: 0, rebuilt: 0, removed: 0 }
     let layersProcessedInBatch = 0
+    let processedLayers = 0
     const BATCH_SIZE = 3; // 每次处理几个图层
 
     for (const { layer } of stackingOrder) {
@@ -457,6 +536,7 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
 
       // --- 这是您的原始图层处理逻辑，保持不变 ---
       nextActiveIds.add(layer.id)
+      processedLayers += 1
       const visible = layer.visible !== false
       const tree = plotTrees[layer.id]
       if (!tree) continue
@@ -484,6 +564,14 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
       if (entry.display.parent !== pixiRoot) pixiRoot.addChild(entry.display)
       // --- 图层处理逻辑结束 ---
       
+      if (showLoadingOverlay && totalLayers > 0) {
+        reportCompositeProgress(
+          processedLayers,
+          totalLayers,
+          `生成 ${Math.min(processedLayers, totalLayers)}/${totalLayers} 个图层`
+        )
+      }
+
       // 在处理完一小批后，让出主线程
       layersProcessedInBatch++;
       if (layersProcessedInBatch >= BATCH_SIZE) {
@@ -517,7 +605,7 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
       emitLayerPerfSample('layers:update-composite', getPerfNow() - updateStart, perfMeta, memoryStart, memoryEnd)
     }
     if (token === compositeUpdateToken) {
-      if (showLoadingOverlay) setCompositeLoading(false)
+      if (showLoadingOverlay) setCompositeLoading(false, { detail: '叠层渲染完成' })
       
       // --- 核心修正 3: 所有图层都已添加到舞台并渲染后，切换回按需渲染模式 ---
       settleLiveRenderingIfReady()
@@ -681,8 +769,20 @@ const layerSignatureSource = () => {
   }))
 }
 
-watch(layerSignatureSource, () => {
+const hasLayerTreeChanged = (next, prev) => {
+  if (!Array.isArray(next) || !Array.isArray(prev)) return true
+  if (next.length !== prev.length) return true
+  for (let index = 0; index < next.length; index += 1) {
+    if (next[index]?.treeRef !== prev[index]?.treeRef) return true
+  }
+  return false
+}
+
+watch(layerSignatureSource, (next, prev) => {
   if (!props.active) return
+  if (hasLayerTreeChanged(next, prev)) {
+    compositeInitialized = false
+  }
   requestCompositeRender({ skipLoading: compositeInitialized })
 })
 
@@ -704,7 +804,7 @@ watch(() => props.recenterSignal, () => {
 watch(() => props.active, async (active) => {
   if (!active) {
     if (props.measurementActive) exitMeasurementMode(true)
-    setCompositeLoading(false)
+    setCompositeLoading(false, { detail: '叠层渲染已暂停' })
     compositeSettlePending = false
     disableLiveRendering()
     return
@@ -712,7 +812,7 @@ watch(() => props.active, async (active) => {
   await nextTick()
   resizePixiToHost()
   fitToContainer(true)
-  requestCompositeRender({ recenter: true })
+  requestCompositeRender({ recenter: true, skipLoading: compositeInitialized })
 })
 
 onMounted(() => {
@@ -720,7 +820,7 @@ onMounted(() => {
     observeContainerResize()
     resizePixiToHost()
     fitToContainer(true)
-    requestCompositeRender({ recenter: true })
+    requestCompositeRender({ recenter: true, skipLoading: compositeInitialized })
   })
   if (typeof window !== 'undefined') window.addEventListener('resize', handleResize)
 })

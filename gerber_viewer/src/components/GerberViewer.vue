@@ -199,11 +199,31 @@
           @perf-stats="handleLayerPerfEvent" />
 
         <div v-if="activeView === 'layers' && showLayerPreviewLoading"
-          class="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 bg-black/50 text-white pointer-events-none">
-          <div class="loading-spinner"></div>
-          <div class="text-center space-y-1">
-            <p class="text-sm tracking-wide uppercase text-white/70">loading</p>
-            <p class="text-base font-semibold">层叠预览准备中…</p>
+          class="viewer-loading-overlay absolute inset-0 z-40 flex items-center justify-center text-white pointer-events-none p-4">
+          <div class="viewer-loading-card viewer-loading-card--layer flex items-center gap-6 backdrop-blur"
+            :style="layerLoadingOverlay.styleVars">
+            <div class="loading-ring"
+              :style="[layerLoadingOverlay.styleVars, { '--progress-deg': progressDegrees(layerLoadingOverlay.progress) }]">
+              <span class="loading-ring__value">{{ formatPercent(layerLoadingOverlay.progress) }}</span>
+            </div>
+            <div class="viewer-loading-content space-y-4">
+              <div class="space-y-2">
+                <p class="viewer-loading-title text-lg font-semibold tracking-[0.3em] uppercase text-white/90">
+                  {{ layerLoadingOverlay.title }}
+                </p>
+                <div class="viewer-loading-meta-row flex flex-wrap items-center gap-2 text-sm text-white/75">
+                  <span class="viewer-loading-stage">{{ layerLoadingOverlay.detail }}</span>
+                  <span v-if="layerLoadingOverlay.stats" class="viewer-loading-pill viewer-loading-pill--cool">
+                    <span class="viewer-pill-label">生成进度</span>
+                    <span class="viewer-pill-value">{{ layerLoadingOverlay.stats }}</span>
+                  </span>
+                </div>
+              </div>
+              <div class="viewer-progress-bar h-2 rounded-full bg-white/5 overflow-hidden">
+                <span class="viewer-progress-fill"
+                  :style="{ width: formatPercent(layerLoadingOverlay.progress) }" />
+              </div>
+            </div>
           </div>
         </div>
 
@@ -221,11 +241,31 @@
           @perf-stats="handleViewerPerfEvent" />
 
         <div v-if="activeView === '3d' && showPcb3dPreviewLoading"
-          class="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 bg-black/50 text-white pointer-events-none">
-          <div class="loading-spinner"></div>
-          <div class="text-center space-y-1">
-            <p class="text-sm tracking-wide uppercase text-white/70">loading</p>
-            <p class="text-base font-semibold">3D 预览生成中…</p>
+          class="viewer-loading-overlay absolute inset-0 z-40 flex items-center justify-center text-white pointer-events-none p-4">
+          <div class="viewer-loading-card viewer-loading-card--pcb flex items-center gap-6 backdrop-blur"
+            :style="pcbLoadingOverlay.styleVars">
+            <div class="loading-ring"
+              :style="[pcbLoadingOverlay.styleVars, { '--progress-deg': progressDegrees(pcbLoadingOverlay.progress) }]">
+              <span class="loading-ring__value">{{ formatPercent(pcbLoadingOverlay.progress) }}</span>
+            </div>
+            <div class="viewer-loading-content space-y-4">
+              <div class="space-y-2">
+                <p class="viewer-loading-title text-lg font-semibold tracking-[0.3em] uppercase text-white/90">
+                  {{ pcbLoadingOverlay.title }}
+                </p>
+                <div class="viewer-loading-meta-row flex flex-wrap items-center gap-2 text-sm text-white/75">
+                  <span class="viewer-loading-stage">{{ pcbLoadingOverlay.detail }}</span>
+                  <span v-if="pcbLoadingOverlay.stats" class="viewer-loading-pill viewer-loading-pill--warm">
+                    <span class="viewer-pill-label">生成进度</span>
+                    <span class="viewer-pill-value">{{ pcbLoadingOverlay.stats }}</span>
+                  </span>
+                </div>
+              </div>
+              <div class="viewer-progress-bar h-2 rounded-full bg-white/5 overflow-hidden">
+                <span class="viewer-progress-fill"
+                  :style="{ width: formatPercent(pcbLoadingOverlay.progress) }" />
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -511,6 +551,41 @@ import { resolveBoardOutlineDescriptor } from '../libs/3d/boardOutline'
 const resetIcon = new URL('../assets/resetting.svg', import.meta.url).href
 const measureIcon = new URL('../assets/measurement.svg', import.meta.url).href
 
+const clampPercentValue = (value) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return 0
+  if (numeric <= 0) return 0
+  if (numeric >= 1) return 1
+  return numeric
+}
+
+const formatPercent = (value) => `${Math.round(clampPercentValue(value) * 100)}%`
+const progressDegrees = (value) => `${Math.round(clampPercentValue(value) * 360)}deg`
+const lerp = (a, b, t) => a + (b - a) * t
+const progressToAccent = (progress) => {
+  const t = clampPercentValue(progress)
+  const hue = lerp(190, 130, t)
+  const sat = lerp(78, 70, t)
+  const light = lerp(58, 55, t)
+  const secondaryHue = Math.max(110, hue - 12)
+  const toHsl = (h, s, l, alpha = 1) => `hsla(${h.toFixed(1)}, ${s.toFixed(1)}%, ${l.toFixed(1)}%, ${alpha})`
+  return {
+    primary: toHsl(hue, sat, light),
+    secondary: toHsl(secondaryHue, Math.min(96, sat + 8), Math.max(42, light - 6)),
+    glow: toHsl(hue, sat, Math.min(85, light + 20), 0.35),
+    text: toHsl(hue, Math.min(95, sat + 10), Math.min(90, light + 22)),
+  }
+}
+const buildOverlayStyles = (progress) => {
+  const accent = progressToAccent(progress)
+  return {
+    '--viewer-accent-from': accent.primary,
+    '--viewer-accent-to': accent.secondary,
+    '--viewer-pill-glow': accent.glow,
+    '--viewer-progress-color': accent.text,
+  }
+}
+
 // 状态
 const currentStatusIndex = ref(0)
 const activeView = ref('layers')
@@ -529,6 +604,14 @@ const layerPanelTransitionEnabled = ref(true)
 const showFilenames = ref(false)
 const isLayerLoading = ref(false)
 const isLayerRenderLoading = ref(false)
+const layerPreviewLoadingState = reactive({
+  active: false,
+  progress: 0,
+  detail: '',
+  message: '',
+  completed: null,
+  total: null,
+})
 const orderedLayers = reactive([])
 const memoryLayers = ref([])
 const fmRef = ref(null)
@@ -1359,6 +1442,68 @@ const topControlsOffset = computed(() => ({
 }))
 const showLayerPreviewLoading = computed(() => isLayerLoading.value || isLayerRenderLoading.value)
 const showPcb3dPreviewLoading = computed(() => isLayerLoading.value || isPcb3dLoading.value)
+const layerLoadingOverlay = computed(() => {
+  const completed = Number.isFinite(layerPreviewLoadingState.completed)
+    ? layerPreviewLoadingState.completed
+    : null
+  const total = Number.isFinite(layerPreviewLoadingState.total)
+    ? layerPreviewLoadingState.total
+    : null
+  const stats =
+    completed !== null && total && total > 0 ? `${Math.min(completed, total)}/${total} 层` : null
+  const fallbackDetail = layerPreviewLoadingState.message
+    || (isLayerLoading.value ? '正在解析叠层数据' : '刷新图层视图')
+  const detail = layerPreviewLoadingState.detail || fallbackDetail
+  let progress = clampPercentValue(layerPreviewLoadingState.progress)
+  if (isLayerLoading.value && progress <= 0.05) progress = 0.12
+  if (!layerPreviewLoadingState.active && isLayerLoading.value) progress = Math.max(progress, 0.1)
+  if (isLayerRenderLoading.value && progress <= 0) progress = 0.05
+  return {
+    title: '叠层初始化构建',
+    detail,
+    progress,
+    stats,
+    styleVars: buildOverlayStyles(progress),
+  }
+})
+const pcbWorkerProgress = computed(() => {
+  const total = pcbModelJobs.total
+  if (total <= 0) {
+    if (workerLoading.value) return 0.05
+    if (viewerLoading.value) return 0.95
+    return 1
+  }
+  const completed = Math.max(0, total - pcbModelJobs.pending)
+  const ratio = completed / Math.max(1, total)
+  return clampPercentValue(ratio)
+})
+const pcbLoadingOverlay = computed(() => {
+  const total = pcbModelJobs.total
+  const completed = Math.max(0, total - pcbModelJobs.pending)
+  const stats = total > 0 ? `${completed}/${total} 层` : null
+  let progress = pcbWorkerProgress.value
+  let detail = ''
+  if (workerLoading.value) {
+    detail = stats ? `几何数据生成中（${stats}）` : '几何数据生成中'
+    if (progress <= 0.05) progress = 0.05
+  } else if (viewerLoading.value) {
+    detail = '同步 3D 场景'
+    progress = progress >= 1 ? 0.95 : Math.max(progress, 0.9)
+  } else if (isLayerLoading.value) {
+    detail = '等待叠层数据完成'
+    progress = Math.max(progress, 0.6)
+  } else {
+    detail = '准备完成'
+    progress = 1
+  }
+  return {
+    title: 'PCB 3D 模型构建',
+    detail,
+    progress: clampPercentValue(progress),
+    stats,
+    styleVars: buildOverlayStyles(progress),
+  }
+})
 
 // 设置面板
 const isSettingsOpen = ref(false)
@@ -1860,7 +2005,42 @@ const setActiveView = (mode) => {
 const openLayerPanel = () => { isLayerPanelOpen.value = true }
 const collapseLayerPanel = () => { isLayerPanelOpen.value = false }
 const handlePcb3dLoading = (loading) => { viewerLoading.value = loading }
-const handleLayerPreviewLoading = (loading) => { isLayerRenderLoading.value = loading }
+const resetLayerPreviewLoadingState = () => {
+  layerPreviewLoadingState.active = false
+  layerPreviewLoadingState.progress = 1
+  layerPreviewLoadingState.detail = ''
+  layerPreviewLoadingState.message = ''
+  layerPreviewLoadingState.completed = null
+  layerPreviewLoadingState.total = null
+}
+const applyLayerPreviewLoadingPayload = (payload) => {
+  layerPreviewLoadingState.active = Boolean(payload.active)
+  layerPreviewLoadingState.progress = clampPercentValue(payload.progress ?? 0)
+  layerPreviewLoadingState.detail = payload.detail || ''
+  layerPreviewLoadingState.message = payload.message || ''
+  layerPreviewLoadingState.completed = Number.isFinite(payload.completed)
+    ? payload.completed
+    : null
+  layerPreviewLoadingState.total = Number.isFinite(payload.total)
+    ? payload.total
+    : null
+}
+const handleLayerPreviewLoading = (payload) => {
+  if (payload && typeof payload === 'object') {
+    const active = Boolean(payload.active)
+    isLayerRenderLoading.value = active
+    applyLayerPreviewLoadingPayload(payload)
+    if (!active) resetLayerPreviewLoadingState()
+    return
+  }
+  const active = Boolean(payload)
+  isLayerRenderLoading.value = active
+  if (!active) {
+    resetLayerPreviewLoadingState()
+    return
+  }
+  applyLayerPreviewLoadingPayload({ active: true, progress: 0, detail: '叠层视图刷新中' })
+}
 const handleLayerPerfEvent = (payload) => {
   if (!payload || !pipelinePerfSession.id) return
   pipelinePerfSession.layerStages.push({
@@ -2402,23 +2582,195 @@ onBeforeUnmount(() => {
   padding: 0.35rem 0.5rem;
 }
 
-.loading-spinner {
-  width: 72px;
-  height: 72px;
-  border-radius: 50%;
-  border: 4px solid rgba(255, 255, 255, 0.15);
-  border-top-color: #3fd3ff;
-  border-right-color: #3fd3ff;
-  animation: viewer-spin 0.9s linear infinite;
+.viewer-loading-overlay {
+  background: rgba(0, 0, 0, 0.55);
 }
 
-@keyframes viewer-spin {
-  0% {
-    transform: rotate(0deg);
-  }
+.viewer-loading-card {
+  --viewer-accent-from: #3fd3ff;
+  --viewer-accent-to: #7167ff;
+  --viewer-pill-glow: rgba(68, 177, 255, 0.35);
+  --viewer-progress-color: #f5fbff;
+  width: min(580px, 92vw);
+  padding: 1.75rem 2.4rem;
+  border-radius: 1.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(145deg, rgba(6, 15, 34, 0.92), rgba(5, 10, 20, 0.98));
+  box-shadow:
+    0 25px 80px rgba(0, 0, 0, 0.6),
+    0 0 35px rgba(63, 211, 255, 0.12);
+  position: relative;
+  overflow: hidden;
+  animation: viewerCardPulse 8s ease-in-out infinite;
+}
 
+.viewer-loading-card::before {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-radius: 1.65rem;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0));
+  pointer-events: none;
+}
+
+.viewer-loading-card::after {
+  content: '';
+  position: absolute;
+  inset: -40% -10% auto;
+  height: 140%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.08), transparent 60%);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.viewer-loading-card--pcb {
+  --viewer-accent-from: #ffb347;
+  --viewer-accent-to: #ff5f8f;
+  --viewer-pill-glow: rgba(255, 179, 71, 0.35);
+  box-shadow:
+    0 25px 90px rgba(0, 0, 0, 0.65),
+    0 0 55px rgba(255, 179, 71, 0.25);
+}
+
+.viewer-loading-title {
+  letter-spacing: 0.35em;
+  text-transform: uppercase;
+  text-shadow:
+    0 0 20px rgba(255, 255, 255, 0.35),
+    0 0 35px rgba(63, 211, 255, 0.3),
+    0 0 50px rgba(63, 211, 255, 0.15);
+}
+
+.loading-ring {
+  --progress-deg: 0deg;
+  position: relative;
+  width: 110px;
+  height: 110px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, rgba(6, 16, 34, 0.85) 62%, transparent 64%),
+    conic-gradient(
+      var(--viewer-accent-from) calc(var(--progress-deg, 0deg) - 6deg),
+      var(--viewer-accent-to) var(--progress-deg, 0deg),
+      rgba(255, 255, 255, 0.06) 0deg
+    );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    0 0 30px rgba(0, 0, 0, 0.55),
+    0 0 50px rgba(63, 211, 255, 0.2),
+    inset 0 0 25px rgba(0, 0, 0, 0.65);
+  animation: viewerRingGlow 5s ease-in-out infinite;
+}
+
+.viewer-loading-card--pcb .loading-ring {
+  box-shadow:
+    0 0 30px rgba(0, 0, 0, 0.55),
+    0 0 50px rgba(255, 179, 71, 0.2),
+    inset 0 0 25px rgba(0, 0, 0, 0.65);
+}
+
+.loading-ring::before {
+  content: '';
+  position: absolute;
+  inset: 12px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(10, 23, 47, 0.95), rgba(4, 9, 18, 0.95));
+  box-shadow: inset 0 0 30px rgba(0, 0, 0, 0.7);
+}
+
+.loading-ring::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.08);
+  mix-blend-mode: screen;
+}
+
+.loading-ring__value {
+  position: relative;
+  font-size: 1rem;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: var(--viewer-progress-color);
+  text-shadow: 0 0 15px rgba(0, 0, 0, 0.45), 0 0 25px var(--viewer-progress-color);
+}
+
+.viewer-loading-meta-row {
+  min-height: 1.75rem;
+}
+
+.viewer-loading-stage {
+  font-size: 0.9rem;
+  letter-spacing: 0.05em;
+}
+
+.viewer-loading-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.75rem;
+  border-radius: 999px;
+  background: linear-gradient(120deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  box-shadow: 0 0 20px var(--viewer-pill-glow);
+}
+
+.viewer-loading-pill--cool {
+  color: #d8f5ff;
+}
+
+.viewer-loading-pill--warm {
+  color: #ffe3c4;
+}
+
+.viewer-pill-label {
+  font-weight: 600;
+  opacity: 0.65;
+}
+
+.viewer-pill-value {
+  font-weight: 700;
+}
+
+.viewer-progress-bar {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.35);
+}
+
+.viewer-progress-fill {
+  display: block;
+  height: 100%;
+  transition: width 0.45s ease;
+  background: linear-gradient(90deg, var(--viewer-accent-from), var(--viewer-accent-to));
+  border-radius: 999px;
+  box-shadow: 0 0 15px rgba(0, 0, 0, 0.35);
+}
+
+@keyframes viewerCardPulse {
+  0%,
   100% {
-    transform: rotate(360deg);
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes viewerRingGlow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 12px rgba(63, 211, 255, 0.35));
+  }
+  50% {
+    filter: drop-shadow(0 0 18px rgba(63, 211, 255, 0.5));
   }
 }
 </style>

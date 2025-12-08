@@ -268,6 +268,42 @@
             </div>
           </div>
         </div>
+
+        <div class="absolute left-4 bottom-4 z-40 flex flex-col items-start gap-3 pointer-events-auto">
+          <transition name="analysis-panel">
+            <div v-if="analysisPanelOpen" class="analysis-panel text-sm text-gray-100 space-y-4" @click.stop>
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <p class="text-base font-semibold tracking-wide">参数解析</p>
+                  <p class="text-[11px] uppercase tracking-[0.3em] text-cyan-300/80">预览</p>
+                </div>
+                <button
+                  class="w-9 h-9 rounded-full border border-white/15 flex items-center justify-center text-white/70 hover:text-white hover:border-white/40 transition"
+                  title="关闭面板" @click.stop="closeAnalysisPanel">
+                  <span class="pi pi-times text-sm"></span>
+                </button>
+              </div>
+              <p class="text-xs text-gray-400 leading-relaxed">
+                当前显示为示例数据，稍后将接入真实的 PCB 解析结果。
+              </p>
+              <div class="analysis-panel__rows">
+                <div v-for="row in analysisResults" :key="row.key" class="analysis-panel-row">
+                  <span class="analysis-panel-row__label">{{ row.label }}</span>
+                  <span class="analysis-panel-row__value">{{ row.value }}</span>
+                </div>
+              </div>
+              <button class="analysis-panel__action-button" @click.stop="handleAnalysisAction">
+                参数分析
+              </button>
+            </div>
+          </transition>
+          <button
+            class="analysis-trigger__button flex items-center gap-2 px-4 py-3 rounded-2xl border border-cyan-400/40 bg-cyan-500/15 text-cyan-100 shadow-[0_12px_35px_rgba(0,0,0,0.45)] hover:bg-cyan-500/30 hover:border-cyan-200/70 transition"
+            :aria-pressed="analysisPanelOpen" title="参数解析" @click.stop="toggleAnalysisPanel">
+            <span class="pi pi-sliders-h text-base"></span>
+            <span class="text-xs font-semibold uppercase tracking-[0.3em]">参数解析</span>
+          </button>
+        </div>
       </section>
     </div>
 
@@ -547,6 +583,7 @@ import {
 } from '@tracespace/plotter'
 import { orderLayerWeight, randomHexColor } from '../libs/gerber_stack'
 import { resolveBoardOutlineDescriptor } from '../libs/3d/boardOutline'
+import { buildAnalysisPayload, runAnalysisJob } from '../libs/analyze'
 
 const resetIcon = new URL('../assets/resetting.svg', import.meta.url).href
 const measureIcon = new URL('../assets/measurement.svg', import.meta.url).href
@@ -615,6 +652,7 @@ const layerPreviewLoadingState = reactive({
 const orderedLayers = reactive([])
 const memoryLayers = ref([])
 const fmRef = ref(null)
+const boardOutlineDescriptor = ref(null)
 const boardViewBox = ref([0, 0, 0, 0])
 const boardWidthMm = ref(0)
 const boardHeightMm = ref(0)
@@ -723,6 +761,118 @@ let spacingHideHandle = null
 const spacingDisplayValue = computed(() => spacingSliderValue.value.toFixed(1))
 const canExplode = computed(() => pcb3dModel.layers.length > 0)
 const downloadMenuOpen = ref(false)
+const defaultAnalysisRows = Object.freeze([
+  { key: 'layerCount', label: 'PCB层数', defaultValue: '待解析' },
+  { key: 'boardSize', label: 'PCB尺寸', defaultValue: '待解析' },
+  { key: 'minTraceWidth', label: '最小线宽', defaultValue: '待解析' },
+  { key: 'minSpacing', label: '最小间距', defaultValue: '待解析' },
+  { key: 'enigArea', label: '沉金面积', defaultValue: '待解析' },
+  { key: 'flyingProbeCount', label: '飞针点数', defaultValue: '待解析' },
+  { key: 'minDrill', label: '最小孔径', defaultValue: '待解析' },
+  { key: 'drillCount', label: '钻孔数量', defaultValue: '待解析' },
+])
+const analysisPanelOpen = ref(false)
+const analysisResults = ref([])
+const getDefaultAnalysisValue = (key) => {
+  const row = defaultAnalysisRows.find((entry) => entry.key === key)
+  return row?.defaultValue ?? '待解析'
+}
+const resetAnalysisResults = () => {
+  analysisResults.value = defaultAnalysisRows.map((row) => ({
+    key: row.key,
+    label: row.label,
+    value: row.defaultValue ?? '待解析',
+  }))
+}
+resetAnalysisResults()
+const toggleAnalysisPanel = () => {
+  analysisPanelOpen.value = !analysisPanelOpen.value
+}
+const closeAnalysisPanel = () => {
+  analysisPanelOpen.value = false
+}
+const analysisPending = ref(false)
+const analysisError = ref(null)
+let analysisJobSeq = 0
+const updateAnalysisValue = (key, value) => {
+  const target = analysisResults.value.find((entry) => entry.key === key)
+  if (target) target.value = value
+}
+const formatDimensionValue = (value) => {
+  if (!Number.isFinite(value)) return null
+  if (value >= 100) return value.toFixed(1)
+  if (value >= 10) return value.toFixed(2)
+  return value.toFixed(2)
+}
+const formatBoardSizeValue = (size) => {
+  if (!size) return '待解析'
+  const width = formatDimensionValue(size.widthMm)
+  const height = formatDimensionValue(size.heightMm)
+  if (!width || !height) return '待解析'
+  return `${width}mm × ${height}mm`
+}
+const formatTraceWidthValue = (value) => {
+  if (!Number.isFinite(value) || value <= 0) return '待解析'
+  const mils = value / 0.0254
+  return `${mils.toFixed(3)} mil`
+}
+const clearTraceMetrics = () => {
+  updateAnalysisValue('minTraceWidth', getDefaultAnalysisValue('minTraceWidth'))
+}
+const applyAnalysisResult = (result) => {
+  if (!analysisResults.value.length) return
+  const layerCount = Number(result?.copperLayerCount)
+  updateAnalysisValue(
+    'layerCount',
+    Number.isFinite(layerCount) && layerCount >= 0 ? `${layerCount}` : '待解析'
+  )
+  updateAnalysisValue('boardSize', formatBoardSizeValue(result?.boardSize))
+  if (Number.isFinite(result?.minTraceWidth)) {
+    updateAnalysisValue('minTraceWidth', formatTraceWidthValue(result.minTraceWidth))
+  }
+}
+const runAnalysis = ({ includeTraceMetrics = false } = {}) => {
+  if (!includeTraceMetrics) {
+    clearTraceMetrics()
+  }
+  const payload = buildAnalysisPayload({
+    fm: fmRef.value,
+    boardOutlineDescriptor: boardOutlineDescriptor.value,
+    unitMmPerUnit: unitMmPerUnit.value,
+    includeTraceMetrics,
+  })
+  if (!payload) {
+    if (includeTraceMetrics) clearTraceMetrics()
+    return Promise.resolve()
+  }
+  if (includeTraceMetrics) {
+    analysisPending.value = true
+    analysisError.value = null
+    clearTraceMetrics()
+  }
+  const jobId = ++analysisJobSeq
+  return runAnalysisJob(payload)
+    .then((result) => {
+      if (jobId !== analysisJobSeq) return
+      applyAnalysisResult(result)
+    })
+    .catch((error) => {
+      if (jobId !== analysisJobSeq) return
+      if (includeTraceMetrics) {
+        analysisError.value = error?.message || '解析失败'
+        console.error('[GerberViewer] analysis worker failed', error)
+        clearTraceMetrics()
+      }
+    })
+    .finally(() => {
+      if (jobId === analysisJobSeq && includeTraceMetrics) {
+        analysisPending.value = false
+      }
+    })
+}
+const handleAnalysisAction = () => {
+  runAnalysis({ includeTraceMetrics: true })
+}
 const previewAreaRef = ref(null)
 const previewSize = reactive({ width: 0, height: 0 })
 const previewContainerWidth = computed(() => (previewSize.width > 0 ? `${previewSize.width}px` : '100%'))
@@ -1299,6 +1449,7 @@ const resetPcb3dDisplaySettings = () => {
 const handleGlobalClick = () => {
   downloadMenuOpen.value = false
   displayMenuOpen.value = false
+  closeAnalysisPanel()
 }
 const countDrillShapesInPayload = (payload) => {
   if (!payload) return 0
@@ -1766,8 +1917,14 @@ const applyWorkerLayer = (payload) => {
 }
 
 const refreshBoardOutlineState = (plotResult) => {
-  if (!plotResult) return null
-  return resolveBoardOutlineDescriptor(plotResult)
+  if (!plotResult) {
+    boardOutlineDescriptor.value = null
+    return null
+  }
+  const descriptor = resolveBoardOutlineDescriptor(plotResult)
+  boardOutlineDescriptor.value = descriptor
+  runAnalysis()
+  return descriptor
 }
 
 const limitDrillImageEntries = (entries) => {
@@ -2218,6 +2375,7 @@ const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
     })
   }
   orderedLayers.sort((a, b) => a.weight - b.weight)
+  runAnalysis()
 }
 
 const collectLayerTypeSideChanges = (editedEntries, fmLayers) => {
@@ -2509,6 +2667,16 @@ watch(
   }
 )
 
+watch(currentStatusIndex, (value) => {
+  if (value === 0) {
+    closeAnalysisPanel()
+    resetAnalysisResults()
+    boardOutlineDescriptor.value = null
+    analysisError.value = null
+    analysisPending.value = false
+  }
+})
+
 watch(activeView, (value) => {
   if (value !== '3d') {
     displayMenuOpen.value = false
@@ -2772,5 +2940,77 @@ onBeforeUnmount(() => {
   50% {
     filter: drop-shadow(0 0 18px rgba(63, 211, 255, 0.5));
   }
+}
+
+.analysis-panel {
+  width: min(340px, 90vw);
+  padding: 1.4rem 1.6rem 1.25rem;
+  border-radius: 1.25rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(155deg, rgba(3, 9, 22, 0.98), rgba(8, 20, 40, 0.94));
+  box-shadow:
+    0 18px 45px rgba(0, 0, 0, 0.7),
+    0 0 25px rgba(45, 196, 255, 0.15);
+  backdrop-filter: blur(18px);
+}
+
+.analysis-panel__rows {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 0.35rem 0;
+}
+
+.analysis-panel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.45rem 0;
+  font-size: 0.92rem;
+}
+
+.analysis-panel-row + .analysis-panel-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.analysis-panel-row__label {
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 0.85rem;
+}
+
+.analysis-panel-row__value {
+  color: #e8fbff;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.analysis-panel__action-button {
+  width: 100%;
+  border: none;
+  border-radius: 0.95rem;
+  padding: 0.75rem;
+  margin-top: 0.35rem;
+  background: linear-gradient(120deg, #22d3ee, #0ea5e9);
+  color: #05121f;
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  box-shadow: 0 14px 35px rgba(14, 165, 233, 0.35);
+  cursor: pointer;
+  transition: filter 0.2s ease;
+}
+
+.analysis-panel__action-button:hover {
+  filter: brightness(1.08);
+}
+
+.analysis-panel-enter-active,
+.analysis-panel-leave-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.analysis-panel-enter-from,
+.analysis-panel-leave-to {
+  opacity: 0;
+  transform: translateY(14px) scale(0.97);
 }
 </style>

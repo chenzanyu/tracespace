@@ -220,6 +220,28 @@ const buildBoardHolePolygon = (boardShapePolygons, boardShapeRegions) => {
   return extractHoleMultiPolygon(polygons)
 }
 
+const buildBoardClipPolygon = (
+  boardShapePolygons,
+  boardShapeRegions,
+  boardBounds,
+  boardClipRegions,
+  imageTree
+) => {
+  const sanitized = sanitizeMultiPolygon(boardShapePolygons)
+  if (sanitized && sanitized.length) {
+    return sanitized
+  }
+  let regionSource = null
+  if (Array.isArray(boardShapeRegions) && boardShapeRegions.length) {
+    regionSource = boardShapeRegions
+  } else if (Array.isArray(boardClipRegions) && boardClipRegions.length) {
+    regionSource = boardClipRegions
+  } else {
+    regionSource = getFallbackBoardRegions(imageTree, boardBounds, boardClipRegions)
+  }
+  return regionSource ? regionsToMultiPolygon(regionSource) : null
+}
+
 const rectangleRegionFromBounds = bounds => {
   if (!Array.isArray(bounds) || bounds.length < 4) return null
   const [x1, y1, x2, y2] = bounds
@@ -607,6 +629,27 @@ const subtractMultiPolygon = (subject, removal, stats = null) => {
   }
 }
 
+const intersectMultiPolygon = (subject, clip, stats = null) => {
+  if (!subject || subject.length === 0) return null
+  if (!clip || clip.length === 0) return null
+  const start = typeof performance !== 'undefined' ? performance.now() : null
+  try {
+    const result = polygonClipping.intersection(subject, clip)
+    if (start !== null && stats) {
+      stats.intersectCount = (stats.intersectCount || 0) + 1
+      stats.intersectTime = (stats.intersectTime || 0) + (performance.now() - start)
+    }
+    return sanitizeMultiPolygon(result)
+  } catch (error) {
+    const message = error?.message || 'unknown'
+    if (!reportedUnionFailures.has(`intersect:${message}`)) {
+      console.warn('[pcbModel] polygon intersection failed', {message})
+      reportedUnionFailures.add(`intersect:${message}`)
+    }
+    return cloneMultiPolygon(subject)
+  }
+}
+
 const extendBounds = (bounds, addition) => {
   if (!addition) return bounds
   if (!bounds) return {...addition}
@@ -911,12 +954,22 @@ let boardHolePolygon = buildBoardHolePolygon(boardShapePolygons, boardShapeRegio
 boardHolePolygon = simplifyMultiPolygonForLayer(boardHolePolygon, 'outline', simplifyTolerances)
 const boardHoleBounds = boardHolePolygon ? getMultiPolygonBounds(boardHolePolygon) : null
 
+let boardClipPolygon = buildBoardClipPolygon(
+  boardShapePolygons,
+  boardShapeRegions,
+  boardBounds,
+  boardClipRegions,
+  imageTree
+)
+boardClipPolygon = simplifyMultiPolygonForLayer(boardClipPolygon, 'outline', simplifyTolerances)
+const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygon) : null
+
   if (isSolderMaskLayer) {
-    const regionInput =
-      Array.isArray(boardShapeRegions) && boardShapeRegions.length
-        ? boardShapeRegions
-        : getFallbackBoardRegions(imageTree, boardBounds, boardClipRegions)
-    const boardMaskPolygon = regionsToMultiPolygon(regionInput)
+    let boardMaskPolygon = boardClipPolygon
+    if (!boardMaskPolygon) {
+      const fallbackRegions = getFallbackBoardRegions(imageTree, boardBounds, boardClipRegions)
+      boardMaskPolygon = fallbackRegions ? regionsToMultiPolygon(fallbackRegions) : null
+    }
     if (boardMaskPolygon) {
       initialDarkPolygons.push({
         polygon: boardMaskPolygon,
@@ -1036,6 +1089,14 @@ const boardHoleBounds = boardHolePolygon ? getMultiPolygonBounds(boardHolePolygo
     if (clearUnion) {
         result = subtractMultiPolygon(result, clearUnion)
       resultBounds = getMultiPolygonBounds(result)
+    }
+    if (result && boardClipPolygon) {
+      const shouldApplyBoardClip =
+        !resultBounds || !boardClipBounds || boundsOverlap(resultBounds, boardClipBounds)
+      if (shouldApplyBoardClip) {
+        result = intersectMultiPolygon(result, boardClipPolygon)
+        resultBounds = getMultiPolygonBounds(result)
+      }
     }
     if (result && drillHolePolygon) {
       const shouldApplyDrill =

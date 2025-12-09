@@ -62,6 +62,8 @@ const GRID_TARGET_BUCKET_SIZE = 120
 const GRID_MIN_GEOMETRIES_FOR_GRID = 80
 const GRID_MAX_GRID_DIVISIONS = 32
 const GRID_MIN_CELL_SIZE = 1e-6
+const GRID_MIN_BUCKET_TARGET = 24
+const GRID_MAX_RECURSION_DEPTH = 4
 
 type PerformanceLike = {now: () => number}
 
@@ -338,20 +340,26 @@ export function analyzeSpacingRule(
     options?.searchTolerance ?? Math.max(result.mmPerUnit / 1000, 1e-5)
   const spacingMil = Math.max(ruleMil, tolerance * MILS_PER_MM * 2)
   const spacingUnits = milToUnits(spacingMil, result.mmPerUnit)
-  const detection = detectSpacingViolations(
+  const measurement = measureSpacingBetweenComponents(
     result.components,
-    spacingUnits / 2,
-    result.geometryFactory
+    result.geometryFactory,
+    result.mmPerUnit,
+    tolerance
   )
-  const violations = detection.geometry
-  const hasViolations = !violations.isEmpty()
-  const referenceGeometry = hasViolations
-    ? violations
-    : result.composite
-  const coordinate = referenceGeometry.getInteriorPoint().getCoordinate()
-  const location: Position | null = coordinate
-    ? [coordinate.x, coordinate.y]
-    : null
+  const emptyGeometry = result.geometryFactory.createGeometryCollection([])
+  const hasViolations =
+    measurement !== null && measurement.spacingMil + EPSILON < spacingMil
+  const violations = hasViolations && measurement?.violations
+    ? measurement.violations
+    : emptyGeometry
+  const location: Position | null = hasViolations
+    ? measurement?.location ?? null
+    : (() => {
+        const coordinate = result.composite
+          .getInteriorPoint()
+          .getCoordinate()
+        return coordinate ? [coordinate.x, coordinate.y] : null
+      })()
   const spacingMm = spacingUnits * result.mmPerUnit
   const durationMs = getTimestamp() - ruleStart
 
@@ -364,9 +372,8 @@ export function analyzeSpacingRule(
     hasViolations,
     metrics: {
       durationMs,
-      candidatePairs: detection.metrics.candidatePairs,
-      evaluatedPairs: detection.metrics.evaluatedPairs,
-      overlappingPairs: detection.metrics.overlappingPairs,
+      candidatePairs: measurement?.metrics?.candidatePairs,
+      evaluatedPairs: measurement?.metrics?.evaluatedPairs,
     },
   }
 }
@@ -750,7 +757,7 @@ function mergeRunGeometries(geometries: Geometry[]): Geometry | null {
     return unionGeometries(geometries)
   }
 
-  const buckets = partitionGeometriesByGrid(geometries)
+  const buckets = splitGeometriesByGrid(geometries)
   if (buckets.length <= 1) {
     return unionGeometries(geometries)
   }
@@ -796,16 +803,31 @@ function partitionGeometriesByGrid(geometries: Geometry[]): Geometry[][] {
     return [geometries]
   }
 
-  const divisions = Math.min(
-    GRID_MAX_GRID_DIVISIONS,
-    Math.max(1, Math.ceil(Math.sqrt(approxBuckets)))
+  const aspectRatio =
+    height <= GRID_MIN_CELL_SIZE
+      ? GRID_MAX_GRID_DIVISIONS
+      : Math.max(width / height, GRID_MIN_CELL_SIZE)
+  let columns = Math.max(
+    1,
+    Math.round(Math.sqrt(approxBuckets * aspectRatio))
   )
-  if (divisions <= 1) {
+  let rows = Math.max(1, Math.ceil(approxBuckets / columns))
+  columns = Math.min(columns, GRID_MAX_GRID_DIVISIONS)
+  rows = Math.min(rows, GRID_MAX_GRID_DIVISIONS)
+  if (columns * rows < approxBuckets) {
+    const scale = Math.ceil(Math.sqrt(approxBuckets / (columns * rows)))
+    columns = Math.min(columns * scale, GRID_MAX_GRID_DIVISIONS)
+    rows = Math.min(
+      Math.max(rows, Math.ceil(approxBuckets / Math.max(columns, 1))),
+      GRID_MAX_GRID_DIVISIONS
+    )
+  }
+  if (columns <= 1 && rows <= 1) {
     return [geometries]
   }
 
-  const cellWidth = Math.max(width / divisions, GRID_MIN_CELL_SIZE)
-  const cellHeight = Math.max(height / divisions, GRID_MIN_CELL_SIZE)
+  const cellWidth = Math.max(width / columns, GRID_MIN_CELL_SIZE)
+  const cellHeight = Math.max(height / rows, GRID_MIN_CELL_SIZE)
   const buckets = new Map<string, Geometry[]>()
 
   geometries.forEach((geometry, index) => {
@@ -824,11 +846,11 @@ function partitionGeometriesByGrid(geometries: Geometry[]): Geometry[][] {
     const centerX = (envelope.getMinX() + envelope.getMaxX()) / 2
     const centerY = (envelope.getMinY() + envelope.getMaxY()) / 2
     const col = Math.min(
-      divisions - 1,
+      columns - 1,
       Math.max(0, Math.floor((centerX - minX) / cellWidth))
     )
     const row = Math.min(
-      divisions - 1,
+      rows - 1,
       Math.max(0, Math.floor((centerY - minY) / cellHeight))
     )
     const key = `${col}:${row}`
@@ -843,6 +865,50 @@ function partitionGeometriesByGrid(geometries: Geometry[]): Geometry[][] {
   const partitioned = Array.from(buckets.values())
   partitioned.sort((a, b) => b.length - a.length)
   return partitioned
+}
+
+function splitGeometriesByGrid(
+  geometries: Geometry[],
+  depth = 0
+): Geometry[][] {
+  if (geometries.length === 0) return []
+  if (depth >= GRID_MAX_RECURSION_DEPTH) {
+    return [geometries]
+  }
+
+  const adaptiveTarget = Math.max(
+    GRID_MIN_BUCKET_TARGET,
+    Math.floor(GRID_TARGET_BUCKET_SIZE / Math.max(1, Math.pow(2, depth)))
+  )
+  if (geometries.length <= adaptiveTarget) {
+    return [geometries]
+  }
+
+  const buckets = partitionGeometriesByGrid(geometries)
+  if (buckets.length <= 1) {
+    return [geometries]
+  }
+
+  const result: Geometry[][] = []
+  buckets.forEach(bucket => {
+    if (bucket.length === 0) {
+      return
+    }
+
+    if (bucket.length <= adaptiveTarget || depth + 1 >= GRID_MAX_RECURSION_DEPTH) {
+      result.push(bucket)
+      return
+    }
+
+    const nested = splitGeometriesByGrid(bucket, depth + 1)
+    if (nested.length === 0) {
+      result.push(bucket)
+    } else {
+      result.push(...nested)
+    }
+  })
+
+  return result.length > 0 ? result : [geometries]
 }
 
 function safeUnion(a: Geometry | null, b: Geometry): Geometry {
@@ -1100,15 +1166,6 @@ interface SpatialIndexEntry {
   index: number
 }
 
-interface SpacingViolationDetectionResult {
-  geometry: Geometry
-  metrics: {
-    candidatePairs: number
-    evaluatedPairs: number
-    overlappingPairs: number
-  }
-}
-
 function buildSpatialEntries(components: Geometry[]): SpatialIndexEntry[] {
   const entries: SpatialIndexEntry[] = []
 
@@ -1124,89 +1181,6 @@ function buildSpatialEntries(components: Geometry[]): SpatialIndexEntry[] {
   })
 
   return entries
-}
-
-function bufferGeometryCached(
-  geometry: Geometry,
-  distance: number,
-  cache: Map<Geometry, Geometry>
-): Geometry {
-  const cached = cache.get(geometry)
-  if (cached !== undefined) return cached
-  const buffered = safeBuffer(geometry, distance)
-  cache.set(geometry, buffered)
-  return buffered
-}
-
-function detectSpacingViolations(
-  components: Geometry[],
-  halfSpacing: number,
-  geometryFactory: GeometryFactory
-): SpacingViolationDetectionResult {
-  const empty = geometryFactory.createGeometryCollection([])
-  if (components.length === 0 || halfSpacing <= 0) {
-    return {
-      geometry: empty,
-      metrics: {candidatePairs: 0, evaluatedPairs: 0, overlappingPairs: 0},
-    }
-  }
-
-  const entries = buildSpatialEntries(components)
-  if (entries.length < 2) {
-    return {
-      geometry: empty,
-      metrics: {candidatePairs: 0, evaluatedPairs: 0, overlappingPairs: 0},
-    }
-  }
-
-  const index = new STRtree()
-  entries.forEach(entry => index.insert(entry.envelope, entry))
-  index.build()
-
-  let candidatePairs = 0
-  let evaluatedPairs = 0
-  let overlappingPairs = 0
-  const overlaps: Geometry[] = []
-  const envelopeExpansion = Math.max(halfSpacing * 2, halfSpacing + 1e-6)
-  const bufferCache = new Map<Geometry, Geometry>()
-
-  for (const entry of entries) {
-    const searchEnvelope = new Envelope(entry.envelope)
-    searchEnvelope.expandBy(envelopeExpansion)
-    const candidates = index.query(searchEnvelope) as SpatialIndexEntry[]
-
-    for (const candidate of candidates) {
-      if (candidate.index <= entry.index) continue
-      candidatePairs += 1
-      const envelopeGap = entry.envelope.distance(candidate.envelope)
-      if (envelopeGap - EPSILON > halfSpacing * 2) continue
-      evaluatedPairs += 1
-
-      const bufferedA = bufferGeometryCached(
-        entry.geometry,
-        halfSpacing,
-        bufferCache
-      )
-      const bufferedB = bufferGeometryCached(
-        candidate.geometry,
-        halfSpacing,
-        bufferCache
-      )
-      const overlap = safeIntersection(bufferedA, bufferedB)
-      if (!overlap.isEmpty()) {
-        overlappingPairs += 1
-        overlaps.push(overlap)
-      }
-    }
-  }
-
-  const geometry =
-    unionGeometries(overlaps) ?? geometryFactory.createGeometryCollection([])
-
-  return {
-    geometry,
-    metrics: {candidatePairs, evaluatedPairs, overlappingPairs},
-  }
 }
 
 function safeBuffer(geometry: Geometry, distance: number): Geometry {

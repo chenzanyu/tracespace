@@ -6,6 +6,7 @@
     {"path": "./packages/parser"},
     {"path": "./packages/plotter"},
     {"path": "./packages/renderer"},
+    {"path": "./packages/pcb_analysis"},
     {"path": "./packages/xml-id"}
   ]
 }

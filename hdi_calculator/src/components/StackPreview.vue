@@ -1,11 +1,16 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
 
+defineOptions({
+  name: 'StackPreview'
+})
+
 const COLORS = {
   copper: '#d68c04',
   pp: '#ffffb8',
   core: '#e0c855',
-  drill: '#d68c04'
+  drill: '#d68c04',
+  throughHole: '#b8733f'
 }
 
 const props = defineProps({
@@ -45,7 +50,8 @@ const TRANSLATIONS = {
     },
     indicators: {
       stackFlag: 'Stack',
-      emptyTip: 'No via structures defined yet'
+      emptyTip: 'No via structures defined yet',
+      throughHole: 'Through hole'
     },
     hole: {
       range: (start, end) => `L${start} -> L${end}`
@@ -98,7 +104,8 @@ const TRANSLATIONS = {
     },
     indicators: {
       stackFlag: '堆叠',
-      emptyTip: '尚未配置任何孔'
+      emptyTip: '尚未配置任何孔',
+      throughHole: '通孔'
     },
     hole: {
       range: (start, end) => `第${start}层 -> 第${end}层`
@@ -152,6 +159,31 @@ const holeForm = reactive({
 })
 
 const holes = ref([])
+const defaultThroughHoleId = ref(null)
+const defaultThroughHoleRemoved = ref(false)
+const ensureDefaultThroughHole = () => {
+  if (defaultThroughHoleRemoved.value) return
+  if (defaultThroughHoleId.value !== null) {
+    const existing = holes.value.find(h => h.id === defaultThroughHoleId.value)
+    if (existing) {
+      existing.type = 'mechanical'
+      existing.startLayer = 1
+      existing.endLayer = layerCount.value
+      existing.stacked = false
+      return
+    }
+    defaultThroughHoleId.value = null
+  }
+  const throughHole = {
+    id: nextHoleId++,
+    type: 'mechanical',
+    startLayer: 1,
+    endLayer: layerCount.value,
+    stacked: false
+  }
+  holes.value = [...holes.value, throughHole]
+  defaultThroughHoleId.value = throughHole.id
+}
 const errorState = ref(null)
 const errorMessage = computed(() => {
   if (!errorState.value) return ''
@@ -166,6 +198,9 @@ const clearError = () => {
   errorState.value = null
 }
 const formatHoleRange = (start, end) => i18n.value.hole.range(start, end)
+const isThroughHole = hole =>
+  hole.type === 'mechanical' && hole.startLayer === 1 && hole.endLayer === layerCount.value
+const isDefaultThroughHoleEntry = hole => defaultThroughHoleId.value !== null && hole.id === defaultThroughHoleId.value
 const activeHoleId = ref(null)
 let nextHoleId = 1
 
@@ -213,14 +248,23 @@ const addHole = () => {
 }
 
 const removeHole = id => {
+  if (defaultThroughHoleId.value === id) {
+    defaultThroughHoleRemoved.value = true
+    defaultThroughHoleId.value = null
+  }
   holes.value = holes.value.filter(h => h.id !== id)
 }
 
 const clearHoles = () => {
   holes.value = []
+  if (defaultThroughHoleId.value !== null) {
+    defaultThroughHoleRemoved.value = true
+    defaultThroughHoleId.value = null
+  }
 }
 
 watch(layerCount, value => {
+  ensureDefaultThroughHole()
   holes.value = holes.value.filter(h => h.startLayer <= value && h.endLayer <= value)
   if (holeForm.startLayer > value) holeForm.startLayer = value
   if (holeForm.endLayer > value) holeForm.endLayer = Math.min(value, Math.max(holeForm.startLayer + 1, 2))
@@ -232,6 +276,8 @@ watch(
     if (errorState.value) clearError()
   }
 )
+
+ensureDefaultThroughHole()
 
 const visualLayers = computed(() => {
   const results = []
@@ -266,6 +312,7 @@ const LAYER_WIDTH = 320
 const PADDING_TOP = 4
 const PADDING_LEFT = 20
 const TEXT_AREA_WIDTH = 140
+const DEFAULT_VIA_CENTER_OFFSET = 40
 
 const renderedLayers = computed(() => {
   let currentY = PADDING_TOP
@@ -324,10 +371,23 @@ const renderedVias = computed(() => {
   const vias = []
   const contentCenterX = PADDING_LEFT + LAYER_WIDTH / 2
   const stepX = isCompact.value ? 26 : 34
-  const startX = contentCenterX - ((groups.length - 1) * stepX) / 2
 
-  groups.forEach((group, idx) => {
-    const centerX = startX + idx * stepX
+  let defaultGroup = null
+  const defaultId = defaultThroughHoleId.value
+  const otherGroups = []
+  groups.forEach(group => {
+    if (!defaultGroup && defaultId !== null && group.some(h => h.id === defaultId)) {
+      defaultGroup = group
+    } else {
+      otherGroups.push(group)
+    }
+  })
+
+  const visibleGroups = otherGroups
+  const startX =
+    visibleGroups.length > 0 ? contentCenterX - ((visibleGroups.length - 1) * stepX) / 2 : contentCenterX
+
+  const pushGroup = (group, centerX) => {
     group.forEach(hole => {
       const start = renderedLayers.value.find(l => l.copperIndex === hole.startLayer)
       const end = renderedLayers.value.find(l => l.copperIndex === hole.endLayer)
@@ -341,11 +401,22 @@ const renderedVias = computed(() => {
         width: 20,
         height: yBottom - yTop,
         label: hole.type === 'laser' ? 'L' : 'M',
-        fill: COLORS.drill,
+        fill: hole.id === defaultId ? COLORS.throughHole : COLORS.drill,
         isActive: activeHoleId.value === hole.id
       })
     })
+  }
+
+  visibleGroups.forEach((group, idx) => {
+    const centerX = startX + idx * stepX
+    pushGroup(group, centerX)
   })
+
+  if (defaultGroup) {
+    const defaultCenterX = PADDING_LEFT + DEFAULT_VIA_CENTER_OFFSET
+    pushGroup(defaultGroup, defaultCenterX)
+  }
+
   return vias
 })
 
@@ -476,7 +547,7 @@ const handleConfirm = () => {
               v-for="hole in holes"
               :key="hole.id"
               class="hole-item"
-              :class="{ active: activeHoleId === hole.id }"
+              :class="{ active: activeHoleId === hole.id, 'default-through-hole': isDefaultThroughHoleEntry(hole) }"
               @mouseenter="activeHoleId = hole.id"
               @mouseleave="activeHoleId = null"
             >
@@ -484,6 +555,7 @@ const handleConfirm = () => {
                 <span class="hole-badge" :class="hole.type">{{ hole.type === 'laser' ? 'L' : 'M' }}</span>
                 <span class="hole-text">{{ formatHoleRange(hole.startLayer, hole.endLayer) }}</span>
                 <span v-if="hole.stacked" class="stack-flag">{{ i18n.indicators.stackFlag }}</span>
+                <span v-if="isThroughHole(hole)" class="through-hole-label">{{ i18n.indicators.throughHole }}</span>
               </div>
               <button class="btn-remove" type="button" @click="removeHole(hole.id)">×</button>
             </div>
@@ -718,6 +790,11 @@ const handleConfirm = () => {
   background: #eef2ff;
 }
 
+.hole-item.default-through-hole {
+  background: #f5f5f5;
+  border-color: #e4e4e7;
+}
+
 .hole-info {
   display: flex;
   align-items: center;
@@ -756,6 +833,14 @@ const handleConfirm = () => {
   color: #16a34a;
   background: #dcfce7;
   padding: 0 5px;
+  border-radius: 5px;
+}
+
+.through-hole-label {
+  font-size: 10px;
+  color: #b8733f;
+  background: #f5e7db;
+  padding: 0 6px;
   border-radius: 5px;
 }
 

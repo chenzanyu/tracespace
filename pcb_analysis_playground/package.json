@@ -1,0 +1,24 @@
+{
+  "name": "pcb_analysis_playground",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tracespace/parser": "workspace:*",
+    "@tracespace/plotter": "workspace:*",
+    "@tracespace/pcb-analysis": "workspace:*",
+    "jsts": "^2.12.1",
+    "preact": "^10.11.3"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.5.0",
+    "@types/geojson": "^7946.0.14",
+    "typescript": "^4.9.4",
+    "vite": "^4.0.4"
+  }
+}

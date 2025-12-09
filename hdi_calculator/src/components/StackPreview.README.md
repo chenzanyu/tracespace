@@ -75,6 +75,25 @@ const handleConfirm = ({ layers: pcbLayers, stage }) => {
 </template>
 ```
 
+## 库打包方式
+
+1. 运行 `pnpm -C hdi_calculator build:lib`，Vite 会以库模式打包 `src/lib.js` 并生成 `stack-preview.es.js`、`stack-preview.umd.js` 及 `hdi_calculator.css`。
+2. 在业务项目中直接导入即可：
+
+```js
+import { createApp } from 'vue'
+import StackPreview from 'hdi_calculator'
+import 'hdi_calculator/dist/hdi_calculator.css'
+
+const app = createApp(App)
+app.use(StackPreview) // 默认导出可作为插件注册
+
+// 如果仅需使用组件
+// import { StackPreview as StackPreviewComponent } from 'hdi_calculator'
+// app.component('StackPreview', StackPreviewComponent)
+```
+
+
 ## 交互流程
 
 1. **层数控制**：父组件通过 `v-model:layers` 传入合法层数值；组件内部会据此刷新堆叠示意、合法孔范围与阶数上限。

@@ -1,0 +1,47 @@
+{
+  "name": "@tracespace/pcb-analysis",
+  "publishConfig": {
+    "access": "public"
+  },
+  "version": "5.0.0-alpha.0",
+  "description": "Convert tracespace plot trees into JSTS geometries for PCB analysis.",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    "types": "./lib/index.d.ts",
+    "source": "./src/index.ts",
+    "import": "./dist/tracespace-pcb-analysis.js",
+    "require": "./dist/tracespace-pcb-analysis.umd.cjs"
+  },
+  "files": [
+    "dist",
+    "lib",
+    "src",
+    "!**/__tests__/**"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tracespace/tracespace.git",
+    "directory": "packages/pcb_analysis"
+  },
+  "scripts": {
+    "build": "vite build"
+  },
+  "keywords": [
+    "pcb",
+    "analysis",
+    "geometry",
+    "gerber"
+  ],
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/tracespace/tracespace/issues"
+  },
+  "homepage": "https://github.com/tracespace/tracespace#readme",
+  "dependencies": {
+    "@tracespace/parser": "workspace:*",
+    "@tracespace/plotter": "workspace:*",
+    "jsts": "^2.11.4"
+  }
+}

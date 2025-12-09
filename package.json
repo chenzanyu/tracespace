@@ -26,6 +26,7 @@
     "@tracespace/identify-layers": "workspace:*",
     "@tracespace/parser": "workspace:*",
     "@tracespace/plotter": "workspace:*",
+    "@tracespace/pcb-analysis": "workspace:*",
     "@tracespace/renderer": "workspace:*",
     "@tracespace/xml-id": "workspace:*"
   },

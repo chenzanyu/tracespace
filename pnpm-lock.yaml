@@ -20,6 +20,9 @@ importers:
       '@tracespace/parser':
         specifier: workspace:*
         version: link:packages/parser
+      '@tracespace/pcb-analysis':
+        specifier: workspace:*
+        version: link:packages/pcb_analysis
       '@tracespace/plotter':
         specifier: workspace:*
         version: link:packages/plotter
@@ -248,6 +251,18 @@ importers:
         specifier: ^0.5.2
         version: 0.5.2
 
+  packages/pcb_analysis:
+    dependencies:
+      '@tracespace/parser':
+        specifier: workspace:*
+        version: link:../parser
+      '@tracespace/plotter':
+        specifier: workspace:*
+        version: link:../plotter
+      jsts:
+        specifier: ^2.11.4
+        version: 2.12.1
+
   packages/plotter:
     dependencies:
       '@tracespace/parser':
@@ -280,6 +295,37 @@ importers:
         version: 7.2.0
 
   packages/xml-id: {}
+
+  pcb_analysis_playground:
+    dependencies:
+      '@tracespace/parser':
+        specifier: workspace:*
+        version: link:../packages/parser
+      '@tracespace/pcb-analysis':
+        specifier: workspace:*
+        version: link:../packages/pcb_analysis
+      '@tracespace/plotter':
+        specifier: workspace:*
+        version: link:../packages/plotter
+      jsts:
+        specifier: ^2.12.1
+        version: 2.12.1
+      preact:
+        specifier: ^10.11.3
+        version: 10.27.2
+    devDependencies:
+      '@preact/preset-vite':
+        specifier: ^2.5.0
+        version: 2.10.2(@babel/core@7.28.5)(preact@10.27.2)(vite@4.5.14(@types/node@18.19.130)(lightningcss@1.30.2))
+      '@types/geojson':
+        specifier: ^7946.0.14
+        version: 7946.0.16
+      typescript:
+        specifier: ^4.9.4
+        version: 4.9.5
+      vite:
+        specifier: ^4.0.4
+        version: 4.5.14(@types/node@18.19.130)(lightningcss@1.30.2)
 
 packages:
 
@@ -1087,6 +1133,9 @@ packages:
 
   '@types/estree@1.0.8':
     resolution: {integrity: sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w==}
+
+  '@types/geojson@7946.0.16':
+    resolution: {integrity: sha512-6C8nqWur3j98U6+lXDfTUWIfgvZU+EumvpHKcYjujKH7woYyLj2sUmff0tRhrqM7BohUw7Pz3ZB1jj2gW9Fvmg==}
 
   '@types/hast@2.3.10':
     resolution: {integrity: sha512-McWspRw8xx8J9HurkVBfYj0xKoE25tOFlHGdx4MJ5xORQrMGZNqJhVQWaIbm6Oyla5kYOXtDiopzKRJzEOkwJw==}
@@ -4070,6 +4119,8 @@ snapshots:
   '@types/earcut@3.0.0': {}
 
   '@types/estree@1.0.8': {}
+
+  '@types/geojson@7946.0.16': {}
 
   '@types/hast@2.3.10':
     dependencies:

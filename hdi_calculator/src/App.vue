@@ -6,7 +6,7 @@ const LAYER_OPTIONS = [4, 6, 8, 10, 12]
 
 const showDialog = ref(true)
 const layers = ref(6)
-const language = 'zh'
+const language = 'en'
 const lastResult = ref(null)
 const headerSummary = ref({
   stageDisplay: '0',

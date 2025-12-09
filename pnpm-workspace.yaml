@@ -2,3 +2,4 @@ packages:
   - 'packages/*'
   - 'gerber_viewer'
   - 'hdi_calculator'
+  - 'pcb_analysis_playground'

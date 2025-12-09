@@ -6,14 +6,28 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:lib": "vite build --mode lib",
     "preview": "vite preview"
   },
-  "dependencies": {
+  "main": "./dist/stack-preview.umd.js",
+  "module": "./dist/stack-preview.es.js",
+  "exports": {
+    ".": {
+      "import": "./dist/stack-preview.es.js",
+      "require": "./dist/stack-preview.umd.js",
+      "default": "./dist/stack-preview.es.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
     "vue": "^3.5.22"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.1",
+    "vue": "^3.5.22",
     "vite": "^7.1.7"
   }
 }
-

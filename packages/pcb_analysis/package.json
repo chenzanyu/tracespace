@@ -42,6 +42,7 @@
   "dependencies": {
     "@tracespace/parser": "workspace:*",
     "@tracespace/plotter": "workspace:*",
-    "jsts": "^2.11.4"
+    "jsts": "^2.11.4",
+    "polygon-clipping": "^0.15.7"
   }
 }

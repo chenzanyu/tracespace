@@ -8,8 +8,16 @@ import type {
   Polygon as GeoJsonPolygon,
 } from 'geojson'
 
-import {gerberToImageGeometries} from '@tracespace/pcb-analysis'
-import type {ImageGeometryResult} from '@tracespace/pcb-analysis'
+import {
+  gerberToImageGeometries,
+  measureMinimumSpacing,
+  analyzeSpacingRule,
+} from '@tracespace/pcb-analysis'
+import type {
+  ImageGeometryResult,
+  MinimumSpacingMeasurement,
+  SpacingRuleResult,
+} from '@tracespace/pcb-analysis'
 import type {UnitsType} from '@tracespace/parser'
 
 import {GeometryCanvas} from './geometry-canvas'
@@ -24,12 +32,20 @@ interface ViewerDisplay {
   mmPerUnit: number
   compositeAreaMm2: number
   primitiveCount: number
+  minimumSpacingMil: number | null
+  minimumSpacingLocation: MinimumSpacingMeasurement['location']
+  violationPaths: string[]
+  ruleSpacingMil: number
+  ruleHasViolations: boolean
 }
 
 export function App(): JSX.Element {
   const [viewer, setViewer] = useState<ViewerDisplay | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [ruleMil, setRuleMil] = useState(6.0)
+  const [geometryResult, setGeometryResult] =
+    useState<ImageGeometryResult | null>(null)
 
   const handleFileChange = async (
     event: JSX.TargetedEvent<HTMLInputElement, Event>
@@ -43,7 +59,8 @@ export function App(): JSX.Element {
     try {
       const contents = await file.text()
       const result = gerberToImageGeometries(contents)
-      const display = buildViewerDisplay(file.name, result)
+      setGeometryResult(result)
+      const display = buildViewerDisplay(file.name, result, ruleMil)
       setViewer(display)
     } catch (err) {
       setViewer(null)
@@ -51,6 +68,22 @@ export function App(): JSX.Element {
     } finally {
       setIsProcessing(false)
       event.currentTarget.value = ''
+    }
+  }
+
+  const handleRuleChange = (
+    event: JSX.TargetedEvent<HTMLInputElement, Event>
+  ): void => {
+    const nextValue = Number(event.currentTarget.value)
+    if (Number.isNaN(nextValue) || nextValue <= 0) return
+    setRuleMil(nextValue)
+    if (geometryResult !== null && viewer !== null) {
+      const updated = buildViewerDisplay(
+        viewer.filename,
+        geometryResult,
+        nextValue
+      )
+      setViewer(updated)
     }
   }
 
@@ -79,6 +112,17 @@ export function App(): JSX.Element {
           />
           <span>{isProcessing ? 'Processing...' : 'Select Gerber file'}</span>
         </label>
+        <label class="rule-input">
+          <span>Minimum spacing rule (mil)</span>
+          <input
+            type="number"
+            step="0.1"
+            min="0.1"
+            max="40"
+            value={ruleMil}
+            onInput={handleRuleChange}
+          />
+        </label>
         {error !== null && <p class="error">{error}</p>}
         {viewer && (
           <div class="summary">
@@ -93,6 +137,17 @@ export function App(): JSX.Element {
               <dd>{viewer.primitiveCount}</dd>
               <dt>Composite area</dt>
               <dd>{viewer.compositeAreaMm2.toFixed(3)} mm^2</dd>
+              <dt>Minimum spacing</dt>
+              <dd>
+                {viewer.minimumSpacingMil !== null
+                  ? `${viewer.minimumSpacingMil.toFixed(3)} mil`
+                  : 'N/A'}
+              </dd>
+              <dt>Rule check</dt>
+              <dd>
+                {viewer.ruleSpacingMil.toFixed(2)} mil ·{' '}
+                {viewer.ruleHasViolations ? 'violations found' : 'pass'}
+              </dd>
             </dl>
           </div>
         )}
@@ -102,6 +157,8 @@ export function App(): JSX.Element {
         <GeometryCanvas
           paths={viewer?.paths ?? []}
           viewBox={viewer?.viewBox ?? ''}
+          marker={viewer?.minimumSpacingLocation ?? null}
+          violationPaths={viewer?.violationPaths ?? []}
         />
       </section>
     </div>
@@ -110,7 +167,8 @@ export function App(): JSX.Element {
 
 function buildViewerDisplay(
   filename: string,
-  result: ImageGeometryResult
+  result: ImageGeometryResult,
+  ruleMil: number
 ): ViewerDisplay {
   const {composite, graphics, mmPerUnit} = result
   const envelope = composite.getEnvelopeInternal()
@@ -124,6 +182,13 @@ function buildViewerDisplay(
   ) as GeoJsonGeometry | GeoJsonGeometryCollection
   const paths = geometryToPaths(geojson)
   const areaUnits = composite.getArea()
+  const minimumSpacing = measureMinimumSpacing(result)
+  const ruleResult = analyzeSpacingRule(result, ruleMil)
+  const violationPaths = geometryToPaths(
+    geojsonWriter.write(
+      ruleResult.violations
+    ) as GeoJsonGeometry | GeoJsonGeometryCollection
+  )
 
   return {
     filename,
@@ -133,6 +198,11 @@ function buildViewerDisplay(
     mmPerUnit,
     primitiveCount: graphics.length,
     compositeAreaMm2: areaUnits * mmPerUnit * mmPerUnit,
+    minimumSpacingMil: minimumSpacing?.spacingMil ?? null,
+    minimumSpacingLocation: minimumSpacing?.location ?? null,
+    violationPaths,
+    ruleSpacingMil: ruleResult.spacingMil,
+    ruleHasViolations: ruleResult.hasViolations,
   }
 }
 

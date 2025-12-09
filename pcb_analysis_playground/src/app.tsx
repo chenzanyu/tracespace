@@ -14,6 +14,7 @@ import {
   analyzeSpacingRule,
 } from '@tracespace/pcb-analysis'
 import type {
+  GeometryPerformanceProfile,
   ImageGeometryResult,
   MinimumSpacingMeasurement,
   SpacingRuleResult,
@@ -34,9 +35,27 @@ interface ViewerDisplay {
   primitiveCount: number
   minimumSpacingMil: number | null
   minimumSpacingLocation: MinimumSpacingMeasurement['location']
-  violationPaths: string[]
+  minimumSpacingEndpoints: MinimumSpacingMeasurement['endpoints']
+  minimumSpacingPaths: string[]
+  ruleViolationPaths: string[]
   ruleSpacingMil: number
   ruleHasViolations: boolean
+  performance: GeometryPerformanceProfile | null
+  minimumSpacingMetrics: MinimumSpacingMeasurement['metrics'] | null
+  ruleMetrics: SpacingRuleResult['metrics'] | null
+  memory: MemorySnapshot | null
+}
+
+interface MemorySnapshot {
+  usedJSHeapSize: number
+  totalJSHeapSize: number
+  jsHeapSizeLimit: number
+}
+
+interface PerformanceMemory {
+  usedJSHeapSize: number
+  totalJSHeapSize: number
+  jsHeapSizeLimit: number
 }
 
 export function App(): JSX.Element {
@@ -60,7 +79,13 @@ export function App(): JSX.Element {
       const contents = await file.text()
       const result = gerberToImageGeometries(contents)
       setGeometryResult(result)
-      const display = buildViewerDisplay(file.name, result, ruleMil)
+      const memorySnapshot = captureMemorySnapshot()
+      const display = buildViewerDisplay(
+        file.name,
+        result,
+        ruleMil,
+        memorySnapshot
+      )
       setViewer(display)
     } catch (err) {
       setViewer(null)
@@ -81,11 +106,31 @@ export function App(): JSX.Element {
       const updated = buildViewerDisplay(
         viewer.filename,
         geometryResult,
-        nextValue
+        nextValue,
+        captureMemorySnapshot()
       )
       setViewer(updated)
     }
   }
+
+  const pipelineTotalMs = viewer?.performance?.totalMs ?? null
+  const spacingDurationMs = viewer?.minimumSpacingMetrics?.durationMs ?? null
+  const ruleDurationMs = viewer?.ruleMetrics?.durationMs ?? null
+  const convertBreakdown = viewer?.performance?.convertBreakdown
+  const combinedTotalMs =
+    viewer !== null
+      ? (pipelineTotalMs ?? 0) +
+        (spacingDurationMs ?? 0) +
+        (ruleDurationMs ?? 0)
+      : null
+  const hasPerformancePanel =
+    viewer !== null &&
+    Boolean(
+      viewer.performance ||
+        viewer.minimumSpacingMetrics ||
+        viewer.ruleMetrics ||
+        viewer.memory
+    )
 
   return (
     <div class="app">
@@ -125,31 +170,136 @@ export function App(): JSX.Element {
         </label>
         {error !== null && <p class="error">{error}</p>}
         {viewer && (
-          <div class="summary">
-            <dl>
-              <dt>File</dt>
-              <dd>{viewer.filename}</dd>
-              <dt>Units</dt>
-              <dd>
-                {viewer.units ?? 'mm'} (1 unit = {viewer.mmPerUnit.toFixed(4)} mm)
-              </dd>
-              <dt>Graphics processed</dt>
-              <dd>{viewer.primitiveCount}</dd>
-              <dt>Composite area</dt>
-              <dd>{viewer.compositeAreaMm2.toFixed(3)} mm^2</dd>
-              <dt>Minimum spacing</dt>
-              <dd>
-                {viewer.minimumSpacingMil !== null
-                  ? `${viewer.minimumSpacingMil.toFixed(3)} mil`
-                  : 'N/A'}
-              </dd>
-              <dt>Rule check</dt>
-              <dd>
-                {viewer.ruleSpacingMil.toFixed(2)} mil ·{' '}
-                {viewer.ruleHasViolations ? 'violations found' : 'pass'}
-              </dd>
-            </dl>
-          </div>
+          <>
+            <div class="summary">
+              <dl>
+                <dt>File</dt>
+                <dd>{viewer.filename}</dd>
+                <dt>Units</dt>
+                <dd>
+                  {viewer.units ?? 'mm'} (1 unit = {viewer.mmPerUnit.toFixed(4)} mm)
+                </dd>
+                <dt>Graphics processed</dt>
+                <dd>{viewer.primitiveCount}</dd>
+                <dt>Composite area</dt>
+                <dd>{viewer.compositeAreaMm2.toFixed(3)} mm^2</dd>
+                <dt>Minimum spacing</dt>
+                <dd>
+                  {viewer.minimumSpacingMil !== null
+                    ? `${viewer.minimumSpacingMil.toFixed(3)} mil`
+                    : 'N/A'}
+                </dd>
+                {viewer.minimumSpacingEndpoints && (
+                  <>
+                    <dt>Spacing points</dt>
+                    <dd>
+                      {formatPoint(viewer.minimumSpacingEndpoints[0])} →
+                      {formatPoint(viewer.minimumSpacingEndpoints[1])}
+                    </dd>
+                  </>
+                )}
+                <dt>Rule check</dt>
+                <dd>
+                  {viewer.ruleSpacingMil.toFixed(2)} mil ·{' '}
+                  {viewer.ruleHasViolations ? 'violations found' : 'pass'}
+                </dd>
+              </dl>
+            </div>
+            {hasPerformancePanel && (
+              <div class="performance-panel">
+                <h2>Performance</h2>
+                <table>
+                  <tbody>
+                    <tr>
+                      <th>Parse</th>
+                      <td>{formatMs(viewer.performance?.parseMs)}</td>
+                    </tr>
+                    <tr>
+                      <th>Plot</th>
+                      <td>{formatMs(viewer.performance?.plotMs)}</td>
+                    </tr>
+                    <tr>
+                      <th>Convert</th>
+                      <td>{formatMs(viewer.performance?.convertMs)}</td>
+                    </tr>
+                    {convertBreakdown && (
+                      <>
+                        <tr>
+                          <th>↳ geometry</th>
+                          <td>{formatMs(convertBreakdown.convertGraphicMs)}</td>
+                        </tr>
+                        <tr>
+                          <th>↳ precision</th>
+                          <td>{formatMs(convertBreakdown.precisionReductionMs)}</td>
+                        </tr>
+                        <tr>
+                          <th>↳ boolean ops</th>
+                          <td>{formatMs(convertBreakdown.booleanOpsMs)}</td>
+                        </tr>
+                        <tr>
+                          <th>↳ runs</th>
+                          <td>
+                            {convertBreakdown.runCount} (
+                            {convertBreakdown.averageRunSize.toFixed(1)} avg size)
+                          </td>
+                        </tr>
+                      </>
+                    )}
+                    <tr>
+                      <th>Pipeline total</th>
+                      <td>{formatMs(viewer.performance?.totalMs)}</td>
+                    </tr>
+                    <tr>
+                      <th>Spacing search</th>
+                      <td>{formatMs(spacingDurationMs)}</td>
+                    </tr>
+                    <tr>
+                      <th>Rule check</th>
+                      <td>{formatMs(ruleDurationMs)}</td>
+                    </tr>
+                    <tr>
+                      <th>Overall total</th>
+                      <td>
+                        {combinedTotalMs !== null
+                          ? formatMs(combinedTotalMs)
+                          : '—'}
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>Memory</th>
+                      <td>
+                        {viewer.memory
+                          ? `${formatBytes(
+                              viewer.memory.usedJSHeapSize
+                            )} / ${formatBytes(
+                              viewer.memory.totalJSHeapSize
+                            )} (limit ${formatBytes(
+                              viewer.memory.jsHeapSizeLimit
+                            )})`
+                          : 'Unavailable'}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                {viewer.minimumSpacingMetrics && (
+                  <p class="performance-note">
+                    <strong>Min spacing:</strong>{' '}
+                    {viewer.minimumSpacingMetrics.componentsIndexed} components ·{' '}
+                    {viewer.minimumSpacingMetrics.candidatePairs} candidate pairs ·{' '}
+                    {viewer.minimumSpacingMetrics.evaluatedPairs} distance ops
+                  </p>
+                )}
+                {viewer.ruleMetrics && (
+                  <p class="performance-note">
+                    <strong>Rule check:</strong>{' '}
+                    {viewer.ruleMetrics.candidatePairs ?? 0} candidates ·{' '}
+                    {viewer.ruleMetrics.evaluatedPairs ?? 0} buffered ·{' '}
+                    {viewer.ruleMetrics.overlappingPairs ?? 0} overlaps
+                  </p>
+                )}
+              </div>
+            )}
+          </>
         )}
       </section>
 
@@ -158,7 +308,8 @@ export function App(): JSX.Element {
           paths={viewer?.paths ?? []}
           viewBox={viewer?.viewBox ?? ''}
           marker={viewer?.minimumSpacingLocation ?? null}
-          violationPaths={viewer?.violationPaths ?? []}
+          violationPaths={viewer?.ruleViolationPaths ?? []}
+          measurementPaths={viewer?.minimumSpacingPaths ?? []}
         />
       </section>
     </div>
@@ -168,7 +319,8 @@ export function App(): JSX.Element {
 function buildViewerDisplay(
   filename: string,
   result: ImageGeometryResult,
-  ruleMil: number
+  ruleMil: number,
+  memorySnapshot: MemorySnapshot | null = null
 ): ViewerDisplay {
   const {composite, graphics, mmPerUnit} = result
   const envelope = composite.getEnvelopeInternal()
@@ -184,11 +336,23 @@ function buildViewerDisplay(
   const areaUnits = composite.getArea()
   const minimumSpacing = measureMinimumSpacing(result)
   const ruleResult = analyzeSpacingRule(result, ruleMil)
-  const violationPaths = geometryToPaths(
-    geojsonWriter.write(
-      ruleResult.violations
-    ) as GeoJsonGeometry | GeoJsonGeometryCollection
-  )
+  const ruleViolationPaths =
+    ruleResult.violations && !ruleResult.violations.isEmpty()
+      ? geometryToPaths(
+          geojsonWriter.write(
+            ruleResult.violations
+          ) as GeoJsonGeometry | GeoJsonGeometryCollection
+        )
+      : []
+  const minimumSpacingPaths =
+    minimumSpacing?.violations && !minimumSpacing.violations.isEmpty()
+      ? geometryToPaths(
+          geojsonWriter.write(
+            minimumSpacing.violations
+          ) as GeoJsonGeometry | GeoJsonGeometryCollection
+        )
+      : []
+  const memory = memorySnapshot ?? captureMemorySnapshot()
 
   return {
     filename,
@@ -200,9 +364,15 @@ function buildViewerDisplay(
     compositeAreaMm2: areaUnits * mmPerUnit * mmPerUnit,
     minimumSpacingMil: minimumSpacing?.spacingMil ?? null,
     minimumSpacingLocation: minimumSpacing?.location ?? null,
-    violationPaths,
+    minimumSpacingEndpoints: minimumSpacing?.endpoints ?? null,
+    minimumSpacingPaths,
+    ruleViolationPaths,
     ruleSpacingMil: ruleResult.spacingMil,
     ruleHasViolations: ruleResult.hasViolations,
+    performance: result.performance ?? null,
+    minimumSpacingMetrics: minimumSpacing?.metrics ?? null,
+    ruleMetrics: ruleResult.metrics ?? null,
+    memory,
   }
 }
 
@@ -250,4 +420,57 @@ function pointsToPath(points: GeoJsonLineString['coordinates'], close: boolean):
     .join(' ')
 
   return close ? `${commands} Z` : commands
+}
+
+function formatMs(value?: number | null): string {
+  if (value === undefined || value === null || Number.isNaN(value)) {
+    return '—'
+  }
+
+  return `${value.toFixed(2)} ms`
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '—'
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let size = bytes
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+
+  const precision = unitIndex === 0 ? 0 : 2
+  return `${size.toFixed(precision)} ${units[unitIndex]}`
+}
+
+function captureMemorySnapshot(): MemorySnapshot | null {
+  if (typeof performance === 'undefined') {
+    return null
+  }
+
+  const perf = performance as Performance & {memory?: PerformanceMemory}
+  if (!perf.memory) {
+    return null
+  }
+
+  const {usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit} = perf.memory
+  if (
+    typeof usedJSHeapSize !== 'number' ||
+    typeof totalJSHeapSize !== 'number' ||
+    typeof jsHeapSizeLimit !== 'number'
+  ) {
+    return null
+  }
+
+  return {usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit}
+}
+
+function formatPoint(point?: [number, number] | null, precision = 3): string {
+  if (!point) return '—'
+  const [x, y] = point
+  return `(${x.toFixed(precision)}, ${y.toFixed(precision)})`
 }

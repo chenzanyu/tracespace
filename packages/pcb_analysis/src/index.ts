@@ -33,18 +33,17 @@ import type {
   RectangleShape,
 } from '@tracespace/plotter'
 import Coordinate from 'jsts/org/locationtech/jts/geom/Coordinate'
-import type {Geometry as GeoJSONGeometry} from 'geojson'
+import Envelope from 'jsts/org/locationtech/jts/geom/Envelope'
 import Geometry from 'jsts/org/locationtech/jts/geom/Geometry'
 import GeometryCollection from 'jsts/org/locationtech/jts/geom/GeometryCollection'
 import GeometryFactory from 'jsts/org/locationtech/jts/geom/GeometryFactory'
 import LineString from 'jsts/org/locationtech/jts/geom/LineString'
 import Polygon from 'jsts/org/locationtech/jts/geom/Polygon'
 import PrecisionModel from 'jsts/org/locationtech/jts/geom/PrecisionModel'
+import STRtree from 'jsts/org/locationtech/jts/index/strtree/STRtree'
 import SnapIfNeededOverlayOp from 'jsts/org/locationtech/jts/operation/overlay/snap/SnapIfNeededOverlayOp'
+import DistanceOp from 'jsts/org/locationtech/jts/operation/distance/DistanceOp'
 import GeometryPrecisionReducer from 'jsts/org/locationtech/jts/precision/GeometryPrecisionReducer'
-import GeoJSONWriter from 'jsts/org/locationtech/jts/io/GeoJSONWriter'
-import GeoJSONReader from 'jsts/org/locationtech/jts/io/GeoJSONReader'
-import polygonClipping from 'polygon-clipping'
 import 'jsts/org/locationtech/jts/monkey'
 
 const DEFAULT_PRECISION_SCALE = 1_000_000
@@ -59,12 +58,22 @@ const TWO_PI = 2 * PI
 const EPSILON = 1e-9
 const MILS_PER_MM = 39.37007874015748
 const PRECISION_REDUCER_SCALE = 1e5
+const GRID_TARGET_BUCKET_SIZE = 120
+const GRID_MIN_GEOMETRIES_FOR_GRID = 80
+const GRID_MAX_GRID_DIVISIONS = 32
+const GRID_MIN_CELL_SIZE = 1e-6
 
-type PointCoords = [number, number]
-type LinearRingCoords = PointCoords[]
-type PolygonCoords = LinearRingCoords[]
-type MultiPolygonCoords = PolygonCoords[]
-const geoJsonWriter = new GeoJSONWriter()
+type PerformanceLike = {now: () => number}
+
+
+function getTimestamp(): number {
+  const perf =
+    typeof globalThis !== 'undefined'
+      ? (globalThis as {performance?: PerformanceLike}).performance
+      : undefined
+
+  return typeof perf?.now === 'function' ? perf.now() : Date.now()
+}
 
 export interface GeometryConversionOptions {
   /**
@@ -99,6 +108,7 @@ export interface ImageGeometryResult {
   collection: GeometryCollection
   composite: Geometry
   components: Geometry[]
+  performance?: GeometryPerformanceProfile
 }
 
 export interface GerberConversionResult extends ImageGeometryResult {
@@ -112,6 +122,8 @@ export interface MinimumSpacingMeasurement {
   spacingMil: number
   location: Position | null
   violations: Geometry | null
+  endpoints: [Position, Position] | null
+  metrics?: MinimumSpacingMetrics
 }
 
 export interface SpacingRuleResult {
@@ -121,31 +133,102 @@ export interface SpacingRuleResult {
   violations: Geometry
   location: Position | null
   hasViolations: boolean
+  metrics?: SpacingRuleMetrics
+}
+
+export interface GeometryPerformanceProfile {
+  parseMs?: number
+  plotMs?: number
+  convertMs?: number
+  convertBreakdown?: ConvertPerformanceBreakdown
+  totalMs?: number
+}
+
+export interface ConvertPerformanceBreakdown {
+  convertGraphicMs: number
+  precisionReductionMs: number
+  booleanOpsMs: number
+  runCount: number
+  averageRunSize: number
+}
+
+export interface MinimumSpacingMetrics {
+  durationMs: number
+  candidatePairs: number
+  evaluatedPairs: number
+  componentsIndexed: number
+}
+
+export interface SpacingRuleMetrics {
+  durationMs: number
+  candidatePairs?: number
+  evaluatedPairs?: number
+  overlappingPairs?: number
 }
 
 export function convertImageTree(
   image: ImageTree,
   options?: GeometryConversionOptions
 ): ImageGeometryResult {
+  const conversionStart = getTimestamp()
   const normalized = normalizeOptions(options)
   const geometryFactory = new GeometryFactory(
     new PrecisionModel(normalized.precisionScale)
   )
   const context: ConversionContext = {geometryFactory, ...normalized}
   const graphics: GeometryGraphicEntry[] = []
-  let compositeMultiPolygon: MultiPolygonCoords = []
+  let compositeGeometry: Geometry | null = null
+  const convertBreakdown: ConvertPerformanceBreakdown = {
+    convertGraphicMs: 0,
+    precisionReductionMs: 0,
+    booleanOpsMs: 0,
+    runCount: 0,
+    averageRunSize: 0,
+  }
+  let accumulatedRunSize = 0
+  let currentRunPolarity: Polarity | null = null
+  let currentRun: Geometry[] = []
+
+  const flushRun = (): void => {
+    if (currentRun.length === 0 || currentRunPolarity === null) return
+
+    const booleanStart = getTimestamp()
+    const mergedRun = mergeRunGeometries(currentRun)
+    convertBreakdown.booleanOpsMs += getTimestamp() - booleanStart
+    convertBreakdown.runCount += 1
+    accumulatedRunSize += currentRun.length
+    currentRun = []
+
+    if (!mergedRun || mergedRun.isEmpty()) {
+      return
+    }
+
+    if (currentRunPolarity === CLEAR) {
+      if (compositeGeometry !== null && !compositeGeometry.isEmpty()) {
+        compositeGeometry = safeDifference(compositeGeometry, mergedRun)
+      }
+    } else {
+      compositeGeometry =
+        compositeGeometry === null
+          ? mergedRun
+          : safeUnion(compositeGeometry, mergedRun)
+    }
+  }
 
   image.children.forEach((graphic, index) => {
+    const convertStart = getTimestamp()
     const geometry = convertGraphic(graphic, context)
+    convertBreakdown.convertGraphicMs += getTimestamp() - convertStart
     if (geometry === null || geometry.isEmpty()) return
 
+    const precisionStart = getTimestamp()
     const preciseGeometry = reducePrecision(
       cleanGeometry(geometry),
       PRECISION_REDUCER_SCALE
     )
     if (preciseGeometry.isEmpty()) return
-    const multiPolygon = geometryToMultiPolygon(preciseGeometry)
-    if (multiPolygon === null || multiPolygon.length === 0) return
+    convertBreakdown.precisionReductionMs += getTimestamp() - precisionStart
+    if (preciseGeometry.isEmpty()) return
 
     const polarity = getGraphicPolarity(graphic)
     const entry: GeometryGraphicEntry = {
@@ -158,24 +241,30 @@ export function convertImageTree(
     }
 
     graphics.push(entry)
-    compositeMultiPolygon =
-      polarity === CLEAR
-        ? subtractMultiPolygons(compositeMultiPolygon, [multiPolygon])
-        : unionMultiPolygons([compositeMultiPolygon, multiPolygon])
+    if (currentRunPolarity === null || currentRunPolarity !== polarity) {
+      flushRun()
+      currentRunPolarity = polarity
+    }
+
+    currentRun.push(preciseGeometry)
   })
 
-  const compositeGeometry = multiPolygonToGeometry(
-    compositeMultiPolygon,
-    geometryFactory
-  )
-  const componentGeometries = polygonCoordsToGeometries(
-    compositeMultiPolygon,
-    geometryFactory
-  )
+  flushRun()
+
+  if (compositeGeometry === null) {
+    compositeGeometry = geometryFactory.createGeometryCollection([])
+  }
+
+  const componentGeometries = geometryToComponentPolygons(compositeGeometry)
 
   const collection = geometryFactory.createGeometryCollection(
     graphics.map(entry => entry.geometry)
   )
+  const durationMs = getTimestamp() - conversionStart
+  convertBreakdown.averageRunSize =
+    convertBreakdown.runCount > 0
+      ? accumulatedRunSize / convertBreakdown.runCount
+      : 0
 
   return {
     units: image.units,
@@ -185,6 +274,7 @@ export function convertImageTree(
     collection,
     composite: compositeGeometry,
     components: componentGeometries,
+    performance: {convertMs: durationMs, convertBreakdown},
   }
 }
 
@@ -192,14 +282,26 @@ export function gerberToImageGeometries(
   contents: string,
   options?: GeometryConversionOptions
 ): GerberConversionResult {
+  const pipelineStart = getTimestamp()
+  const parseStart = pipelineStart
   const parseTree = parse(contents)
+  const parseEnd = getTimestamp()
   const image = plot(parseTree)
+  const plotEnd = getTimestamp()
   const geometryResult = convertImageTree(image, options)
+  const totalMs = getTimestamp() - pipelineStart
+  const performance: GeometryPerformanceProfile = {
+    ...geometryResult.performance,
+    parseMs: parseEnd - parseStart,
+    plotMs: plotEnd - parseEnd,
+    totalMs,
+  }
 
   return {
     ...geometryResult,
     parseTree,
     image,
+    performance,
   }
 }
 
@@ -231,15 +333,17 @@ export function analyzeSpacingRule(
   ruleMil: number,
   options?: MinimumSpacingOptions
 ): SpacingRuleResult {
+  const ruleStart = getTimestamp()
   const tolerance =
     options?.searchTolerance ?? Math.max(result.mmPerUnit / 1000, 1e-5)
   const spacingMil = Math.max(ruleMil, tolerance * MILS_PER_MM * 2)
   const spacingUnits = milToUnits(spacingMil, result.mmPerUnit)
-  const violations = detectSpacingViolations(
+  const detection = detectSpacingViolations(
     result.components,
     spacingUnits / 2,
     result.geometryFactory
   )
+  const violations = detection.geometry
   const hasViolations = !violations.isEmpty()
   const referenceGeometry = hasViolations
     ? violations
@@ -249,6 +353,7 @@ export function analyzeSpacingRule(
     ? [coordinate.x, coordinate.y]
     : null
   const spacingMm = spacingUnits * result.mmPerUnit
+  const durationMs = getTimestamp() - ruleStart
 
   return {
     spacingUnits,
@@ -257,6 +362,12 @@ export function analyzeSpacingRule(
     violations,
     location,
     hasViolations,
+    metrics: {
+      durationMs,
+      candidatePairs: detection.metrics.candidatePairs,
+      evaluatedPairs: detection.metrics.evaluatedPairs,
+      overlappingPairs: detection.metrics.overlappingPairs,
+    },
   }
 }
 
@@ -633,6 +744,107 @@ function unionGeometries(geometries: Geometry[]): Geometry | null {
   return composite
 }
 
+function mergeRunGeometries(geometries: Geometry[]): Geometry | null {
+  if (geometries.length === 0) return null
+  if (geometries.length <= GRID_MIN_GEOMETRIES_FOR_GRID) {
+    return unionGeometries(geometries)
+  }
+
+  const buckets = partitionGeometriesByGrid(geometries)
+  if (buckets.length <= 1) {
+    return unionGeometries(geometries)
+  }
+
+  const bucketResults: Geometry[] = []
+  for (const bucket of buckets) {
+    const merged = unionGeometries(bucket)
+    if (merged !== null && !merged.isEmpty()) {
+      bucketResults.push(merged)
+    }
+  }
+
+  return unionGeometries(bucketResults)
+}
+
+function partitionGeometriesByGrid(geometries: Geometry[]): Geometry[][] {
+  if (geometries.length === 0) return []
+
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  const envelopes: Envelope[] = []
+
+  for (const geometry of geometries) {
+    const envelope = geometry.getEnvelopeInternal()
+    envelopes.push(envelope)
+    if (!envelope || envelope.isNull()) continue
+    minX = Math.min(minX, envelope.getMinX())
+    minY = Math.min(minY, envelope.getMinY())
+    maxX = Math.max(maxX, envelope.getMaxX())
+    maxY = Math.max(maxY, envelope.getMaxY())
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+    return [geometries]
+  }
+
+  const width = Math.max(maxX - minX, GRID_MIN_CELL_SIZE)
+  const height = Math.max(maxY - minY, GRID_MIN_CELL_SIZE)
+  const approxBuckets = Math.ceil(geometries.length / GRID_TARGET_BUCKET_SIZE)
+  if (approxBuckets <= 1) {
+    return [geometries]
+  }
+
+  const divisions = Math.min(
+    GRID_MAX_GRID_DIVISIONS,
+    Math.max(1, Math.ceil(Math.sqrt(approxBuckets)))
+  )
+  if (divisions <= 1) {
+    return [geometries]
+  }
+
+  const cellWidth = Math.max(width / divisions, GRID_MIN_CELL_SIZE)
+  const cellHeight = Math.max(height / divisions, GRID_MIN_CELL_SIZE)
+  const buckets = new Map<string, Geometry[]>()
+
+  geometries.forEach((geometry, index) => {
+    const envelope = envelopes[index]
+    if (!envelope || envelope.isNull()) {
+      const key = '0:0'
+      const bucket = buckets.get(key)
+      if (bucket) {
+        bucket.push(geometry)
+      } else {
+        buckets.set(key, [geometry])
+      }
+      return
+    }
+
+    const centerX = (envelope.getMinX() + envelope.getMaxX()) / 2
+    const centerY = (envelope.getMinY() + envelope.getMaxY()) / 2
+    const col = Math.min(
+      divisions - 1,
+      Math.max(0, Math.floor((centerX - minX) / cellWidth))
+    )
+    const row = Math.min(
+      divisions - 1,
+      Math.max(0, Math.floor((centerY - minY) / cellHeight))
+    )
+    const key = `${col}:${row}`
+    const bucket = buckets.get(key)
+    if (bucket) {
+      bucket.push(geometry)
+    } else {
+      buckets.set(key, [geometry])
+    }
+  })
+
+  const partitioned = Array.from(buckets.values())
+  partitioned.sort((a, b) => b.length - a.length)
+  return partitioned
+}
+
 function safeUnion(a: Geometry | null, b: Geometry): Geometry {
   if (b.isEmpty()) return a ?? b
   if (a === null || a.isEmpty()) return b
@@ -712,115 +924,42 @@ function safeIntersection(a: Geometry, b: Geometry): Geometry {
   }
 }
 
-function geometryToMultiPolygon(geometry: Geometry): MultiPolygonCoords | null {
-  if (geometry.isEmpty() || geometry.getDimension() < 2) {
-    return null
-  }
+function geometryToComponentPolygons(composite: Geometry): Geometry[] {
+  if (composite.isEmpty()) return []
+  const components: Geometry[] = []
+  const stack: Geometry[] = [composite]
 
-  const json = geoJsonWriter.write(geometry) as GeoJSONGeometry
-  return extractMultiPolygonFromGeoJSON(json)
-}
+  while (stack.length > 0) {
+    const geometry = stack.pop()
+    if (!geometry || geometry.isEmpty()) continue
 
-function extractMultiPolygonFromGeoJSON(
-  geoJson: GeoJSONGeometry
-): MultiPolygonCoords | null {
-  if (geoJson.type === 'Polygon') {
-    return [geoJson.coordinates as PolygonCoords]
-  }
+    const type = geometry.getGeometryType()
+    if (type === 'Polygon') {
+      components.push(geometry)
+      continue
+    }
 
-  if (geoJson.type === 'MultiPolygon') {
-    return geoJson.coordinates as MultiPolygonCoords
-  }
+    if (type === 'MultiPolygon' || type === 'GeometryCollection') {
+      const count = geometry.getNumGeometries()
+      for (let index = 0; index < count; index++) {
+        stack.push(geometry.getGeometryN(index))
+      }
+      continue
+    }
 
-  if (geoJson.type === 'GeometryCollection') {
-    const geometries = geoJson.geometries ?? []
-    const results: MultiPolygonCoords = []
-
-    for (const child of geometries) {
-      const extracted = extractMultiPolygonFromGeoJSON(child as GeoJSONGeometry)
-      if (extracted && extracted.length > 0) {
-        results.push(...extracted)
+    if (geometry.getDimension() >= 2 && geometry.getNumGeometries) {
+      const count = geometry.getNumGeometries()
+      if (count === 0) {
+        components.push(geometry)
+      } else {
+        for (let index = 0; index < count; index++) {
+          stack.push(geometry.getGeometryN(index))
+        }
       }
     }
-
-    return results.length > 0 ? results : null
   }
 
-  return null
-}
-
-function multiPolygonToGeometry(
-  multiPolygon: MultiPolygonCoords,
-  geometryFactory: GeometryFactory
-): Geometry {
-  if (!multiPolygon || multiPolygon.length === 0) {
-    return geometryFactory.createGeometryCollection([])
-  }
-
-  const reader = new GeoJSONReader(geometryFactory)
-  const geoJson = {
-    type: 'MultiPolygon',
-    coordinates: multiPolygon,
-  }
-
-  return reader.read(geoJson) as Geometry
-}
-
-function unionMultiPolygons(
-  polygons: MultiPolygonCoords[]
-): MultiPolygonCoords {
-  let result: MultiPolygonCoords | null = null
-
-  for (const polygon of polygons) {
-    if (!polygon || polygon.length === 0) continue
-    result =
-      result === null
-        ? polygon
-        : (polygonClipping.union(result, polygon) as MultiPolygonCoords)
-  }
-
-  return result ?? []
-}
-
-function subtractMultiPolygons(
-  subject: MultiPolygonCoords,
-  clips: MultiPolygonCoords[]
-): MultiPolygonCoords {
-  if (!subject || subject.length === 0) {
-    return []
-  }
-
-  let result: MultiPolygonCoords = subject
-
-  for (const clip of clips) {
-    if (!clip || clip.length === 0) continue
-    if (result.length === 0) break
-    result = polygonClipping.difference(
-      result,
-      clip
-    ) as MultiPolygonCoords
-  }
-
-  return result
-}
-
-function polygonCoordsToGeometries(
-  multiPolygon: MultiPolygonCoords,
-  geometryFactory: GeometryFactory
-): Geometry[] {
-  const reader = new GeoJSONReader(geometryFactory)
-  const geometries: Geometry[] = []
-
-  for (const polygon of multiPolygon) {
-    if (!polygon || polygon.length === 0) continue
-    const geoJson = {type: 'Polygon', coordinates: polygon}
-    const geometry = reader.read(geoJson) as Geometry
-    if (!geometry.isEmpty()) {
-      geometries.push(geometry)
-    }
-  }
-
-  return geometries
+  return components
 }
 
 function normalizeOptions(
@@ -853,11 +992,6 @@ function milToUnits(widthMil: number, mmPerUnit: number): number {
   return widthMm / mmPerUnit
 }
 
-function unitsToMil(widthUnits: number, mmPerUnit: number): number {
-  const widthMm = widthUnits * mmPerUnit
-  return widthMm * MILS_PER_MM
-}
-
 function getGraphicPolarity(graphic: ImageGraphicBase): Polarity {
   if (graphic.erase === true) return CLEAR
   return graphic.polarity ?? DARK
@@ -883,53 +1017,66 @@ function measureSpacingBetweenComponents(
   mmPerUnit: number,
   tolerance: number
 ): MinimumSpacingMeasurement | null {
-  if (components.length === 0) return null
+  if (components.length < 2) return null
 
+  const measurementStart = getTimestamp()
   const aggregated = geometryFactory.createGeometryCollection(components)
   const envelope = aggregated.getEnvelopeInternal()
   const maxExtent = Math.max(envelope.getWidth(), envelope.getHeight())
-  if (maxExtent <= 0) return null
+  if (!Number.isFinite(maxExtent) || maxExtent <= 0) return null
 
-  const epsilon = Math.max(tolerance, maxExtent / 10_000)
-  let low = 0
-  let high = maxExtent
-  let violationGeometry: Geometry | null = null
+  const entries = buildSpatialEntries(components)
+  if (entries.length < 2) return null
 
-  const ensuresViolations = (spacing: number): Geometry => {
-    const halfSpacing = Math.max(spacing / 2, epsilon)
-    return detectSpacingViolations(components, halfSpacing, geometryFactory)
+  const index = new STRtree()
+  for (const entry of entries) {
+    index.insert(entry.envelope, entry)
   }
+  index.build()
 
-  let iterations = 0
-  const maxIterations = 32
+  let bestDistance = Number.POSITIVE_INFINITY
+  let bestPoints: [Coordinate, Coordinate] | null = null
+  let candidatePairs = 0
+  let evaluatedPairs = 0
+  const initialPadding = Math.max(maxExtent, tolerance * 4, 1e-6)
 
-  while (iterations < maxIterations && high - low > epsilon) {
-    iterations += 1
-    const mid = (low + high) / 2
-    const violations = ensuresViolations(mid)
+  for (const entry of entries) {
+    const padding = Number.isFinite(bestDistance) ? bestDistance : initialPadding
+    const searchEnvelope = new Envelope(entry.envelope)
+    searchEnvelope.expandBy(padding)
+    const candidates = index.query(searchEnvelope) as SpatialIndexEntry[]
 
-    if (violations.isEmpty()) {
-      low = mid
-    } else {
-      high = mid
-      violationGeometry = violations
+    for (const candidate of candidates) {
+      if (candidate.index <= entry.index) continue
+      candidatePairs += 1
+      const envelopeGap = entry.envelope.distance(candidate.envelope)
+      if (envelopeGap > bestDistance) continue
+      evaluatedPairs += 1
+      const op = new DistanceOp(entry.geometry, candidate.geometry)
+      const distance = op.distance()
+      if (distance + EPSILON < bestDistance) {
+        bestDistance = Math.max(distance, 0)
+        const nearestPoints = op.nearestPoints()
+        bestPoints = [nearestPoints[0], nearestPoints[1]]
+      }
     }
   }
 
-  if (violationGeometry === null || violationGeometry.isEmpty()) {
-    violationGeometry = ensuresViolations(high)
+  if (!Number.isFinite(bestDistance) || bestPoints === null) {
+    return null
   }
 
-  const spacingUnits = Math.max(high, epsilon * 2)
+  const [pointA, pointB] = bestPoints
+  const location: Position = [(pointA.x + pointB.x) / 2, (pointA.y + pointB.y) / 2]
+  const violationGeometry = geometryFactory.createLineString([pointA, pointB])
+  const durationMs = getTimestamp() - measurementStart
+  const spacingUnits = Math.max(bestDistance, 0)
   const spacingMm = spacingUnits * mmPerUnit
   const spacingMil = spacingMm * MILS_PER_MM
-  const referenceGeometry = violationGeometry.isEmpty()
-    ? aggregated
-    : violationGeometry
-  const coordinate = referenceGeometry.getInteriorPoint().getCoordinate()
-  const location: Position | null = coordinate
-    ? [coordinate.x, coordinate.y]
-    : null
+  const endpoints: [Position, Position] = [
+    [pointA.x, pointA.y],
+    [pointB.x, pointB.y],
+  ]
 
   return {
     spacingUnits,
@@ -937,37 +1084,129 @@ function measureSpacingBetweenComponents(
     spacingMil,
     location,
     violations: violationGeometry,
+    endpoints,
+    metrics: {
+      durationMs,
+      candidatePairs,
+      evaluatedPairs,
+      componentsIndexed: entries.length,
+    },
   }
+}
+
+interface SpatialIndexEntry {
+  geometry: Geometry
+  envelope: Envelope
+  index: number
+}
+
+interface SpacingViolationDetectionResult {
+  geometry: Geometry
+  metrics: {
+    candidatePairs: number
+    evaluatedPairs: number
+    overlappingPairs: number
+  }
+}
+
+function buildSpatialEntries(components: Geometry[]): SpatialIndexEntry[] {
+  const entries: SpatialIndexEntry[] = []
+
+  components.forEach((geometry, index) => {
+    if (geometry.isEmpty()) return
+    const envelope = geometry.getEnvelopeInternal()
+    if (!envelope || envelope.isNull()) return
+    entries.push({
+      geometry,
+      envelope: new Envelope(envelope),
+      index,
+    })
+  })
+
+  return entries
+}
+
+function bufferGeometryCached(
+  geometry: Geometry,
+  distance: number,
+  cache: Map<Geometry, Geometry>
+): Geometry {
+  const cached = cache.get(geometry)
+  if (cached !== undefined) return cached
+  const buffered = safeBuffer(geometry, distance)
+  cache.set(geometry, buffered)
+  return buffered
 }
 
 function detectSpacingViolations(
   components: Geometry[],
   halfSpacing: number,
   geometryFactory: GeometryFactory
-): Geometry {
+): SpacingViolationDetectionResult {
+  const empty = geometryFactory.createGeometryCollection([])
   if (components.length === 0 || halfSpacing <= 0) {
-    return geometryFactory.createGeometryCollection([])
+    return {
+      geometry: empty,
+      metrics: {candidatePairs: 0, evaluatedPairs: 0, overlappingPairs: 0},
+    }
   }
 
-  let accumulated: Geometry | null = null
-  let violations: Geometry | null = null
+  const entries = buildSpatialEntries(components)
+  if (entries.length < 2) {
+    return {
+      geometry: empty,
+      metrics: {candidatePairs: 0, evaluatedPairs: 0, overlappingPairs: 0},
+    }
+  }
 
-  for (const component of components) {
-    if (component.isEmpty()) continue
+  const index = new STRtree()
+  entries.forEach(entry => index.insert(entry.envelope, entry))
+  index.build()
 
-    const buffered = safeBuffer(component, halfSpacing)
-    if (accumulated !== null && !accumulated.isEmpty()) {
-      const overlap = safeIntersection(buffered, accumulated)
+  let candidatePairs = 0
+  let evaluatedPairs = 0
+  let overlappingPairs = 0
+  const overlaps: Geometry[] = []
+  const envelopeExpansion = Math.max(halfSpacing * 2, halfSpacing + 1e-6)
+  const bufferCache = new Map<Geometry, Geometry>()
+
+  for (const entry of entries) {
+    const searchEnvelope = new Envelope(entry.envelope)
+    searchEnvelope.expandBy(envelopeExpansion)
+    const candidates = index.query(searchEnvelope) as SpatialIndexEntry[]
+
+    for (const candidate of candidates) {
+      if (candidate.index <= entry.index) continue
+      candidatePairs += 1
+      const envelopeGap = entry.envelope.distance(candidate.envelope)
+      if (envelopeGap - EPSILON > halfSpacing * 2) continue
+      evaluatedPairs += 1
+
+      const bufferedA = bufferGeometryCached(
+        entry.geometry,
+        halfSpacing,
+        bufferCache
+      )
+      const bufferedB = bufferGeometryCached(
+        candidate.geometry,
+        halfSpacing,
+        bufferCache
+      )
+      const overlap = safeIntersection(bufferedA, bufferedB)
       if (!overlap.isEmpty()) {
-        violations = violations === null ? overlap : safeUnion(violations, overlap)
+        overlappingPairs += 1
+        overlaps.push(overlap)
       }
     }
-
-    accumulated =
-      accumulated === null ? buffered : safeUnion(accumulated, buffered)
   }
 
-  return violations ?? geometryFactory.createGeometryCollection([])
+  const geometry =
+    unionGeometries(overlaps) ?? geometryFactory.createGeometryCollection([])
+
+  return {
+    geometry,
+    metrics: {candidatePairs, evaluatedPairs, overlappingPairs},
+  }
 }
 
 function safeBuffer(geometry: Geometry, distance: number): Geometry {

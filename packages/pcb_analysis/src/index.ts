@@ -43,6 +43,7 @@ import PrecisionModel from 'jsts/org/locationtech/jts/geom/PrecisionModel'
 import STRtree from 'jsts/org/locationtech/jts/index/strtree/STRtree'
 import SnapIfNeededOverlayOp from 'jsts/org/locationtech/jts/operation/overlay/snap/SnapIfNeededOverlayOp'
 import DistanceOp from 'jsts/org/locationtech/jts/operation/distance/DistanceOp'
+import IndexedFacetDistance from 'jsts/org/locationtech/jts/operation/distance/IndexedFacetDistance'
 import GeometryPrecisionReducer from 'jsts/org/locationtech/jts/precision/GeometryPrecisionReducer'
 import 'jsts/org/locationtech/jts/monkey'
 
@@ -110,6 +111,7 @@ export interface ImageGeometryResult {
   collection: GeometryCollection
   composite: Geometry
   components: Geometry[]
+  spacingIndex: GeometrySpacingIndex | null
   performance?: GeometryPerformanceProfile
 }
 
@@ -166,6 +168,10 @@ export interface SpacingRuleMetrics {
   candidatePairs?: number
   evaluatedPairs?: number
   overlappingPairs?: number
+}
+
+export interface GeometrySpacingIndex {
+  readonly componentsIndexed: number
 }
 
 export function convertImageTree(
@@ -258,6 +264,7 @@ export function convertImageTree(
   }
 
   const componentGeometries = geometryToComponentPolygons(compositeGeometry)
+  const spacingIndex = createGeometrySpacingIndex(componentGeometries)
 
   const collection = geometryFactory.createGeometryCollection(
     graphics.map(entry => entry.geometry)
@@ -276,6 +283,7 @@ export function convertImageTree(
     collection,
     composite: compositeGeometry,
     components: componentGeometries,
+    spacingIndex,
     performance: {convertMs: durationMs, convertBreakdown},
   }
 }
@@ -324,7 +332,8 @@ export function measureMinimumSpacing(
     components,
     result.geometryFactory,
     result.mmPerUnit,
-    tolerance
+    tolerance,
+    result.spacingIndex as InternalGeometrySpacingIndex | null
   )
 
   return measurement
@@ -333,27 +342,32 @@ export function measureMinimumSpacing(
 export function analyzeSpacingRule(
   result: ImageGeometryResult,
   ruleMil: number,
-  options?: MinimumSpacingOptions
+  options?: MinimumSpacingOptions,
+  measurement?: MinimumSpacingMeasurement | null
 ): SpacingRuleResult {
   const ruleStart = getTimestamp()
   const tolerance =
     options?.searchTolerance ?? Math.max(result.mmPerUnit / 1000, 1e-5)
   const spacingMil = Math.max(ruleMil, tolerance * MILS_PER_MM * 2)
   const spacingUnits = milToUnits(spacingMil, result.mmPerUnit)
-  const measurement = measureSpacingBetweenComponents(
-    result.components,
-    result.geometryFactory,
-    result.mmPerUnit,
-    tolerance
-  )
+  const measurementResult =
+    measurement ??
+    measureSpacingBetweenComponents(
+      result.components,
+      result.geometryFactory,
+      result.mmPerUnit,
+      tolerance,
+      result.spacingIndex as InternalGeometrySpacingIndex | null
+    )
   const emptyGeometry = result.geometryFactory.createGeometryCollection([])
   const hasViolations =
-    measurement !== null && measurement.spacingMil + EPSILON < spacingMil
-  const violations = hasViolations && measurement?.violations
-    ? measurement.violations
+    measurementResult !== null &&
+    measurementResult.spacingMil + EPSILON < spacingMil
+  const violations = hasViolations && measurementResult?.violations
+    ? measurementResult.violations
     : emptyGeometry
   const location: Position | null = hasViolations
-    ? measurement?.location ?? null
+    ? measurementResult?.location ?? null
     : (() => {
         const coordinate = result.composite
           .getInteriorPoint()
@@ -372,10 +386,25 @@ export function analyzeSpacingRule(
     hasViolations,
     metrics: {
       durationMs,
-      candidatePairs: measurement?.metrics?.candidatePairs,
-      evaluatedPairs: measurement?.metrics?.evaluatedPairs,
+      candidatePairs: measurementResult?.metrics?.candidatePairs,
+      evaluatedPairs: measurementResult?.metrics?.evaluatedPairs,
     },
   }
+}
+
+export interface SpacingRuleEvaluation {
+  measurement: MinimumSpacingMeasurement | null
+  rule: SpacingRuleResult
+}
+
+export function measureSpacingAndAnalyzeRule(
+  result: ImageGeometryResult,
+  ruleMil: number,
+  options?: MinimumSpacingOptions
+): SpacingRuleEvaluation {
+  const measurement = measureMinimumSpacing(result, options)
+  const rule = analyzeSpacingRule(result, ruleMil, options, measurement)
+  return {measurement, rule}
 }
 
 function convertGraphic(
@@ -1081,49 +1110,96 @@ function measureSpacingBetweenComponents(
   components: Geometry[],
   geometryFactory: GeometryFactory,
   mmPerUnit: number,
-  tolerance: number
+  tolerance: number,
+  spacingIndex?: InternalGeometrySpacingIndex | null
 ): MinimumSpacingMeasurement | null {
   if (components.length < 2) return null
 
   const measurementStart = getTimestamp()
-  const aggregated = geometryFactory.createGeometryCollection(components)
-  const envelope = aggregated.getEnvelopeInternal()
-  const maxExtent = Math.max(envelope.getWidth(), envelope.getHeight())
-  if (!Number.isFinite(maxExtent) || maxExtent <= 0) return null
+  const cachedIndex =
+    spacingIndex && spacingIndex.componentsIndexed >= 2
+      ? spacingIndex
+      : createGeometrySpacingIndex(components)
+  if (
+    cachedIndex === null ||
+    !Number.isFinite(cachedIndex.maxExtent) ||
+    cachedIndex.maxExtent <= 0
+  ) {
+    return null
+  }
 
-  const entries = buildSpatialEntries(components)
+  const {entries, tree, maxExtent} = cachedIndex
   if (entries.length < 2) return null
 
-  const index = new STRtree()
-  for (const entry of entries) {
-    index.insert(entry.envelope, entry)
-  }
-  index.build()
-
-  let bestDistance = Number.POSITIVE_INFINITY
+  const seededDistance = seedInitialSpacingEstimate(entries)
+  let bestDistance = Number.isFinite(seededDistance)
+    ? seededDistance
+    : Number.POSITIVE_INFINITY
+  const targetDistance = Math.max(tolerance, 0)
   let bestPoints: [Coordinate, Coordinate] | null = null
   let candidatePairs = 0
   let evaluatedPairs = 0
   const initialPadding = Math.max(maxExtent, tolerance * 4, 1e-6)
+  const proxySlack = Math.max(targetDistance, tolerance * 0.5)
+  const maxCandidatesPerEntry = 256
+  const maxFailedCandidatesPerEntry = 32
 
-  for (const entry of entries) {
-    const padding = Number.isFinite(bestDistance) ? bestDistance : initialPadding
+  outer: for (const entry of entries) {
+    if (bestDistance <= targetDistance + EPSILON) break
+    const padding = Number.isFinite(bestDistance)
+      ? Math.max(bestDistance, tolerance * 2, 1e-6)
+      : initialPadding
     const searchEnvelope = new Envelope(entry.envelope)
     searchEnvelope.expandBy(padding)
-    const candidates = index.query(searchEnvelope) as SpatialIndexEntry[]
+    const candidates = tree.query(searchEnvelope) as SpatialIndexEntry[]
+
+    let scannedForEntry = 0
+    let skippedForEntry = 0
 
     for (const candidate of candidates) {
       if (candidate.index <= entry.index) continue
+      scannedForEntry += 1
+      if (scannedForEntry > maxCandidatesPerEntry) {
+        break
+      }
       candidatePairs += 1
       const envelopeGap = entry.envelope.distance(candidate.envelope)
-      if (envelopeGap > bestDistance) continue
+      if (envelopeGap > bestDistance) {
+        skippedForEntry += 1
+        if (skippedForEntry >= maxFailedCandidatesPerEntry) {
+          break
+        }
+        continue
+      }
+      if (Number.isFinite(bestDistance)) {
+        const hullGap =
+          entry.hull !== null && candidate.hull !== null
+            ? entry.hull.distance(candidate.hull)
+            : envelopeGap
+        if (hullGap > bestDistance + proxySlack) {
+          skippedForEntry += 1
+          if (skippedForEntry >= maxFailedCandidatesPerEntry) {
+            break
+          }
+          continue
+        }
+      }
       evaluatedPairs += 1
-      const op = new DistanceOp(entry.geometry, candidate.geometry)
-      const distance = op.distance()
+      const distanceResult = estimateIndexedDistance(entry, candidate)
+      const distance = distanceResult.distance
       if (distance + EPSILON < bestDistance) {
         bestDistance = Math.max(distance, 0)
-        const nearestPoints = op.nearestPoints()
-        bestPoints = [nearestPoints[0], nearestPoints[1]]
+        const nearestPoints = getNearestPointsForResult(
+          distanceResult,
+          entry,
+          candidate
+        )
+        if (nearestPoints !== null) {
+          bestPoints = [nearestPoints[0], nearestPoints[1]]
+        }
+        if (bestDistance <= targetDistance + EPSILON) {
+          break outer
+        }
       }
     }
   }
@@ -1155,7 +1231,7 @@ function measureSpacingBetweenComponents(
       durationMs,
       candidatePairs,
       evaluatedPairs,
-      componentsIndexed: entries.length,
+      componentsIndexed: cachedIndex.componentsIndexed,
     },
   }
 }
@@ -1164,6 +1240,8 @@ interface SpatialIndexEntry {
   geometry: Geometry
   envelope: Envelope
   index: number
+  hull: Geometry | null
+  distanceIndex: IndexedFacetDistance | null
 }
 
 function buildSpatialEntries(components: Geometry[]): SpatialIndexEntry[] {
@@ -1173,14 +1251,175 @@ function buildSpatialEntries(components: Geometry[]): SpatialIndexEntry[] {
     if (geometry.isEmpty()) return
     const envelope = geometry.getEnvelopeInternal()
     if (!envelope || envelope.isNull()) return
+    let hull: Geometry | null = null
+    let distanceIndex: IndexedFacetDistance | null = null
+    try {
+      hull = geometry.convexHull()
+    } catch {
+      hull = null
+    }
+    try {
+      distanceIndex = new IndexedFacetDistance(geometry)
+    } catch {
+      distanceIndex = null
+    }
     entries.push({
       geometry,
       envelope: new Envelope(envelope),
       index,
+      hull,
+      distanceIndex,
     })
   })
 
   return entries
+}
+
+interface InternalGeometrySpacingIndex extends GeometrySpacingIndex {
+  entries: SpatialIndexEntry[]
+  tree: STRtree
+  envelope: Envelope
+  maxExtent: number
+}
+
+function createGeometrySpacingIndex(
+  components: Geometry[]
+): InternalGeometrySpacingIndex | null {
+  if (components.length < 2) return null
+  const entries = buildSpatialEntries(components)
+  if (entries.length < 2) return null
+
+  const tree = new STRtree()
+  let overallEnvelope: Envelope | null = null
+  for (const entry of entries) {
+    tree.insert(entry.envelope, entry)
+    if (overallEnvelope === null) {
+      overallEnvelope = new Envelope(entry.envelope)
+    } else {
+      overallEnvelope.expandToInclude(entry.envelope)
+    }
+  }
+  tree.build()
+
+  if (overallEnvelope === null) {
+    overallEnvelope = new Envelope()
+  }
+  const maxExtent = Math.max(
+    overallEnvelope.getWidth(),
+    overallEnvelope.getHeight()
+  )
+  if (!Number.isFinite(maxExtent) || maxExtent <= 0) {
+    return null
+  }
+
+  return {
+    componentsIndexed: entries.length,
+    entries,
+    tree,
+    envelope: overallEnvelope,
+    maxExtent,
+  }
+}
+
+function seedInitialSpacingEstimate(
+  entries: SpatialIndexEntry[],
+  maxPairs = 24,
+  neighborsPerEntry = 4
+): number {
+  if (entries.length < 2) return Number.POSITIVE_INFINITY
+  const sorted = [...entries]
+  sorted.sort(
+    (a, b) => a.envelope.getMinX() - b.envelope.getMinX()
+  )
+
+  let best = Number.POSITIVE_INFINITY
+  let pairsEvaluated = 0
+
+  for (let i = 0; i < sorted.length; i++) {
+    const current = sorted[i]
+    for (
+      let j = i + 1;
+      j < sorted.length && j <= i + neighborsPerEntry;
+      j++
+    ) {
+      if (pairsEvaluated >= maxPairs) {
+        return best
+      }
+      const candidate = sorted[j]
+      const envelopeGap = current.envelope.distance(candidate.envelope)
+      if (envelopeGap >= best) {
+        continue
+      }
+      pairsEvaluated += 1
+      const op = new DistanceOp(current.geometry, candidate.geometry)
+      const distance = op.distance()
+      if (distance + EPSILON < best) {
+        best = Math.max(distance, 0)
+        if (best <= EPSILON) {
+          return 0
+        }
+      }
+    }
+  }
+
+  return best
+}
+
+type IndexedDistanceResult =
+  | {distance: number; provider: 'entry'; op?: DistanceOp}
+  | {distance: number; provider: 'candidate'; op?: DistanceOp}
+  | {distance: number; provider: 'direct'; op: DistanceOp}
+
+function estimateIndexedDistance(
+  entry: SpatialIndexEntry,
+  candidate: SpatialIndexEntry
+): IndexedDistanceResult {
+  if (entry.distanceIndex !== null) {
+    try {
+      const distance = entry.distanceIndex.distance(candidate.geometry)
+      return {distance, provider: 'entry'}
+    } catch {
+      // fall through
+    }
+  }
+
+  if (candidate.distanceIndex !== null) {
+    try {
+      const distance = candidate.distanceIndex.distance(entry.geometry)
+      return {distance, provider: 'candidate'}
+    } catch {
+      // fall through
+    }
+  }
+
+  const op = new DistanceOp(entry.geometry, candidate.geometry)
+  return {distance: op.distance(), provider: 'direct', op}
+}
+
+function getNearestPointsForResult(
+  result: IndexedDistanceResult,
+  entry: SpatialIndexEntry,
+  candidate: SpatialIndexEntry
+): [Coordinate, Coordinate] | null {
+  try {
+    if (result.provider === 'entry') {
+      const points = entry.distanceIndex?.nearestPoints(candidate.geometry)
+      if (points) return [points[0], points[1]]
+      const opFallback = new DistanceOp(entry.geometry, candidate.geometry)
+      return opFallback.nearestPoints() as [Coordinate, Coordinate]
+    }
+
+    if (result.provider === 'candidate') {
+      const points = candidate.distanceIndex?.nearestPoints(entry.geometry)
+      if (points) return [points[0], points[1]]
+      const opFallback = new DistanceOp(entry.geometry, candidate.geometry)
+      return opFallback.nearestPoints() as [Coordinate, Coordinate]
+    }
+
+    return result.op.nearestPoints() as [Coordinate, Coordinate]
+  } catch {
+    return null
+  }
 }
 
 function safeBuffer(geometry: Geometry, distance: number): Geometry {

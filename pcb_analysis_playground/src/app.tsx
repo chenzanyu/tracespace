@@ -11,13 +11,11 @@ import type {
 import {
   gerberToImageGeometries,
   measureMinimumSpacing,
-  analyzeSpacingRule,
 } from '@tracespace/pcb-analysis'
 import type {
   GeometryPerformanceProfile,
   ImageGeometryResult,
   MinimumSpacingMeasurement,
-  SpacingRuleResult,
 } from '@tracespace/pcb-analysis'
 import type {UnitsType} from '@tracespace/parser'
 
@@ -37,12 +35,8 @@ interface ViewerDisplay {
   minimumSpacingLocation: MinimumSpacingMeasurement['location']
   minimumSpacingEndpoints: MinimumSpacingMeasurement['endpoints']
   minimumSpacingPaths: string[]
-  ruleViolationPaths: string[]
-  ruleSpacingMil: number
-  ruleHasViolations: boolean
   performance: GeometryPerformanceProfile | null
   minimumSpacingMetrics: MinimumSpacingMeasurement['metrics'] | null
-  ruleMetrics: SpacingRuleResult['metrics'] | null
   memory: MemorySnapshot | null
 }
 
@@ -62,9 +56,6 @@ export function App(): JSX.Element {
   const [viewer, setViewer] = useState<ViewerDisplay | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
-  const [ruleMil, setRuleMil] = useState(6.0)
-  const [geometryResult, setGeometryResult] =
-    useState<ImageGeometryResult | null>(null)
 
   const handleFileChange = async (
     event: JSX.TargetedEvent<HTMLInputElement, Event>
@@ -78,12 +69,10 @@ export function App(): JSX.Element {
     try {
       const contents = await file.text()
       const result = gerberToImageGeometries(contents)
-      setGeometryResult(result)
       const memorySnapshot = captureMemorySnapshot()
       const display = buildViewerDisplay(
         file.name,
         result,
-        ruleMil,
         memorySnapshot
       )
       setViewer(display)
@@ -96,39 +85,18 @@ export function App(): JSX.Element {
     }
   }
 
-  const handleRuleChange = (
-    event: JSX.TargetedEvent<HTMLInputElement, Event>
-  ): void => {
-    const nextValue = Number(event.currentTarget.value)
-    if (Number.isNaN(nextValue) || nextValue <= 0) return
-    setRuleMil(nextValue)
-    if (geometryResult !== null && viewer !== null) {
-      const updated = buildViewerDisplay(
-        viewer.filename,
-        geometryResult,
-        nextValue,
-        captureMemorySnapshot()
-      )
-      setViewer(updated)
-    }
-  }
-
   const pipelineTotalMs = viewer?.performance?.totalMs ?? null
   const spacingDurationMs = viewer?.minimumSpacingMetrics?.durationMs ?? null
-  const ruleDurationMs = viewer?.ruleMetrics?.durationMs ?? null
   const convertBreakdown = viewer?.performance?.convertBreakdown
   const combinedTotalMs =
     viewer !== null
-      ? (pipelineTotalMs ?? 0) +
-        (spacingDurationMs ?? 0) +
-        (ruleDurationMs ?? 0)
+      ? (pipelineTotalMs ?? 0) + (spacingDurationMs ?? 0)
       : null
   const hasPerformancePanel =
     viewer !== null &&
     Boolean(
       viewer.performance ||
         viewer.minimumSpacingMetrics ||
-        viewer.ruleMetrics ||
         viewer.memory
     )
 
@@ -156,17 +124,6 @@ export function App(): JSX.Element {
             disabled={isProcessing}
           />
           <span>{isProcessing ? 'Processing...' : 'Select Gerber file'}</span>
-        </label>
-        <label class="rule-input">
-          <span>Minimum spacing rule (mil)</span>
-          <input
-            type="number"
-            step="0.1"
-            min="0.1"
-            max="40"
-            value={ruleMil}
-            onInput={handleRuleChange}
-          />
         </label>
         {error !== null && <p class="error">{error}</p>}
         {viewer && (
@@ -197,13 +154,7 @@ export function App(): JSX.Element {
                       {formatPoint(viewer.minimumSpacingEndpoints[1])}
                     </dd>
                   </>
-                )}
-                <dt>Rule check</dt>
-                <dd>
-                  {viewer.ruleSpacingMil.toFixed(2)} mil ·{' '}
-                  {viewer.ruleHasViolations ? 'violations found' : 'pass'}
-                </dd>
-              </dl>
+                )}              </dl>
             </div>
             {hasPerformancePanel && (
               <div class="performance-panel">
@@ -252,12 +203,7 @@ export function App(): JSX.Element {
                     <tr>
                       <th>Spacing search</th>
                       <td>{formatMs(spacingDurationMs)}</td>
-                    </tr>
-                    <tr>
-                      <th>Rule check</th>
-                      <td>{formatMs(ruleDurationMs)}</td>
-                    </tr>
-                    <tr>
+                    </tr>                    <tr>
                       <th>Overall total</th>
                       <td>
                         {combinedTotalMs !== null
@@ -288,16 +234,7 @@ export function App(): JSX.Element {
                     {viewer.minimumSpacingMetrics.candidatePairs} candidate pairs ·{' '}
                     {viewer.minimumSpacingMetrics.evaluatedPairs} distance ops
                   </p>
-                )}
-                {viewer.ruleMetrics && (
-                  <p class="performance-note">
-                    <strong>Rule check:</strong>{' '}
-                    {viewer.ruleMetrics.candidatePairs ?? 0} candidates ·{' '}
-                    {viewer.ruleMetrics.evaluatedPairs ?? 0} buffered ·{' '}
-                    {viewer.ruleMetrics.overlappingPairs ?? 0} overlaps
-                  </p>
-                )}
-              </div>
+                )}              </div>
             )}
           </>
         )}
@@ -308,7 +245,6 @@ export function App(): JSX.Element {
           paths={viewer?.paths ?? []}
           viewBox={viewer?.viewBox ?? ''}
           marker={viewer?.minimumSpacingLocation ?? null}
-          violationPaths={viewer?.ruleViolationPaths ?? []}
           measurementPaths={viewer?.minimumSpacingPaths ?? []}
         />
       </section>
@@ -319,7 +255,6 @@ export function App(): JSX.Element {
 function buildViewerDisplay(
   filename: string,
   result: ImageGeometryResult,
-  ruleMil: number,
   memorySnapshot: MemorySnapshot | null = null
 ): ViewerDisplay {
   const {composite, graphics, mmPerUnit} = result
@@ -335,15 +270,6 @@ function buildViewerDisplay(
   const paths = geometryToPaths(geojson)
   const areaUnits = composite.getArea()
   const minimumSpacing = measureMinimumSpacing(result)
-  const ruleResult = analyzeSpacingRule(result, ruleMil)
-  const ruleViolationPaths =
-    ruleResult.violations && !ruleResult.violations.isEmpty()
-      ? geometryToPaths(
-          geojsonWriter.write(
-            ruleResult.violations
-          ) as GeoJsonGeometry | GeoJsonGeometryCollection
-        )
-      : []
   const minimumSpacingPaths =
     minimumSpacing?.violations && !minimumSpacing.violations.isEmpty()
       ? geometryToPaths(
@@ -366,12 +292,8 @@ function buildViewerDisplay(
     minimumSpacingLocation: minimumSpacing?.location ?? null,
     minimumSpacingEndpoints: minimumSpacing?.endpoints ?? null,
     minimumSpacingPaths,
-    ruleViolationPaths,
-    ruleSpacingMil: ruleResult.spacingMil,
-    ruleHasViolations: ruleResult.hasViolations,
     performance: result.performance ?? null,
     minimumSpacingMetrics: minimumSpacing?.metrics ?? null,
-    ruleMetrics: ruleResult.metrics ?? null,
     memory,
   }
 }

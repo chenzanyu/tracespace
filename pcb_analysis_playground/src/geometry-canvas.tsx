@@ -4,7 +4,6 @@ interface GeometryCanvasProps {
   paths: string[]
   viewBox: string
   marker?: [number, number] | null
-  violationPaths?: string[]
   measurementPaths?: string[]
 }
 
@@ -12,7 +11,6 @@ export function GeometryCanvas({
   paths,
   viewBox,
   marker,
-  violationPaths = [],
   measurementPaths = [],
 }: GeometryCanvasProps): JSX.Element {
   if (!paths.length || viewBox.length === 0) {
@@ -33,9 +31,6 @@ export function GeometryCanvas({
       <svg viewBox={viewBox} xmlns="http://www.w3.org/2000/svg">
         {paths.map((d, index) => (
           <path key={index} d={d} />
-        ))}
-        {violationPaths.map((d, index) => (
-          <path class="viewer-violation" key={`viol-${index}`} d={d} />
         ))}
         {measurementPaths.map((d, index) => (
           <path class="viewer-measurement" key={`ms-${index}`} d={d} />

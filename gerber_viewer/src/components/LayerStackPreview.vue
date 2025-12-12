@@ -773,7 +773,9 @@ const onWheel = (event) => {
   const my = event.clientY - rect.top
   const prev = viewScale.value
   const factor = event.deltaY > 0 ? 0.9 : 1.1
-  const next = Math.min(20, Math.max(0.05, prev * factor))
+  const nextCandidate = prev * factor
+  if (!Number.isFinite(nextCandidate) || nextCandidate <= 0) return
+  const next = Math.max(0.05, nextCandidate)
   const wx = (mx - viewTranslate.x) / prev
   const wy = (my - viewTranslate.y) / prev
   viewTranslate.x = mx - wx * next

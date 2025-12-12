@@ -705,26 +705,6 @@ const unionPolygonList = (polygons, stats = null) => {
   }
 }
 
-const computePolygonStats = multiPolygon => {
-  if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) {
-    return {polygonCount: 0, ringCount: 0, pointCount: 0}
-  }
-  return multiPolygon.reduce(
-    (acc, polygon) => {
-      if (!Array.isArray(polygon) || polygon.length === 0) return acc
-      acc.polygonCount += 1
-      acc.ringCount += polygon.length
-      polygon.forEach(ring => {
-        if (Array.isArray(ring)) {
-          acc.pointCount += ring.length
-        }
-      })
-      return acc
-    },
-    {polygonCount: 0, ringCount: 0, pointCount: 0}
-  )
-}
-
 const combineShapeEntriesPolygon = entries => {
   if (!Array.isArray(entries) || entries.length === 0) return null
   return entries.reduce((acc, entry) => {
@@ -914,15 +894,6 @@ const buildPlanarLayerGeometry = (
   const children = imageTree.children || []
   const planarEntries = []
 
-  const planarDebug = {
-    elements: [],
-    chunks: [],
-    summary: null,
-  }
-  let chunkResolutionTime = 0
-  let darkEntryCount = 0
-  let clearEntryCount = 0
-
   const chunkList = []
   const initialDarkPolygons = []
   const isSolderMaskLayer = layerType === 'soldermask'
@@ -937,14 +908,6 @@ const buildPlanarLayerGeometry = (
       contentBounds: null,
     }
     chunkList.push(chunk)
-    planarDebug.chunks.push({
-      index: chunk.index,
-      createdAt: planarDebug.elements.length,
-      hasClear: false,
-      polygonStats: computePolygonStats(null),
-      darkCount: 0,
-      clearCount: 0,
-    })
     return chunk
   }
 
@@ -971,40 +934,12 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
       boardMaskPolygon = fallbackRegions ? regionsToMultiPolygon(fallbackRegions) : null
     }
     if (boardMaskPolygon) {
-      initialDarkPolygons.push({
-        polygon: boardMaskPolygon,
-        info: {
-          index: -1,
-          type: 'board-shape',
-          polarity: null,
-          isClear: false,
-          action: 'soldermask-base',
-        },
-      })
+      initialDarkPolygons.push(boardMaskPolygon)
     } else {
       console.warn(
         '[pcbModel] Missing board shape for soldermask layer after fallback; rendering mask openings only'
       )
     }
-  }
-
-  const getChunkDebug = chunk => planarDebug.chunks[chunk.index] || null
-
-  const updateChunkDebug = chunk => {
-    const debugEntry = getChunkDebug(chunk)
-    if (!debugEntry) return
-    debugEntry.hasClear = chunk.hasClear
-    debugEntry.polygonStats = computePolygonStats(chunk.multiPolygon)
-  }
-
-  const recordElementDebug = (info, polygonStatsByChunk = null) => {
-    planarDebug.elements.push({
-      ...info,
-      polygonStatsAfter:
-        polygonStatsByChunk && Object.keys(polygonStatsByChunk).length
-          ? polygonStatsByChunk
-          : null,
-    })
   }
 
   const ensureChunkReadyForDark = () => {
@@ -1013,22 +948,7 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
     }
   }
 
-  const recordChunkPolygonStats = chunk => {
-    const stats = {
-      polygonStats: computePolygonStats(chunk.multiPolygon),
-      darkCount: chunk.darkEntries.length,
-      clearCount: chunk.clearEntries.length,
-    }
-    const debugEntry = planarDebug.chunks[chunk.index]
-    if (debugEntry) {
-      debugEntry.polygonStats = stats.polygonStats
-      debugEntry.darkCount = stats.darkCount
-      debugEntry.clearCount = stats.clearCount
-    }
-    return stats.polygonStats
-  }
-
-  const applyDarkPolygon = (multiPolygon, elementInfo) => {
+  const applyDarkPolygon = (multiPolygon) => {
     const stored = sanitizeMultiPolygon(multiPolygon)
     if (!stored) return
     const entryBounds = getMultiPolygonBounds(stored)
@@ -1037,23 +957,13 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
     currentChunk.darkEntries.push({polygon: stored, bounds: entryBounds})
     currentChunk.contentBounds = extendBounds(currentChunk.contentBounds, entryBounds)
     currentChunk.dirty = true
-    recordElementDebug({
-      ...elementInfo,
-      chunkIndices: [currentChunk.index],
-    })
-    const debugEntry = planarDebug.chunks[currentChunk.index]
-    if (debugEntry) {
-      debugEntry.darkCount = currentChunk.darkEntries.length
-    }
-    darkEntryCount += 1
   }
 
-  const applyClearPolygon = (multiPolygon, elementInfo) => {
+  const applyClearPolygon = (multiPolygon) => {
     const stored = sanitizeMultiPolygon(multiPolygon)
     if (!stored) return
     const entryBounds = getMultiPolygonBounds(stored)
     if (!entryBounds) return
-    const affected = []
     chunkList.forEach(chunk => {
       if (!chunk.contentBounds || !boundsOverlap(chunk.contentBounds, entryBounds)) {
         return
@@ -1061,25 +971,19 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
       chunk.clearEntries.push({polygon: stored, bounds: entryBounds})
       chunk.hasClear = true
       chunk.dirty = true
-      affected.push(chunk.index)
-      const debugEntry = planarDebug.chunks[chunk.index]
-      if (debugEntry) {
-        debugEntry.clearCount = chunk.clearEntries.length
-      }
-      clearEntryCount += 1
-    })
-    recordElementDebug({
-      ...elementInfo,
-      chunkIndices: affected,
     })
   }
 
   const buildChunkMultiPolygon = chunk => {
     if (!chunk.dirty && chunk.multiPolygon) return chunk.multiPolygon
-    const startTime = typeof performance !== 'undefined' ? performance.now() : null
     const darkPolygons = chunk.darkEntries.map(entry => entry.polygon)
     const darkUnion = unionPolygonList(darkPolygons)
-    if (!darkUnion) return null
+    if (!darkUnion) {
+      chunk.multiPolygon = null
+      chunk.contentBounds = null
+      chunk.dirty = false
+      return null
+    }
     let result = darkUnion
     let resultBounds = getMultiPolygonBounds(result)
     const relevantClears = chunk.clearEntries.filter(entry =>
@@ -1125,10 +1029,6 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
     chunk.multiPolygon = result
     chunk.contentBounds = resultBounds
     chunk.dirty = false
-    recordChunkPolygonStats(chunk)
-    if (startTime !== null && typeof performance !== 'undefined') {
-      chunkResolutionTime += performance.now() - startTime
-    }
     return result
   }
 
@@ -1143,7 +1043,7 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
     planarEntries.push({geometry})
   }
 
-  initialDarkPolygons.forEach(entry => applyDarkPolygon(entry.polygon, entry.info))
+  initialDarkPolygons.forEach(polygon => applyDarkPolygon(polygon))
 
 let drillHolePolygon = drillTreesToMultiPolygon(drillTrees)
 drillHolePolygon = simplifyMultiPolygonForLayer(drillHolePolygon, 'drill', simplifyTolerances)
@@ -1163,18 +1063,10 @@ const drillHoleBounds = drillHolePolygon ? getMultiPolygonBounds(drillHolePolygo
       const entry = createShapeEntryFromSegments(element.segments)
       const regionPolygon = entry?.shape ? shapeToMultiPolygon(entry.shape) : null
       if (!regionPolygon) continue
-      const debugBase = {
-        index,
-        type: element.type,
-        polarity: element.polarity ?? null,
-        isClear: elementIsClear,
-        action: elementIsClear ? 'clear-region' : 'dark-region',
-        segmentCount: element.segments?.length ?? 0,
-      }
       if (elementIsClear) {
-        applyClearPolygon(regionPolygon, debugBase)
+        applyClearPolygon(regionPolygon)
       } else {
-        applyDarkPolygon(regionPolygon, debugBase)
+        applyDarkPolygon(regionPolygon)
       }
       continue
     }
@@ -1183,75 +1075,27 @@ const drillHoleBounds = drillHolePolygon ? getMultiPolygonBounds(drillHolePolygo
       const entries = buildShapeEntriesFromDefinition(element.shape)
       const shapePolygon = combineShapeEntriesPolygon(entries)
       if (!shapePolygon) continue
-      const debugBase = {
-        index,
-        type: element.type,
-        polarity: element.polarity ?? null,
-        isClear: elementIsClear,
-        action: elementIsClear ? 'clear-shape' : 'dark-shape',
-        shapeType: element.shape?.type ?? null,
-        generatedShapes: entries.length,
-      }
       if (elementIsClear) {
-        applyClearPolygon(shapePolygon, debugBase)
+        applyClearPolygon(shapePolygon)
       } else {
-        applyDarkPolygon(shapePolygon, debugBase)
+        applyDarkPolygon(shapePolygon)
       }
       continue
     }
 
     if (element.type === IMAGE_PATH) {
       const pathPolygon = pathToMultiPolygon(element)
-      if (!pathPolygon) {
-        recordElementDebug({
-          index,
-          type: element.type,
-          polarity: element.polarity ?? null,
-          isClear: elementIsClear,
-          action: 'path-conversion-skip',
-          segmentCount: element.segments?.length ?? 0,
-          chunkIndices: [],
-        })
-        continue
-      }
-      const debugBase = {
-        index,
-        type: element.type,
-        polarity: element.polarity ?? null,
-        isClear: elementIsClear,
-        action: elementIsClear ? 'clear-path' : 'dark-path',
-        segmentCount: element.segments?.length ?? 0,
-      }
+      if (!pathPolygon) continue
       if (elementIsClear) {
-        applyClearPolygon(pathPolygon, debugBase)
+        applyClearPolygon(pathPolygon)
       } else {
-        applyDarkPolygon(pathPolygon, debugBase)
+        applyDarkPolygon(pathPolygon)
       }
       continue
     }
   }
 
   chunkList.forEach(emitChunkPolygons)
-
-  const polygonSummary = chunkList.reduce(
-    (acc, chunk) => {
-      if (!chunk.multiPolygon) {
-        buildChunkMultiPolygon(chunk)
-      }
-      const stats = computePolygonStats(chunk.multiPolygon)
-      acc.polygonCount += stats.polygonCount
-      acc.ringCount += stats.ringCount
-      acc.pointCount += stats.pointCount
-      return acc
-    },
-    {chunkCount: chunkList.length, polygonCount: 0, ringCount: 0, pointCount: 0}
-  )
-  planarDebug.summary = {
-    ...polygonSummary,
-    darkEntryCount,
-    clearEntryCount,
-    chunkResolveMs: Number(chunkResolutionTime.toFixed(2)),
-  }
 
   planarEntries.forEach(entry => {
     const material = new THREE.MeshBasicMaterial({
@@ -1269,8 +1113,6 @@ const drillHoleBounds = drillHolePolygon ? getMultiPolygonBounds(drillHolePolygo
     group.add(mesh)
   })
 
-  group.userData = group.userData || {}
-  group.userData.planarDebug = planarDebug
   return group
 }
 

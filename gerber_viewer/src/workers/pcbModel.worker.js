@@ -191,7 +191,6 @@ const buildLayerPayload = payload => {
           color,
           mesh: null,
           meshSummary: { chunkCount: 0, totalVertices: 0, skipped: 'drill-layer' },
-          debug: null,
           metrics,
         },
         transferList: [],
@@ -280,7 +279,6 @@ const buildLayerPayload = payload => {
       )
     }
     let group = null
-    let renderDebug = null
     try {
       group = measureWorkerStage(metrics, 'render-three', () =>
         renderThree(
@@ -297,7 +295,6 @@ const buildLayerPayload = payload => {
           simplifyTolerances
         )
       )
-      renderDebug = group?.userData?.planarDebug || null
       logWorker('renderThree-complete', {
         ...contextBase,
         durationMs: metrics.timeline[metrics.timeline.length - 1]?.durationMs ?? null,
@@ -344,7 +341,6 @@ const buildLayerPayload = payload => {
           summary,
         },
         meshSummary: summary,
-        debug: renderDebug ? {planar: renderDebug} : null,
         metrics,
       },
       transferList,

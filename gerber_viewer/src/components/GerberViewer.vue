@@ -1485,7 +1485,6 @@ const recordWorkerJobResult = (jobId, { success, message, result }) => {
   entry.success = success
   if (success) {
     entry.meshSummary = result?.meshSummary ?? summarizeMeshData(result?.mesh)
-    if (result?.debug) entry.debug = result.debug
   } else if (!success) {
     entry.errorMessage = message || 'unknown worker failure'
   }
@@ -1910,7 +1909,6 @@ const applyWorkerLayer = (payload) => {
     color: payload.color,
     mesh: payload.mesh,
     meshSummary: payload.meshSummary ?? summarizeMeshData(payload.mesh),
-    debug: payload.debug ?? null,
   })
   pcb3dModel.layers = layers
   pcb3dModel.version += 1

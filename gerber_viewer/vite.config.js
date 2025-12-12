@@ -10,4 +10,7 @@ export default defineConfig({
   resolve: {
     conditions: ['source'],
   },
+  worker: {
+    format: 'es',
+  },
 })

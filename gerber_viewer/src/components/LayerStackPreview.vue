@@ -39,8 +39,9 @@
  * 父组件仅负责传入图层数据与控制测量开关，避免重复的 WebGL 初始化逻辑。
  */
 import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount, unref } from 'vue'
-import { Application, Container } from 'pixi.js'
-import { createLayerDisplay, parseHexColor } from '../libs/gerber_stack'
+import { Application, Container, MeshSimple, Texture } from 'pixi.js'
+import { parseHexColor } from '../libs/gerber_stack'
+import { enqueueLayerMeshJob, terminateLayerMeshWorkers } from '../libs/layer_mesh'
 
 const props = defineProps({
   orderedLayers: { type: Array, required: true },
@@ -436,6 +437,64 @@ const destroyPixi = () => {
 
 const layerDisplayCache = new Map()
 
+const buildZeroUvs = (positions) => {
+  if (!positions || positions.length === 0) return new Float32Array()
+  return new Float32Array(positions.length)
+}
+
+const createMeshFromGeometry = (geometryData, tint, alpha) => {
+  if (!geometryData?.positions || !geometryData?.indices) return null
+  if (geometryData.positions.length < 6 || geometryData.indices.length < 3) return null
+  const vertices = geometryData.positions
+  const indices = geometryData.indices
+  const uvs = geometryData.uvs instanceof Float32Array ? geometryData.uvs : buildZeroUvs(vertices)
+  const mesh = new MeshSimple({
+    vertices,
+    uvs,
+    indices,
+    texture: Texture.WHITE,
+  })
+  mesh.tint = tint
+  mesh.alpha = alpha
+  mesh.eventMode = 'none'
+  return mesh
+}
+
+const updateDisplayTintOpacity = (display, tint, alpha) => {
+  if (!display) return
+  const visit = (node) => {
+    if (!node) return
+    if (node?.renderPipeId === 'mesh') {
+      node.tint = tint
+      node.alpha = alpha
+    }
+    const kids = Array.isArray(node.children) ? node.children : []
+    for (const child of kids) visit(child)
+  }
+  visit(display)
+}
+
+const createLayerMeshDisplay = (chunks, tint, alpha) => {
+  const layerContainer = new Container()
+  layerContainer.eventMode = 'none'
+  const list = Array.isArray(chunks) ? chunks : []
+  for (const chunk of list) {
+    const container = new Container({ isRenderGroup: true })
+    container.eventMode = 'none'
+    const solidMesh = createMeshFromGeometry(chunk?.solid, tint, alpha)
+    if (solidMesh) container.addChild(solidMesh)
+
+    const maskMesh = createMeshFromGeometry(chunk?.mask, 0xffffff, 1)
+    if (maskMesh) {
+      container.addChild(maskMesh)
+      container.setMask({ mask: maskMesh, inverse: true })
+    }
+
+    if (container.children.length) layerContainer.addChild(container)
+  }
+  return layerContainer
+}
+
 const disposeLayerDisplay = (layerId, entry, { destroy = true } = {}) => {
   if (!entry) return
   try {
@@ -519,14 +578,13 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
       })
     }
       
-    // --- 核心修正 2: 将同步循环改为异步批处理 ---
-    // 这可以防止 JS 计算本身阻塞 UI，让加载动画等能够平滑播放。
+    // --- Mesh worker: 按图层并发构建几何 ---
     let zIndex = 0
     const nextActiveIds = new Set()
     const stats = { reused: 0, rebuilt: 0, removed: 0 }
-    let layersProcessedInBatch = 0
     let processedLayers = 0
-    const BATCH_SIZE = 3; // 每次处理几个图层
+    const ctxKey = `${viewBox.join(',')}|${unitsToPx}`
+    const rebuildJobs = []
 
     for (const { layer } of stackingOrder) {
       if (token !== compositeUpdateToken) {
@@ -534,51 +592,92 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
         return
       }
 
-      // --- 这是您的原始图层处理逻辑，保持不变 ---
       nextActiveIds.add(layer.id)
-      processedLayers += 1
       const visible = layer.visible !== false
       const tree = plotTrees[layer.id]
-      if (!tree) continue
+      if (!tree) {
+        processedLayers += 1
+        continue
+      }
       const colorValue = parseHexColor(layer.color)
       const layerOpacity = typeof layer.opacity === 'number' ? layer.opacity : 1
       const cached = layerDisplayCache.get(layer.id)
-      const needsRebuild = !cached || cached.tree !== tree || cached.color !== colorValue || cached.opacity !== layerOpacity
+      const needsRebuild = !cached || cached.tree !== tree || cached.ctxKey !== ctxKey
+      const layerZ = zIndex++
+
       if (needsRebuild) {
         disposeLayerDisplay(layer.id, cached)
-        const display = createLayerDisplay(tree, ctx, colorValue, layerOpacity) // 使用您原始的、同步的创建函数
-        if (!display) continue
-        display.eventMode = 'none'
-        layerDisplayCache.set(layer.id, { display, tree, color: colorValue, opacity: layerOpacity })
         stats.rebuilt += 1
-      } else {
-        stats.reused += 1
+        const job = enqueueLayerMeshJob({
+          action: 'build-layer-mesh',
+          payload: {
+            layerId: layer.id,
+            plotTree: tree,
+            viewBox,
+            unitsToPx,
+          },
+        })
+          .then((result) => {
+            if (token !== compositeUpdateToken || !pixiRoot) return
+            const chunks = result?.chunks ?? []
+            const display = createLayerMeshDisplay(chunks, colorValue, layerOpacity)
+            if (!display) return
+            layerDisplayCache.set(layer.id, {
+              display,
+              tree,
+              color: colorValue,
+              opacity: layerOpacity,
+              ctxKey,
+            })
+            display.zIndex = layerZ
+            display.visible = visible
+            if (display.parent !== pixiRoot) pixiRoot.addChild(display)
+            processedLayers += 1
+            if (showLoadingOverlay && totalLayers > 0) {
+              reportCompositeProgress(
+                processedLayers,
+                totalLayers,
+                `渲染 ${Math.min(processedLayers, totalLayers)}/${totalLayers} 个图层`
+              )
+            }
+          })
+          .catch((error) => {
+            processedLayers += 1
+            console.warn('[LayerStackPreview] layer mesh build failed', { layerId: layer.id, error })
+          })
+        rebuildJobs.push(job)
+        continue
       }
-      const entry = layerDisplayCache.get(layer.id)
-      if (!entry?.display) continue
+
+      stats.reused += 1
+      const entry = cached
+      if (!entry?.display) {
+        processedLayers += 1
+        continue
+      }
+      if (entry.color !== colorValue || entry.opacity !== layerOpacity) {
+        updateDisplayTintOpacity(entry.display, colorValue, layerOpacity)
+      }
       entry.tree = tree
       entry.color = colorValue
       entry.opacity = layerOpacity
-      entry.display.zIndex = zIndex++
+      entry.ctxKey = ctxKey
+      entry.display.zIndex = layerZ
       entry.display.visible = visible
       if (entry.display.parent !== pixiRoot) pixiRoot.addChild(entry.display)
-      // --- 图层处理逻辑结束 ---
-      
+      processedLayers += 1
       if (showLoadingOverlay && totalLayers > 0) {
         reportCompositeProgress(
           processedLayers,
           totalLayers,
-          `生成 ${Math.min(processedLayers, totalLayers)}/${totalLayers} 个图层`
+          `渲染 ${Math.min(processedLayers, totalLayers)}/${totalLayers} 个图层`
         )
       }
+    }
 
-      // 在处理完一小批后，让出主线程
-      layersProcessedInBatch++;
-      if (layersProcessedInBatch >= BATCH_SIZE) {
-        layersProcessedInBatch = 0;
-        // await 会暂停 JS，此时 Ticker 会把已添加的图层渲染出来
-        await new Promise(resolve => setTimeout(resolve, 0));
-      }
+    if (rebuildJobs.length) {
+      await Promise.allSettled(rebuildJobs)
+      if (token !== compositeUpdateToken) return
     }
     
     for (const [layerId, entry] of layerDisplayCache.entries()) {
@@ -831,6 +930,7 @@ onBeforeUnmount(() => {
     resizeObserver.disconnect()
     resizeObserver = null
   }
+  terminateLayerMeshWorkers()
   destroyPixi()
 })
 </script>

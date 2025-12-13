@@ -1137,6 +1137,7 @@ watch(
   ],
   () => applyLayerColorOverrides()
 )
+watch(() => props.surfaceFinishType, () => applyLayerColorOverrides())
 watch(
   () => [
     props.layerVisibility?.copper,

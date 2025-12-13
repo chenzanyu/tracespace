@@ -41,7 +41,7 @@
 import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount, unref } from 'vue'
 import { Application, Container, MeshSimple, Texture } from 'pixi.js'
 import { parseHexColor } from '../libs/gerber_stack'
-import { enqueueLayerMeshJob, terminateLayerMeshWorkers } from '../libs/layer_mesh'
+import { enqueueComputeLayerMeshJob } from '../libs/compute'
 
 const props = defineProps({
   orderedLayers: { type: Array, required: true },
@@ -555,10 +555,19 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
       else applyViewTransform()
       return
     }
+    const projectId = fm?.__compute?.projectId
+    if (!projectId) {
+      endRebuild()
+      console.warn('[LayerStackPreview] skip render: compute project missing')
+      resetLayerDisplays(false)
+      if (recenter) fitToContainer(true)
+      else applyViewTransform()
+      return
+    }
     const viewBox = getCompositeViewBox()
     const unitsToPx = getUnitsToPx()
     const ctx = { viewBox, unitsToPx }
-    const plotTrees = fm.plotResult?.plotTreesById ?? {}
+    const plotTreeSummaries = fm.plotResult?.plotTreesById ?? {}
     const stackingOrder = props.orderedLayers
       .map((layer, index) => ({ layer, index }))
       .sort((a, b) => { // 保持您的排序逻辑
@@ -583,7 +592,7 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
     const nextActiveIds = new Set()
     const stats = { reused: 0, rebuilt: 0, removed: 0 }
     let processedLayers = 0
-    const ctxKey = `${viewBox.join(',')}|${unitsToPx}`
+    const ctxKey = `${projectId}|${viewBox.join(',')}|${unitsToPx}`
     const rebuildJobs = []
 
     for (const { layer } of stackingOrder) {
@@ -594,28 +603,24 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
 
       nextActiveIds.add(layer.id)
       const visible = layer.visible !== false
-      const tree = plotTrees[layer.id]
-      if (!tree) {
-        processedLayers += 1
-        continue
-      }
+      const summary = plotTreeSummaries?.[layer.id] ?? null
+      const rev = Number(summary?.rev) || 0
+      const size = summary?.size
+      const treeKey = rev > 0 ? String(rev) : Array.isArray(size) ? size.join(',') : ''
       const colorValue = parseHexColor(layer.color)
       const layerOpacity = typeof layer.opacity === 'number' ? layer.opacity : 1
       const cached = layerDisplayCache.get(layer.id)
-      const needsRebuild = !cached || cached.tree !== tree || cached.ctxKey !== ctxKey
+      const needsRebuild = !cached || cached.treeKey !== treeKey || cached.ctxKey !== ctxKey
       const layerZ = zIndex++
 
       if (needsRebuild) {
         disposeLayerDisplay(layer.id, cached)
         stats.rebuilt += 1
-        const job = enqueueLayerMeshJob({
-          action: 'build-layer-mesh',
-          payload: {
-            layerId: layer.id,
-            plotTree: tree,
-            viewBox,
-            unitsToPx,
-          },
+        const job = enqueueComputeLayerMeshJob({
+          projectId,
+          layerId: layer.id,
+          viewBox,
+          unitsToPx,
         })
           .then((result) => {
             if (token !== compositeUpdateToken || !pixiRoot) return
@@ -624,7 +629,7 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
             if (!display) return
             layerDisplayCache.set(layer.id, {
               display,
-              tree,
+              treeKey,
               color: colorValue,
               opacity: layerOpacity,
               ctxKey,
@@ -658,7 +663,7 @@ const updateComposite = async ({ recenter = false, skipLoading = false } = {}) =
       if (entry.color !== colorValue || entry.opacity !== layerOpacity) {
         updateDisplayTintOpacity(entry.display, colorValue, layerOpacity)
       }
-      entry.tree = tree
+      entry.treeKey = treeKey
       entry.color = colorValue
       entry.opacity = layerOpacity
       entry.ctxKey = ctxKey
@@ -932,7 +937,6 @@ onBeforeUnmount(() => {
     resizeObserver.disconnect()
     resizeObserver = null
   }
-  terminateLayerMeshWorkers()
   destroyPixi()
 })
 </script>

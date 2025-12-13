@@ -126,6 +126,7 @@ export const buildAnalysisPayload = ({
   boardOutlineDescriptor,
   unitMmPerUnit,
   includeTraceMetrics = false,
+  traceDataByLayerId = null,
 }) => {
   if (!fm?.plotResult?.layers) return null
   const layers = []
@@ -135,30 +136,34 @@ export const buildAnalysisPayload = ({
     if (!layer) continue
      let traceData = null
     if (includeTraceMetrics && normalizeLayerType(layer.type) === 'copper') {
-       const { tools, usedTools, macroDefinitions } = collectToolData(parseTrees[layer.id])
-       const neededMacros = new Set(
-         Object.values(tools)
-           .map(entry => entry?.shape)
-           .filter(shape => shape?.type === 'macro')
-           .map(shape => shape.name)
-           .filter(Boolean)
-       )
-       const macros = {}
-       for (const name of neededMacros) {
-         if (!name) continue
-         const macroNode = macroDefinitions.get(name)
-         if (macroNode) {
-           macros[name] = {
-             name,
-             blocks: sanitizeMacroBlocks(macroNode),
-           }
-         }
-       }
-       traceData = {
-         tools,
-         usedTools: Array.from(usedTools),
-         macros,
-       }
+      if (traceDataByLayerId && traceDataByLayerId[layer.id]) {
+        traceData = traceDataByLayerId[layer.id]
+      } else {
+        const { tools, usedTools, macroDefinitions } = collectToolData(parseTrees[layer.id])
+        const neededMacros = new Set(
+          Object.values(tools)
+            .map(entry => entry?.shape)
+            .filter(shape => shape?.type === 'macro')
+            .map(shape => shape.name)
+            .filter(Boolean)
+        )
+        const macros = {}
+        for (const name of neededMacros) {
+          if (!name) continue
+          const macroNode = macroDefinitions.get(name)
+          if (macroNode) {
+            macros[name] = {
+              name,
+              blocks: sanitizeMacroBlocks(macroNode),
+            }
+          }
+        }
+        traceData = {
+          tools,
+          usedTools: Array.from(usedTools),
+          macros,
+        }
+      }
      }
     layers.push({
       id: layer.id,

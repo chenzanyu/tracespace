@@ -562,28 +562,22 @@ import {
   onMounted,
   onBeforeUnmount,
   markRaw,
-  toRaw,
 } from 'vue'
 import axios from 'axios'
-import { fromMemoryLayers, fromParsedLayers } from '@tracespace/core'
 import UploadPanel from './UploadPanel.vue'
 import LayerStackPreview from './LayerStackPreview.vue'
 import Pcb3dPreview from './Pcb3dPreview.vue'
-import {
-  IMAGE_PATH,
-  IMAGE_REGION,
-  IMAGE_SHAPE,
-  CIRCLE,
-  RECTANGLE,
-  POLYGON,
-  LAYERED_SHAPE,
-  OUTLINE,
-  ARC,
-  LINE,
-} from '@tracespace/plotter'
 import { orderLayerWeight, randomHexColor } from '../libs/gerber_stack'
 import { resolveBoardOutlineDescriptor } from '../libs/3d/boardOutline'
 import { buildAnalysisPayload, runAnalysisJob } from '../libs/analyze'
+import {
+  buildPipelineFromMemoryLayers,
+  broadcastCompute3dGlobals,
+  enqueueComputePcb3dJob,
+  enqueueComputeTraceDataJob,
+  disposeComputePool,
+  resetComputeProject,
+} from '../libs/compute'
 
 const resetIcon = new URL('../assets/resetting.svg', import.meta.url).href
 const measureIcon = new URL('../assets/measurement.svg', import.meta.url).href
@@ -835,40 +829,57 @@ const runAnalysis = ({ includeTraceMetrics = false } = {}) => {
   if (!includeTraceMetrics) {
     clearTraceMetrics()
   }
-  const payload = buildAnalysisPayload({
-    fm: fmRef.value,
-    boardOutlineDescriptor: boardOutlineDescriptor.value,
-    unitMmPerUnit: unitMmPerUnit.value,
-    includeTraceMetrics,
-  })
-  if (!payload) {
-    if (includeTraceMetrics) clearTraceMetrics()
-    return Promise.resolve()
-  }
   if (includeTraceMetrics) {
     analysisPending.value = true
     analysisError.value = null
     clearTraceMetrics()
   }
   const jobId = ++analysisJobSeq
-  return runAnalysisJob(payload)
-    .then((result) => {
+  return (async () => {
+    try {
+      let traceDataByLayerId = null
+      if (includeTraceMetrics) {
+        const projectId = fmRef.value?.__compute?.projectId ?? null
+        const fmLayers = fmRef.value?.plotResult?.layers ?? []
+        const copperIds = fmLayers
+          .filter((layer) => String(layer?.type || '').toLowerCase() === 'copper')
+          .map((layer) => layer.id)
+        if (projectId && copperIds.length) {
+          const traceResult = await enqueueComputeTraceDataJob({
+            projectId,
+            layerIds: copperIds,
+          })
+          traceDataByLayerId = traceResult?.traceDataByLayerId ?? null
+        }
+      }
+      if (jobId !== analysisJobSeq) return
+      const payload = buildAnalysisPayload({
+        fm: fmRef.value,
+        boardOutlineDescriptor: boardOutlineDescriptor.value,
+        unitMmPerUnit: unitMmPerUnit.value,
+        includeTraceMetrics,
+        traceDataByLayerId,
+      })
+      if (!payload) {
+        if (includeTraceMetrics) clearTraceMetrics()
+        return
+      }
+      const result = await runAnalysisJob(payload)
       if (jobId !== analysisJobSeq) return
       applyAnalysisResult(result)
-    })
-    .catch((error) => {
+    } catch (error) {
       if (jobId !== analysisJobSeq) return
       if (includeTraceMetrics) {
         analysisError.value = error?.message || '解析失败'
         console.error('[GerberViewer] analysis worker failed', error)
         clearTraceMetrics()
       }
-    })
-    .finally(() => {
+    } finally {
       if (jobId === analysisJobSeq && includeTraceMetrics) {
         analysisPending.value = false
       }
-    })
+    }
+  })()
 }
 const handleAnalysisAction = () => {
   runAnalysis({ includeTraceMetrics: true })
@@ -896,136 +907,6 @@ const triggerFileDownload = (blob, filename) => {
 }
 const trimDebugEntries = (entries) => {
   while (entries.length > maxDebugEntries) entries.shift()
-}
-const summarizeParseTree = (tree) => {
-  if (!tree) return null
-  return {
-    filetype: tree.filetype ?? tree.format?.filetype ?? null,
-    statements: Array.isArray(tree.statements) ? tree.statements.length : undefined,
-    hasBoundingBox: Boolean(tree.boundingBox),
-    units: tree.units ?? tree.format?.units ?? null,
-  }
-}
-const toPoint = (position) => [
-  Number(position?.[0]) || 0,
-  Number(position?.[1]) || 0,
-]
-const extendBoundsWithPoint = (bounds, point) => {
-  if (!point) return bounds
-  if (!bounds) {
-    return {
-      minX: point[0],
-      maxX: point[0],
-      minY: point[1],
-      maxY: point[1],
-    }
-  }
-  return {
-    minX: Math.min(bounds.minX, point[0]),
-    maxX: Math.max(bounds.maxX, point[0]),
-    minY: Math.min(bounds.minY, point[1]),
-    maxY: Math.max(bounds.maxY, point[1]),
-  }
-}
-const positionsClose = (a, b, eps = 1e-6) =>
-  Math.abs(a[0] - b[0]) <= eps && Math.abs(a[1] - b[1]) <= eps
-const approximateArcPointsForBounds = (segment) => {
-  const startAngle = Number(segment?.start?.[2])
-  const endAngle = Number(segment?.end?.[2])
-  if (!Number.isFinite(startAngle) || !Number.isFinite(endAngle)) return []
-  let sweep = endAngle - startAngle
-  const startRaw = toPoint(segment.start)
-  const endRaw = toPoint(segment.end)
-  if (Math.abs(sweep) < 1e-7 && positionsClose(startRaw, endRaw)) {
-    sweep = sweep >= 0 ? Math.PI * 2 : -Math.PI * 2
-  }
-  const absSweep = Math.abs(sweep)
-  if (absSweep === 0) return []
-  const steps = Math.max(6, Math.ceil(absSweep / (Math.PI / 16)))
-  const center = toPoint(segment.center)
-  const radius = Number(segment.radius) || 0
-  const points = []
-  for (let i = 0; i <= steps; i += 1) {
-    const angle = startAngle + (sweep * i) / steps
-    points.push([
-      center[0] + radius * Math.cos(angle),
-      center[1] + radius * Math.sin(angle),
-    ])
-  }
-  return points
-}
-const boundsFromSegments = (segments) => {
-  if (!Array.isArray(segments) || segments.length === 0) return null
-  let bounds = null
-  for (const segment of segments) {
-    bounds = extendBoundsWithPoint(bounds, toPoint(segment.start))
-    bounds = extendBoundsWithPoint(bounds, toPoint(segment.end))
-    if (segment.type === ARC) {
-      const arcPoints = approximateArcPointsForBounds(segment)
-      for (const pt of arcPoints) {
-        bounds = extendBoundsWithPoint(bounds, pt)
-      }
-    }
-  }
-  return bounds
-}
-const shapeBounds = (shape) => {
-  if (!shape) return null
-  switch (shape.type) {
-    case CIRCLE:
-      return {
-        minX: shape.cx - shape.r,
-        minY: shape.cy - shape.r,
-        maxX: shape.cx + shape.r,
-        maxY: shape.cy + shape.r,
-      }
-    case RECTANGLE:
-      return {
-        minX: shape.x,
-        minY: shape.y,
-        maxX: shape.x + shape.width,
-        maxY: shape.y + shape.height,
-      }
-    case POLYGON: {
-      const entries = Array.isArray(shape.points) ? shape.points : []
-      let bounds = null
-      for (const point of entries) {
-        bounds = extendBoundsWithPoint(bounds, toPoint(point))
-      }
-      return bounds
-    }
-    case LAYERED_SHAPE: {
-      let merged = null
-      for (const sub of shape.shapes || []) {
-        const subBounds = shapeBounds(sub)
-        if (subBounds) {
-          merged = merged
-            ? {
-                minX: Math.min(merged.minX, subBounds.minX),
-                minY: Math.min(merged.minY, subBounds.minY),
-                maxX: Math.max(merged.maxX, subBounds.maxX),
-                maxY: Math.max(merged.maxY, subBounds.maxY),
-              }
-            : subBounds
-        }
-      }
-      return merged
-    }
-    case OUTLINE:
-      return boundsFromSegments(shape.segments)
-    default:
-      return null
-  }
-}
-const elementBounds = (element) => {
-  if (!element) return null
-  if (element.type === IMAGE_PATH || element.type === IMAGE_REGION) {
-    return boundsFromSegments(element.segments)
-  }
-  if (element.type === IMAGE_SHAPE) {
-    return shapeBounds(element.shape)
-  }
-  return null
 }
 const computeBoundsFromArray = (arr) => {
   if (!Array.isArray(arr) || arr.length < 3) return null
@@ -1451,18 +1332,6 @@ const handleGlobalClick = () => {
   displayMenuOpen.value = false
   closeAnalysisPanel()
 }
-const countDrillShapesInPayload = (payload) => {
-  if (!payload) return 0
-  if (Array.isArray(payload)) return payload.length
-  if (
-    typeof payload === 'object'
-    && payload.format === DRILL_SHAPE_FORMAT_IMAGE_TREES
-    && Array.isArray(payload.imageTrees)
-  ) {
-    return payload.imageTrees.length
-  }
-  return 0
-}
 const recordWorkerJobStart = (jobId, payload) => {
   workerDebugLog.jobs.push({
     jobId,
@@ -1472,9 +1341,8 @@ const recordWorkerJobStart = (jobId, payload) => {
     type: payload.type,
     side: payload.side ?? null,
     outline: Boolean(payload.outline),
-    hasParseTree: Boolean(payload.parseTree),
-    parseTreeSummary: summarizeParseTree(payload.parseTree),
-    drillShapeCount: countDrillShapesInPayload(payload.drillShapes),
+    hasSyntheticOutline:
+      Array.isArray(payload.syntheticOutlineRegions) && payload.syntheticOutlineRegions.length > 0,
   })
   trimDebugEntries(workerDebugLog.jobs)
 }
@@ -1492,13 +1360,6 @@ const recordWorkerJobResult = (jobId, { success, message, result }) => {
     recordWorkerPerfMetrics(entry, result, success, message)
     markPerfWorkerJobComplete()
   }
-}
-const recordWorkerError = (detail) => {
-  workerDebugLog.errors.push({
-    timestamp: Date.now(),
-    ...detail,
-  })
-  trimDebugEntries(workerDebugLog.errors)
 }
 const toggleExplosion = () => {
   if (!canExplode.value) return
@@ -1666,7 +1527,6 @@ const defaultLayerColors = {
   outline: '#bfa782',
 }
 const structural3dTypes = new Set(['copper', 'soldermask', 'silkscreen'])
-const DRILL_SHAPE_FORMAT_IMAGE_TREES = 'drill-image-trees'
 const normalizeLayerType = (value) => {
   if (typeof value !== 'string') return ''
   return value.toLowerCase()
@@ -1675,11 +1535,6 @@ const normalizeLayerSide = (value) => {
   if (typeof value !== 'string') return null
   const normalized = value.toLowerCase()
   return normalized === 'top' || normalized === 'bottom' ? normalized : null
-}
-const shouldLayerUseDrillShapes = (layerType) => {
-  const normalized = normalizeLayerType(layerType)
-  if (!normalized) return false
-  return normalized !== 'drill'
 }
 const isLayerEligibleFor3d = (layer) => {
   if (!layer) return false
@@ -1701,11 +1556,9 @@ const hasPositiveBounds = (size) => {
 
 const layerHasRenderableGeometry = (layer, plotResult) => {
   if (!layer || !plotResult || !plotResult.plotTreesById) return true
-  const tree = plotResult.plotTreesById[layer.id]
-  if (!tree) return true
-  const childCount = Array.isArray(tree.children) ? tree.children.length : 0
-  if (childCount > 0) return true
-  if (hasPositiveBounds(tree.size)) return true
+  const size = plotResult.plotTreesById[layer.id]?.size
+  if (!size) return true
+  if (hasPositiveBounds(size)) return true
   console.warn('[GerberViewer] Skipping 3D layer with no geometry', {
     id: layer.id,
     type: layer.type,
@@ -1725,110 +1578,48 @@ const detectWorkerConcurrency = () => {
 const pcbWorkerConcurrency = detectWorkerConcurrency()
 let pcbWorkerSeq = 0
 const pcbWorkerJobs = new Map()
-const workerJobQueue = []
-const pcbWorkerPool = []
-
-const createPcbWorker = () =>
-  new Worker(new URL('../workers/pcbModel.worker.js', import.meta.url), { type: 'module' })
+const pcbWorkerQueue = []
+let pcbWorkerActive = 0
+let activeComputeProjectId = null
+let pcbModelBuildSeq = 0
+let activePcbModelBuildId = 0
 
 const assignQueuedWorkerJobs = () => {
-  for (const instance of pcbWorkerPool) {
-    if (instance.busy) continue
-    const nextJob = workerJobQueue.shift()
+  if (!activeComputeProjectId) return
+  while (pcbWorkerActive < pcbWorkerConcurrency) {
+    const nextJob = pcbWorkerQueue.shift()
     if (!nextJob) break
-    instance.busy = true
-    instance.currentJobId = nextJob.jobId
-    instance.worker.postMessage({
-      jobId: nextJob.jobId,
-      action: 'build-layer',
-      payload: nextJob.payload,
-    })
-  }
-}
-
-const handleWorkerInstanceMessage = (instance, event) => {
-  const { jobId, success, result, message } = event.data || {}
-  if (jobId) {
-    const entry = pcbWorkerJobs.get(jobId)
-    if (entry) {
-      pcbWorkerJobs.delete(jobId)
-      if (success) entry.resolve(result)
-      else {
-        console.error('[GerberViewer] PCB worker failure detail', message)
-        entry.reject(new Error(message || 'worker error'))
-      }
-    }
-  }
-  instance.busy = false
-  instance.currentJobId = null
-  assignQueuedWorkerJobs()
-}
-
-const handleWorkerInstanceError = (instance, event) => {
-  const details =
-    event?.message || event?.error?.message || event?.error?.stack || 'Unknown worker error'
-  console.error(
-    '[GerberViewer] PCB model worker error',
-    details,
-    event?.filename,
-    event?.lineno,
-    event?.colno,
-    event?.error
-  )
-  recordWorkerError({
-    message: details,
-    filename: event?.filename,
-    line: event?.lineno,
-    column: event?.colno,
-    errorStack: event?.error?.stack,
-  })
-  if (typeof event?.preventDefault === 'function') {
-    event.preventDefault()
-  }
-  const failedJobId = instance.currentJobId
-  if (failedJobId && pcbWorkerJobs.has(failedJobId)) {
-    const entry = pcbWorkerJobs.get(failedJobId)
-    pcbWorkerJobs.delete(failedJobId)
-    entry.reject(new Error(details || 'worker error'))
-  }
-  instance.worker.terminate()
-  const index = pcbWorkerPool.indexOf(instance)
-  if (index >= 0) pcbWorkerPool.splice(index, 1)
-  const replacement = spawnWorkerInstance()
-  if (replacement) {
-    pcbWorkerPool.push(replacement)
-  }
-  assignQueuedWorkerJobs()
-}
-
-const spawnWorkerInstance = () => {
-  try {
-    const worker = createPcbWorker()
-    const instance = { worker, busy: false, currentJobId: null }
-    worker.onmessage = (event) => handleWorkerInstanceMessage(instance, event)
-    worker.onerror = (event) => handleWorkerInstanceError(instance, event)
-    return instance
-  } catch (error) {
-    console.error('[GerberViewer] Failed to spawn worker', error)
-    return null
-  }
-}
-
-const ensureWorkerPool = () => {
-  if (pcbWorkerPool.length >= pcbWorkerConcurrency) return
-  while (pcbWorkerPool.length < pcbWorkerConcurrency) {
-    const instance = spawnWorkerInstance()
-    if (!instance) break
-    pcbWorkerPool.push(instance)
+    const { jobId, payload, projectId } = nextJob
+    pcbWorkerActive += 1
+    enqueueComputePcb3dJob({ projectId, payload })
+      .then((result) => {
+        const entry = pcbWorkerJobs.get(jobId)
+        if (entry) {
+          pcbWorkerJobs.delete(jobId)
+          entry.resolve(result)
+        }
+      })
+      .catch((error) => {
+        const entry = pcbWorkerJobs.get(jobId)
+        if (entry) {
+          pcbWorkerJobs.delete(jobId)
+          entry.reject(error)
+        }
+      })
+      .finally(() => {
+        pcbWorkerActive = Math.max(0, pcbWorkerActive - 1)
+        assignQueuedWorkerJobs()
+      })
   }
 }
 
 const disposePcbWorkers = () => {
-  pcbWorkerPool.splice(0).forEach((instance) => {
-    instance.worker.terminate()
-  })
+  pcbWorkerQueue.splice(0)
+  pcbWorkerJobs.forEach((entry) => entry.reject?.(new Error('pcb build cancelled')))
   pcbWorkerJobs.clear()
-  workerJobQueue.splice(0)
+  pcbWorkerActive = 0
+  activeComputeProjectId = null
+  activePcbModelBuildId = 0
 }
 
 const getLayerColor = (layerId, type) => {
@@ -1849,7 +1640,7 @@ const updateWorkerLoading = () => {
   workerLoading.value = pcbModelJobs.pending > 0
 }
 
-const queueWorkerJob = (payload) => {
+const queueWorkerJob = (projectId, payload) => {
   const jobId = ++pcbWorkerSeq
   pcbModelJobs.pending += 1
   updateWorkerLoading()
@@ -1893,25 +1684,10 @@ const queueWorkerJob = (payload) => {
         reject(error)
       },
     })
-    workerJobQueue.push({ jobId, payload })
-    ensureWorkerPool()
+    pcbWorkerQueue.push({ jobId, projectId, payload })
+    activeComputeProjectId = projectId
     assignQueuedWorkerJobs()
   })
-}
-
-const applyWorkerLayer = (payload) => {
-  if (!payload || componentDestroyed) return
-  const layers = pcb3dModel.layers.filter((entry) => entry.id !== payload.layerId)
-  layers.push({
-    id: payload.layerId,
-    type: payload.type,
-    side: payload.side,
-    color: payload.color,
-    mesh: payload.mesh,
-    meshSummary: payload.meshSummary ?? summarizeMeshData(payload.mesh),
-  })
-  pcb3dModel.layers = layers
-  pcb3dModel.version += 1
 }
 
 const refreshBoardOutlineState = (plotResult) => {
@@ -1925,130 +1701,18 @@ const refreshBoardOutlineState = (plotResult) => {
   return descriptor
 }
 
-const limitDrillImageEntries = (entries) => {
-  if (!Array.isArray(entries) || entries.length === 0) {
-    return { entries: [], limitedStats: null }
-  }
-  const totalElements = entries.reduce((sum, entry) => {
-    const count = Array.isArray(entry.tree?.children) ? entry.tree.children.length : 0
-    return sum + count
-  }, 0)
-  if (totalElements === 0) {
-    return { entries, limitedStats: null }
-  }
-  let limit = Number(drillLimit.value)
-  if (!Number.isFinite(limit)) limit = Infinity
-  if (limit === Infinity || limit >= totalElements) {
-    return { entries, limitedStats: { applied: false, total: totalElements } }
-  }
-  limit = Math.max(0, Math.floor(limit))
-  if (limit <= 0) {
-    return {
-      entries: [],
-      limitedStats: {
-        applied: true,
-        total: totalElements,
-        kept: 0,
-        dropped: totalElements,
-      },
-    }
-  }
-  const flattened = []
-  entries.forEach((entry, entryIndex) => {
-    const children = Array.isArray(entry.tree?.children) ? entry.tree.children : []
-    children.forEach((child, childIndex) => {
-      const bounds = elementBounds(child)
-      const spanX = bounds ? Math.abs(bounds.maxX - bounds.minX) : 0
-      const spanY = bounds ? Math.abs(bounds.maxY - bounds.minY) : 0
-      const maxEdge = Math.max(spanX, spanY, 0)
-      flattened.push({
-        entryIndex,
-        childIndex,
-        maxEdge,
-      })
-    })
-  })
-  flattened.sort((a, b) => {
-    if (b.maxEdge === a.maxEdge) return a.entryIndex - b.entryIndex
-    return b.maxEdge - a.maxEdge
-  })
-  const keepSlice = flattened.slice(0, limit)
-  const keepMap = new Map()
-  keepSlice.forEach(({ entryIndex, childIndex }) => {
-    if (!keepMap.has(entryIndex)) keepMap.set(entryIndex, new Set())
-    keepMap.get(entryIndex).add(childIndex)
-  })
-  const filteredEntries = entries
-    .map((entry, index) => {
-      const allowed = keepMap.get(index)
-      if (!allowed || allowed.size === 0) return null
-      const children = Array.isArray(entry.tree?.children) ? entry.tree.children : []
-      const filteredChildren = children.filter((_, idx) => allowed.has(idx))
-      if (!filteredChildren.length) return null
-      return {
-        layerId: entry.layerId,
-        tree: {
-          ...entry.tree,
-          children: filteredChildren,
-        },
-      }
-    })
-    .filter(Boolean)
-  const dropped = totalElements - keepSlice.length
-  return {
-    entries: filteredEntries,
-    limitedStats: {
-      applied: true,
-      total: totalElements,
-      kept: keepSlice.length,
-      dropped,
-      limit,
-    },
-  }
-}
-
-const buildDrillShapePayload = (drillLayers, plotTreesById, parseTreesById) => {
-  if (!Array.isArray(drillLayers) || drillLayers.length === 0) return undefined
-  const imageEntries = []
-  const fallbackParseTrees = []
-  for (const layer of drillLayers) {
-    if (!layer?.id) continue
-    const cachedTree = plotTreesById?.[layer.id]
-    if (cachedTree && Array.isArray(cachedTree.children) && cachedTree.children.length) {
-      imageEntries.push({layerId: layer.id, tree: cachedTree})
-    } else {
-      const layerParseTree = parseTreesById?.[layer.id]
-      if (layerParseTree) fallbackParseTrees.push(layerParseTree)
-    }
-  }
-  const { entries: limitedEntries, limitedStats } = limitDrillImageEntries(imageEntries)
-  if (limitedEntries.length) {
-    if (limitedStats && limitedStats.applied) {
-      console.info('[GerberViewer] Drill geometry limited', limitedStats)
-    }
-    return {
-      format: DRILL_SHAPE_FORMAT_IMAGE_TREES,
-      version: 1,
-      layerIds: limitedEntries.map(entry => entry.layerId),
-      imageTrees: limitedEntries.map(entry => entry.tree),
-    }
-  }
-  return fallbackParseTrees.length ? fallbackParseTrees : undefined
-}
-
-const buildPcbModelFromLayers = (
-  layers,
-  parseTreesById,
-  boardOutline,
-  plotResult = null,
-  options = {}
-) => {
+const buildPcbModelFromLayers = (layers, boardOutline, plotResult = null, options = {}) => {
   if (!Array.isArray(layers) || layers.length === 0) return false
   const {
     reset = true,
     targetLayerIds = null,
     reason = reset ? 'pcb-model' : 'pcb-model-partial',
+    projectId = fmRef.value?.__compute?.projectId ?? null,
   } = options
+  if (!projectId) {
+    console.warn('[GerberViewer] Missing compute project id; skipping 3D model build')
+    return false
+  }
   const targetLayerSet =
     Array.isArray(targetLayerIds) && targetLayerIds.length > 0
       ? new Set(targetLayerIds)
@@ -2058,21 +1722,15 @@ const buildPcbModelFromLayers = (
     : layers
   if (!reset && candidateLayers.length === 0) return false
   if (reset) {
+    disposePcbWorkers()
     resetPcbModelState()
     pcbModelJobs.total = 0
     pcbModelJobs.pending = 0
     updateWorkerLoading()
   }
-  const plotTreesById = plotResult?.plotTreesById ?? null
   const boardRegions = Array.isArray(boardOutline?.regions) ? boardOutline.regions : undefined
-  const boardBounds = Array.isArray(boardOutline?.bounds) ? boardOutline.bounds : undefined
-  const boardPolygons = Array.isArray(boardOutline?.polygons) ? boardOutline.polygons : undefined
   logBoardScaleSnapshot(reset ? 'buildPcbModelFromLayers' : 'updatePcbModelLayers')
   const simplifyTolerancePayload = buildSimplifyTolerancePayload()
-  const drillLayers = layers.filter((layer) => {
-    const type = String(layer?.type || '').toLowerCase()
-    return type.includes('drill')
-  })
   const layersFor3d = candidateLayers.filter(
     (layer) => isLayerEligibleFor3d(layer) && layerHasRenderableGeometry(layer, plotResult)
   )
@@ -2088,23 +1746,13 @@ const buildPcbModelFromLayers = (
   planPerfWorkerJobs(totalJobs)
   pcbModelJobs.total = totalJobs
   modelUpdateLockReason.value = reason
-  const drillShapePayload = buildDrillShapePayload(drillLayers, plotTreesById, parseTreesById)
   for (const layer of layersFor3d) {
-    const drillShapes =
-      drillShapePayload && shouldLayerUseDrillShapes(layer.type) ? drillShapePayload : undefined
-    queueWorkerJob({
+    queueWorkerJob(projectId, {
       layerId: layer.id,
-      parseTree: parseTreesById?.[layer.id],
-      plotTree: plotTreesById?.[layer.id],
       type: layer.type,
       side: layer.side ?? null,
       color: getLayerColor(layer.id, layer.type),
       outline: layer.type === 'outline',
-      boardShapeRegions: boardRegions,
-      boardShapePolygons: boardPolygons,
-      boardClipRegions: boardRegions,
-      drillShapes,
-      boardBounds,
       simplifyTolerances: simplifyTolerancePayload,
     })
       .then((result) => {
@@ -2115,19 +1763,12 @@ const buildPcbModelFromLayers = (
       })
   }
   if (syntheticOutlineNeeded) {
-    queueWorkerJob({
+    queueWorkerJob(projectId, {
       layerId: '__synthetic-board-outline__',
-      parseTree: null,
-      plotTree: null,
       type: 'outline',
       side: 'all',
       color: getLayerColor('__synthetic-board-outline__', 'outline'),
       outline: true,
-      boardShapeRegions: boardRegions,
-      boardShapePolygons: boardPolygons,
-      boardClipRegions: boardRegions,
-      drillShapes: drillShapePayload,
-      boardBounds,
       syntheticOutlineRegions: boardRegions,
       simplifyTolerances: simplifyTolerancePayload,
     })
@@ -2251,6 +1892,8 @@ const handleUploadFile = async (file) => {
     fileSize: file?.size ?? null,
   })
   try {
+    disposePcbWorkers()
+    await resetComputeProject()
     const formData = new FormData()
     formData.append('UploadFile', file, file.name)
     const res = await runPerfAsync('upload:api', () =>
@@ -2263,16 +1906,23 @@ const handleUploadFile = async (file) => {
     const result = res.data.Data
     memoryLayers.value = result.Items || []
     const pipeline = await runPerfAsync('upload:pipeline', () =>
-      fromMemoryLayers(memoryLayers.value)
+      buildPipelineFromMemoryLayers(memoryLayers.value, { drillLimit: drillLimit.value })
     )
     runPerfSync('upload:buildOrderedLayers', () => applyModernResult(pipeline))
     const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
+    const computeProjectId = pipeline?.__compute?.projectId ?? null
+    await broadcastCompute3dGlobals({
+      projectId: computeProjectId,
+      boardOutline: outlineDescriptor
+        ? { bounds: outlineDescriptor.bounds, regions: outlineDescriptor.regions, polygons: outlineDescriptor.polygons }
+        : null,
+      drillShapes: pipeline?.__compute?.drillShapes ?? null,
+    })
     buildPcbModelFromLayers(
       pipeline.plotResult?.layers,
-      pipeline.parseTreesById,
       outlineDescriptor,
       pipeline.plotResult,
-      { reset: true, reason: 'initializing' }
+      { reset: true, reason: 'initializing', projectId: computeProjectId }
     )
     logPerf('upload:layers-ready', {
       count: orderedLayers.length,
@@ -2462,38 +2112,6 @@ const layerUniquenessSummary = computed(() => {
 const duplicateLayerIds = computed(() => layerUniquenessSummary.value.duplicateIds)
 const layerSettingsValidationError = computed(() => layerUniquenessSummary.value.message)
 
-const buildParsedLayerCache = (fm) => {
-  if (!fm?.plotResult?.layers || !fm?.parseTreesById) return null
-  const colorMap = new Map(
-    orderedLayers.map((layer) => [layer.id, { color: layer.color, opacity: layer.opacity }])
-  )
-  const parsed = []
-  for (const layer of fm.plotResult.layers) {
-    const sourceTree = fm.parseTreesById?.[layer.id]
-    if (!sourceTree) continue
-    const rawTree = toRaw(sourceTree)
-    const parseTree = rawTree ? JSON.parse(JSON.stringify(rawTree)) : null
-    if (!parseTree) continue
-    const visual = colorMap.get(layer.id)
-    parsed.push({
-      id: layer.id,
-      filename: layer.filename,
-      type: layer.type,
-      side: layer.side,
-      parseTree,
-      color: visual?.color,
-      opacity: typeof visual?.opacity === 'number' ? visual.opacity : undefined,
-    })
-  }
-  return parsed.length > 0 ? parsed : null
-}
-
-const rebuildPipelineFromCache = (fm) => {
-  const parsedLayers = buildParsedLayerCache(fm)
-  if (!parsedLayers) return null
-  return runPerfSync('settings:cache-pipeline', () => fromParsedLayers(parsedLayers))
-}
-
 const settingsSaveDisabledReason = computed(() => {
   if (modelUpdateLockReason.value) {
     return '3D模型正在构建，完成后才能再次保存'
@@ -2523,112 +2141,42 @@ const applySettings = async () => {
       target.side = entry.side
     }
   }
-  const fm = fmRef.value
-  const hasCachedPipeline = Boolean(fm?.plotResult?.layers?.length)
-  let jobsQueued = false
-  if (isSettingsOpen.value) {
-    isSettingsOpen.value = false
-  }
-  try {
-    if (!hasCachedPipeline) {
-      const pipeline = await runPerfAsync('settings:pipeline', () =>
-        fromMemoryLayers(list)
-      )
-      applyModernResult(pipeline, { preserveVisuals: true })
-      const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
-      jobsQueued = Boolean(
-        buildPcbModelFromLayers(
-          pipeline.plotResult?.layers,
-          pipeline.parseTreesById,
-          outlineDescriptor,
-          pipeline.plotResult,
-          { reset: true, reason: 'settings-full-rebuild' }
-        )
-      )
-      recenterSignal.value += 1
-      memoryLayers.value = list
-      if (!jobsQueued) finalizePerfSessionIfIdle()
-      return
-    }
-    const fmLayers = fm.plotResult?.layers ?? []
-    const changes = collectLayerTypeSideChanges(editableLayers, fmLayers)
-    if (changes.length === 0) {
-      memoryLayers.value = list
-      isSettingsOpen.value = false
-      finalizePerfSessionIfIdle()
-      return
-    }
-    const structuralChanges = changes.filter(changeAffectsPcbModel)
-    const changeMap = new Map(changes.map((change) => [change.id, change]))
-    for (const layer of fmLayers) {
-      const change = changeMap.get(layer.id)
-      if (change) {
-        layer.type = change.next.type
-        layer.side = change.next.side
-      }
-    }
+  const fmLayers = fmRef.value?.plotResult?.layers ?? []
+  const changes = collectLayerTypeSideChanges(editableLayers, fmLayers)
+  if (isSettingsOpen.value) isSettingsOpen.value = false
+  if (changes.length === 0) {
     memoryLayers.value = list
-    if (structuralChanges.length > 0) {
-      const rebuiltPipeline = rebuildPipelineFromCache(fm)
-      if (rebuiltPipeline) {
-        applyModernResult(rebuiltPipeline, { preserveVisuals: true })
-        recenterSignal.value += 1
-        const outlineDescriptor = refreshBoardOutlineState(rebuiltPipeline.plotResult)
-        jobsQueued = Boolean(
-          buildPcbModelFromLayers(
-            rebuiltPipeline.plotResult?.layers,
-            rebuiltPipeline.parseTreesById,
-            outlineDescriptor,
-            rebuiltPipeline.plotResult,
-            { reset: true, reason: 'settings-structural-rebuild' }
-          )
-        )
-        if (!jobsQueued) finalizePerfSessionIfIdle()
-        return
-      } else {
-        console.warn('[GerberViewer] Failed to rebuild pipeline from cache, falling back to stale geometry')
-      }
-    }
-    applyModernResult(fm, { preserveVisuals: true })
+    isLayerLoading.value = false
+    finalizePerfSessionIfIdle()
+    return
+  }
+  let jobsQueued = false
+  try {
+    disposePcbWorkers()
+    await resetComputeProject()
+    const pipeline = await runPerfAsync('settings:pipeline', () =>
+      buildPipelineFromMemoryLayers(list, { drillLimit: drillLimit.value })
+    )
+    applyModernResult(pipeline, { preserveVisuals: true })
     recenterSignal.value += 1
-    const removedLayerIds = changes
-      .filter(
-        (change) =>
-          layerConfigEligibleFor3d(change.prev?.type, change.prev?.side) &&
-          !layerConfigEligibleFor3d(change.next?.type, change.next?.side)
+    const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
+    const computeProjectId = pipeline?.__compute?.projectId ?? null
+    await broadcastCompute3dGlobals({
+      projectId: computeProjectId,
+      boardOutline: outlineDescriptor
+        ? { bounds: outlineDescriptor.bounds, regions: outlineDescriptor.regions, polygons: outlineDescriptor.polygons }
+        : null,
+      drillShapes: pipeline?.__compute?.drillShapes ?? null,
+    })
+    jobsQueued = Boolean(
+      buildPcbModelFromLayers(
+        pipeline.plotResult?.layers,
+        outlineDescriptor,
+        pipeline.plotResult,
+        { reset: true, reason: 'settings-rebuild', projectId: computeProjectId }
       )
-      .map((change) => change.id)
-    if (removedLayerIds.length > 0) {
-      const removeSet = new Set(removedLayerIds)
-      const nextLayers = pcb3dModel.layers.filter((layer) => !removeSet.has(layer.id))
-      if (nextLayers.length !== pcb3dModel.layers.length) {
-        pcb3dModel.layers = nextLayers
-        pcb3dModel.version += 1
-      }
-    }
-    const outlineDescriptor = refreshBoardOutlineState(fm.plotResult)
-    if (structuralChanges.length > 0) {
-      jobsQueued = Boolean(
-        buildPcbModelFromLayers(
-          fm.plotResult?.layers ?? [],
-          fm.parseTreesById,
-          outlineDescriptor,
-          fm.plotResult,
-          { reset: true, reason: 'settings-structural-rebuild' }
-        )
-      )
-    } else {
-      const layerIds = changes.map((change) => change.id)
-      jobsQueued = Boolean(
-        buildPcbModelFromLayers(
-          fm.plotResult?.layers ?? [],
-          fm.parseTreesById,
-          outlineDescriptor,
-          fm.plotResult,
-          { reset: false, targetLayerIds: layerIds, reason: 'settings-update' }
-        )
-      )
-    }
+    )
+    memoryLayers.value = list
     if (!jobsQueued) finalizePerfSessionIfIdle()
   } catch (error) {
     console.error('[GerberViewer] applySettings failed', error)
@@ -2720,6 +2268,7 @@ onBeforeUnmount(() => {
     previewResizeObserver = null
   }
   disposePcbWorkers()
+  disposeComputePool()
 })
 </script>
 

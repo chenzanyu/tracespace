@@ -373,11 +373,13 @@ self.onmessage = (event) => {
   const { jobId, action, payload } = event.data || {}
   if (!jobId) return
   const projectId = payload?.projectId
-  if (projectId && activeProjectId && projectId !== activeProjectId) {
-    self.postMessage({ jobId, success: false, error: 'stale project' })
-    return
+  if (action !== 'reset') {
+    if (projectId && activeProjectId && projectId !== activeProjectId) {
+      self.postMessage({ jobId, success: false, error: 'stale project' })
+      return
+    }
+    if (projectId && !activeProjectId) activeProjectId = projectId
   }
-  if (projectId && !activeProjectId) activeProjectId = projectId
   Promise.resolve()
     .then(async () => {
       const output = await dispatch(action, payload)

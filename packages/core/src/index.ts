@@ -320,3 +320,6 @@ export function fromParsedLayers(
     },
   }
 }
+
+export { plotBoardShape } from './board-shape'
+export type { BoardShape, BoardShapeFailureReason, ViewBox } from './board-shape'

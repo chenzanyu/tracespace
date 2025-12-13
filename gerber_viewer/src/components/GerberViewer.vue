@@ -1690,6 +1690,22 @@ const queueWorkerJob = (projectId, payload) => {
   })
 }
 
+const applyWorkerLayer = (payload, buildId) => {
+  if (!payload || componentDestroyed) return
+  if (!buildId || buildId !== activePcbModelBuildId) return
+  const layers = pcb3dModel.layers.filter((entry) => entry.id !== payload.layerId)
+  layers.push({
+    id: payload.layerId,
+    type: payload.type,
+    side: payload.side,
+    color: payload.color,
+    mesh: payload.mesh,
+    meshSummary: payload.meshSummary ?? summarizeMeshData(payload.mesh),
+  })
+  pcb3dModel.layers = layers
+  pcb3dModel.version += 1
+}
+
 const refreshBoardOutlineState = (plotResult) => {
   if (!plotResult) {
     boardOutlineDescriptor.value = null
@@ -1713,6 +1729,7 @@ const buildPcbModelFromLayers = (layers, boardOutline, plotResult = null, option
     console.warn('[GerberViewer] Missing compute project id; skipping 3D model build')
     return false
   }
+  const buildId = ++pcbModelBuildSeq
   const targetLayerSet =
     Array.isArray(targetLayerIds) && targetLayerIds.length > 0
       ? new Set(targetLayerIds)
@@ -1728,6 +1745,7 @@ const buildPcbModelFromLayers = (layers, boardOutline, plotResult = null, option
     pcbModelJobs.pending = 0
     updateWorkerLoading()
   }
+  activePcbModelBuildId = buildId
   const boardRegions = Array.isArray(boardOutline?.regions) ? boardOutline.regions : undefined
   logBoardScaleSnapshot(reset ? 'buildPcbModelFromLayers' : 'updatePcbModelLayers')
   const simplifyTolerancePayload = buildSimplifyTolerancePayload()
@@ -1756,7 +1774,7 @@ const buildPcbModelFromLayers = (layers, boardOutline, plotResult = null, option
       simplifyTolerances: simplifyTolerancePayload,
     })
       .then((result) => {
-        applyWorkerLayer(result)
+        applyWorkerLayer(result, buildId)
       })
       .catch((error) => {
         console.error('[GerberViewer] PCB worker failed', error)
@@ -1773,7 +1791,7 @@ const buildPcbModelFromLayers = (layers, boardOutline, plotResult = null, option
       simplifyTolerances: simplifyTolerancePayload,
     })
       .then((result) => {
-        applyWorkerLayer(result)
+        applyWorkerLayer(result, buildId)
       })
       .catch((error) => {
         console.error('[GerberViewer] Synthetic board outline build failed', error)

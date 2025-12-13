@@ -1570,7 +1570,8 @@ const buildPlanarLayerGeometry = (
   let current = 0
   progress(current)
   const children = imageTree.children || []
-  const planarEntries = []
+  const triangulationBuffers = createTriangulationBuffers()
+  let hasTriangulation = false
   const perfTotals = workerMetrics ? {booleanMs: 0, triangulateMs: 0} : null
   const measure = (bucket, fn) => {
     if (!perfTotals) return fn()
@@ -1764,14 +1765,38 @@ let drillHoleClipperPaths = null
     return result
   }
 
+  const appendMultiPolygonToBuffers = (multiPolygon, zOffset) => {
+    if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) return false
+    let appended = false
+    if (!clipper2) {
+      const before = triangulationBuffers.vertexOffset
+      appendMultiPolygonToTriangulationBuffers(multiPolygon, zOffset, triangulationBuffers)
+      return triangulationBuffers.vertexOffset !== before
+    }
+    for (const polygon of multiPolygon) {
+      if (!Array.isArray(polygon) || polygon.length === 0) continue
+      const polygonPoints = countPolygonPoints(polygon)
+      const before = triangulationBuffers.vertexOffset
+      if (polygonPoints >= TRIANGULATION_TILE_MIN_POINTS) {
+        const tiled = appendMultiPolygonToTriangulationBuffersByTiling([polygon], zOffset, triangulationBuffers)
+        if (!tiled) {
+          appendMultiPolygonToTriangulationBuffers([polygon], zOffset, triangulationBuffers)
+        }
+      } else {
+        appendMultiPolygonToTriangulationBuffers([polygon], zOffset, triangulationBuffers)
+      }
+      if (triangulationBuffers.vertexOffset !== before) appended = true
+    }
+    return appended
+  }
+
   const emitChunkPolygons = chunk => {
     const finalPolygon = chunk.multiPolygon ?? measure('booleanMs', () => buildChunkMultiPolygon(chunk))
     if (!finalPolygon) return
-    const geometry = measure('triangulateMs', () =>
-      multiPolygonToPlanarGeometryTiled(finalPolygon, -PLANE_THICKNESS / 2)
+    const appended = measure('triangulateMs', () =>
+      appendMultiPolygonToBuffers(finalPolygon, -PLANE_THICKNESS / 2)
     )
-    if (!geometry) return
-    planarEntries.push({geometry})
+    if (appended) hasTriangulation = true
   }
 
   initialDarkPolygons.forEach(polygon => applyDarkPolygon(polygon))
@@ -1831,6 +1856,10 @@ if (clipper2 && drillHolePolygon) {
 
   chunkList.forEach(emitChunkPolygons)
 
+  const planarGeometry = hasTriangulation
+    ? measure('triangulateMs', () => buildPlanarGeometryFromTriangulationBuffers(triangulationBuffers))
+    : null
+
   try {
     boardHoleClipperPaths?.delete?.()
   } catch (error) {
@@ -1847,7 +1876,7 @@ if (clipper2 && drillHolePolygon) {
     // ignore dispose errors
   }
 
-  planarEntries.forEach(entry => {
+  if (planarGeometry) {
     const material = new THREE.MeshBasicMaterial({
       color,
       transparent: true,
@@ -1858,10 +1887,10 @@ if (clipper2 && drillHolePolygon) {
     material.polygonOffset = true
     material.polygonOffsetFactor = -0.2
     material.polygonOffsetUnits = -0.2
-    const mesh = new THREE.Mesh(entry.geometry, material)
+    const mesh = new THREE.Mesh(planarGeometry, material)
     mesh.userData = {planar: true}
     group.add(mesh)
-  })
+  }
   if (perfTotals) {
     recordWorkerTimelineStage(workerMetrics, 'render-three:boolean', perfTotals.booleanMs)
     recordWorkerTimelineStage(workerMetrics, 'render-three:triangulate', perfTotals.triangulateMs)

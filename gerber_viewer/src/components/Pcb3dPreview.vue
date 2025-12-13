@@ -53,6 +53,7 @@ let controls = null
 let resizeObserver = null
 let modelGroup = null
 let geometryBox = null
+let geometryRadius = 0
 const geometryCenter = new THREE.Vector3()
 const doubleSideMaterials = new WeakSet()
 let rafId = 0
@@ -164,7 +165,8 @@ const buildMeshGroupFromData = (meshData, defaultColor) => {
       const metadata = chunk?.metadata ? {...chunk.metadata} : {}
       if (metadata.planar) {
         material.side = THREE.DoubleSide
-        material.depthWrite = metadata.isClear ? false : true
+        material.depthWrite = false
+        material.depthTest = true
         material.polygonOffset = true
         material.polygonOffsetFactor = metadata.isClear ? -0.5 : -0.2
         material.polygonOffsetUnits = metadata.isClear ? -0.5 : -0.2
@@ -276,10 +278,13 @@ const configureLayerVisuals = (mesh, type, side) => {
   mesh.traverse((child) => {
     if (!child.isMesh) return
     child.renderOrder = order
+    const isPlanar = Boolean(child.userData?.planar)
     if (Array.isArray(child.material)) {
-      child.material.forEach((mat) => applyMaterialDepthBias(mat, order))
+      child.material.forEach((mat) => {
+        if (!isPlanar) applyMaterialDepthBias(mat, order)
+      })
     } else {
-      applyMaterialDepthBias(child.material, order)
+      if (!isPlanar) applyMaterialDepthBias(child.material, order)
     }
     if (type === 'outline') {
       const materials = Array.isArray(child.material) ? child.material : [child.material]
@@ -503,6 +508,7 @@ const animate = () => {
   }
   controls?.update()
   updateExplosionAnimation()
+  updateCameraDepthRange()
   renderer?.render(scene, camera)
   rafId = requestAnimationFrame(animate)
   stopLoopIfIdle()
@@ -727,6 +733,7 @@ const assembleLayers = (entries) => {
   if (geometryBox) {
     geometryBox.getCenter(geometryCenter)
     geometryBox.getSize(explosionSizeVector)
+    geometryRadius = Math.max(explosionSizeVector.length() / 2, 0.001)
     explosionBaseSpan = Math.max(
       explosionSizeVector.x,
       explosionSizeVector.y,
@@ -735,6 +742,7 @@ const assembleLayers = (entries) => {
   } else {
     geometryCenter.set(0, 0, 0)
     explosionSizeVector.set(0, 0, 0)
+    geometryRadius = Math.max(props.thickness || 0.001, 0.001)
     explosionBaseSpan = laminarDefaults.total
   }
   refreshExplosionOffsets()
@@ -879,20 +887,28 @@ const smoothRefitToBox = () => {
 
 const updateCameraDepthRange = () => {
   if (!camera) return
-  const size = new THREE.Vector3()
-  let radius = Math.max(props.thickness || 0.001, 0.001)
-  if (geometryBox) {
-    geometryBox.getSize(size)
-    radius = Math.max(radius, size.length() / 2)
+  const radius = Math.max(geometryRadius || 0, props.thickness || 0.001, 0.001)
+  const target = controls?.target ?? geometryCenter
+  const distance = camera.position.distanceTo(target)
+  const margin = radius * 1.05
+  const nextNear = Math.max(0.001, distance - margin)
+  const nextFar = Math.max(nextNear + 0.01, distance + margin)
+  const nearChanged = Math.abs(camera.near - nextNear) > Math.max(1e-4, nextNear * 1e-3)
+  const farChanged = Math.abs(camera.far - nextFar) > Math.max(1e-4, nextFar * 1e-3)
+  if (nearChanged || farChanged) {
+    camera.near = nextNear
+    camera.far = nextFar
+    camera.updateProjectionMatrix()
   }
-  const near = Math.max(radius / 500, 0.01)
-  const far = Math.max(radius * 20, near + radius * 2)
-  camera.near = near
-  camera.far = far
-  camera.updateProjectionMatrix()
   if (controls) {
-    controls.minDistance = near * 1.1
-    controls.maxDistance = far
+    const minDistance = Math.max(radius * 0.02, 0.005)
+    const maxDistance = Math.max(radius * 50, minDistance * 10)
+    if (!Number.isFinite(controls.minDistance) || controls.minDistance !== minDistance) {
+      controls.minDistance = minDistance
+    }
+    if (!Number.isFinite(controls.maxDistance) || controls.maxDistance !== maxDistance) {
+      controls.maxDistance = maxDistance
+    }
   }
 }
 

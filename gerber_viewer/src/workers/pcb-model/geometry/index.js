@@ -1,5 +1,8 @@
 import * as THREE from 'three'
+import {Earcut} from 'three/src/extras/Earcut.js'
 import polygonClipping from 'polygon-clipping'
+import Clipper2ZFactory from 'clipper2-wasm'
+import clipper2WasmUrl from 'clipper2-wasm/dist/es/clipper2z.wasm?url'
 import {CLEAR} from '@tracespace/parser'
 import {
   IMAGE_PATH,
@@ -31,6 +34,237 @@ const RING_POINT_EPSILON = 1e-8
 const SIMPLIFY_ABSOLUTE_TOLERANCE = 5e-4
 const SHAPE_SAMPLING_DIVISIONS = 16
 const reportedUnionFailures = new Set()
+const CLIPPER_COORD_SCALE = SNAP_PRECISION
+let clipper2 = null
+try {
+  const response = await fetch(clipper2WasmUrl)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Clipper2 WASM (${response.status})`)
+  }
+  const wasmBinary = new Uint8Array(await response.arrayBuffer())
+  if (
+    wasmBinary.length < 4 ||
+    wasmBinary[0] !== 0x00 ||
+    wasmBinary[1] !== 0x61 ||
+    wasmBinary[2] !== 0x73 ||
+    wasmBinary[3] !== 0x6d
+  ) {
+    const prefix = Array.from(wasmBinary.slice(0, 8))
+      .map(byte => byte.toString(16).padStart(2, '0'))
+      .join(' ')
+    throw new Error(`Invalid Clipper2 WASM payload (prefix ${prefix})`)
+  }
+  clipper2 = await Clipper2ZFactory({
+    wasmBinary,
+    locateFile: (path) => (path === 'clipper2z.wasm' ? clipper2WasmUrl : path),
+  })
+} catch (error) {
+  console.warn('[pcbModel] Failed to initialize Clipper2 WASM; falling back to polygon-clipping', {
+    message: error?.message,
+  })
+}
+
+const PCBMODEL_BOOLEAN_BACKEND = clipper2 ? 'clipper2-wasm' : 'polygon-clipping'
+console.info('[pcbModel] Boolean backend:', PCBMODEL_BOOLEAN_BACKEND)
+
+const toClipperCoord = value => {
+  const number = Number(value) || 0
+  return Math.round(number * CLIPPER_COORD_SCALE)
+}
+
+const ringToClipperPathD = (ring, {desiredPositive = null} = {}) => {
+  if (!clipper2 || !Array.isArray(ring) || ring.length < 3) return null
+  const first = ring[0]
+  const last = ring[ring.length - 1]
+  const closed = pointsClose(first, last)
+  const limit = closed ? ring.length - 1 : ring.length
+  if (limit < 3) return null
+  const coords = new Array(limit * 2)
+  let areaSum = 0
+  let firstX = Number(first?.[0]) || 0
+  let firstY = Number(first?.[1]) || 0
+  let prevX = firstX
+  let prevY = firstY
+  coords[0] = toClipperCoord(firstX)
+  coords[1] = toClipperCoord(firstY)
+  let outIndex = 2
+  for (let index = 1; index < limit; index++) {
+    const point = ring[index]
+    const x = Number(point?.[0]) || 0
+    const y = Number(point?.[1]) || 0
+    areaSum += prevX * y - x * prevY
+    prevX = x
+    prevY = y
+    coords[outIndex++] = toClipperCoord(x)
+    coords[outIndex++] = toClipperCoord(y)
+  }
+  areaSum += prevX * firstY - firstX * prevY
+  try {
+    const path = clipper2.MakePathD(coords)
+    if (typeof desiredPositive === 'boolean' && Number.isFinite(areaSum) && areaSum !== 0) {
+      const isPositive = areaSum > 0
+      if (isPositive !== desiredPositive) {
+        try {
+          clipper2.ReversePathD(path)
+        } catch (error) {
+          // ignore orientation errors
+        }
+      }
+    }
+    return path
+  } catch (error) {
+    return null
+  }
+}
+
+const appendMultiPolygonToClipperPathsD = (paths, multiPolygon) => {
+  if (!clipper2 || !paths || !Array.isArray(multiPolygon)) return
+  multiPolygon.forEach(polygon => {
+    if (!Array.isArray(polygon)) return
+    polygon.forEach((ring, ringIndex) => {
+      const path = ringToClipperPathD(ring, {desiredPositive: ringIndex === 0})
+      if (!path) return
+      try {
+        paths.push_back(path)
+      } finally {
+        path.delete?.()
+      }
+    })
+  })
+}
+
+const multiPolygonToClipperPathsD = (multiPolygon) => {
+  if (!clipper2) return null
+  const paths = new clipper2.PathsD()
+  appendMultiPolygonToClipperPathsD(paths, multiPolygon)
+  return paths
+}
+
+const pathDToRing = (pathD) => {
+  if (!clipper2 || !pathD) return null
+  const count = typeof pathD.size === 'function' ? pathD.size() : 0
+  if (!count || count < 3) return null
+  const ring = new Array(count + 1)
+  for (let index = 0; index < count; index++) {
+    const point = pathD.get(index)
+    const x = Number(point?.x ?? 0) / CLIPPER_COORD_SCALE
+    const y = Number(point?.y ?? 0) / CLIPPER_COORD_SCALE
+    ring[index] = [x, y]
+    point?.delete?.()
+  }
+  ring[count] = [...ring[0]]
+  return ring
+}
+
+const collectClipperPolyPathPolygons = (node, out) => {
+  if (!node || !out) return
+  const outerPath = node.polygon?.()
+  const outerRing = outerPath ? pathDToRing(outerPath) : null
+  outerPath?.delete?.()
+  if (!outerRing) return
+  const rings = [outerRing]
+  const childCount = typeof node.count === 'function' ? node.count() : 0
+  for (let i = 0; i < childCount; i++) {
+    const holeNode = node.child(i)
+    const holePath = holeNode?.polygon?.()
+    const holeRing = holePath ? pathDToRing(holePath) : null
+    holePath?.delete?.()
+    if (holeRing) rings.push(holeRing)
+
+    const islandCount = holeNode && typeof holeNode.count === 'function' ? holeNode.count() : 0
+    for (let j = 0; j < islandCount; j++) {
+      const islandNode = holeNode.child(j)
+      collectClipperPolyPathPolygons(islandNode, out)
+    }
+  }
+  out.push(rings)
+}
+
+const clipperPolyPathToMultiPolygon = (polyPathRoot) => {
+  if (!clipper2 || !polyPathRoot) return null
+  const polygons = []
+  const count = typeof polyPathRoot.count === 'function' ? polyPathRoot.count() : 0
+  for (let index = 0; index < count; index++) {
+    const child = polyPathRoot.child(index)
+    collectClipperPolyPathPolygons(child, polygons)
+  }
+  return polygons.length ? polygons : null
+}
+
+const clipperUnionMultiPolygons = (multiPolygons) => {
+  if (!clipper2) return null
+  const subjectPaths = new clipper2.PathsD()
+  try {
+    multiPolygons.forEach(mp => appendMultiPolygonToClipperPathsD(subjectPaths, mp))
+  } catch (error) {
+    subjectPaths.delete?.()
+    return null
+  }
+  const clipPaths = new clipper2.PathsD()
+  const solution = new clipper2.PolyPathD()
+  try {
+    clipper2.BooleanOpOutD(
+      clipper2.ClipType.Union,
+      clipper2.FillRule.NonZero,
+      subjectPaths,
+      clipPaths,
+      solution
+    )
+    return clipperPolyPathToMultiPolygon(solution)
+  } finally {
+    try {
+      solution.delete?.()
+    } catch (error) {
+      // ignore dispose errors
+    }
+    try {
+      subjectPaths?.delete?.()
+    } catch (error) {
+      // ignore dispose errors
+    }
+    try {
+      clipPaths?.delete?.()
+    } catch (error) {
+      // ignore dispose errors
+    }
+  }
+}
+
+const clipperBooleanOp = (clipType, subject, clip, {clipPaths: prebuiltClipPaths = null} = {}) => {
+  if (!clipper2) return null
+  const subjectPaths = multiPolygonToClipperPathsD(subject)
+  const clipPaths = prebuiltClipPaths || multiPolygonToClipperPathsD(clip)
+  if (!subjectPaths || !clipPaths) return null
+  const solution = new clipper2.PolyPathD()
+  try {
+    clipper2.BooleanOpOutD(
+      clipType,
+      clipper2.FillRule.NonZero,
+      subjectPaths,
+      clipPaths,
+      solution
+    )
+    return clipperPolyPathToMultiPolygon(solution)
+  } finally {
+    try {
+      solution.delete?.()
+    } catch (error) {
+      // ignore dispose errors
+    }
+    try {
+      subjectPaths?.delete?.()
+    } catch (error) {
+      // ignore dispose errors
+    }
+    if (!prebuiltClipPaths) {
+      try {
+        clipPaths?.delete?.()
+      } catch (error) {
+        // ignore dispose errors
+      }
+    }
+  }
+}
 
 const normalizeGeometry = geometry => {
   if (!geometry) return null
@@ -509,6 +743,52 @@ const multiPolygonToShapes = (multiPolygon, options = {}) => {
   return shapes
 }
 
+const multiPolygonToPlanarGeometry = (multiPolygon, zOffset = 0) => {
+  if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) return null
+  const positions = []
+  const normals = []
+  const indices = []
+  let vertexOffset = 0
+
+  for (const polygon of multiPolygon) {
+    if (!Array.isArray(polygon) || polygon.length === 0) continue
+    const vertices = []
+    const holeIndices = []
+    for (let ringIndex = 0; ringIndex < polygon.length; ringIndex++) {
+      const ring = polygon[ringIndex]
+      if (!Array.isArray(ring) || ring.length < 3) continue
+      const first = ring[0]
+      const last = ring[ring.length - 1]
+      const closed = pointsClose(first, last)
+      const limit = closed ? ring.length - 1 : ring.length
+      if (limit < 3) continue
+      if (ringIndex > 0) holeIndices.push(vertices.length / 2)
+      for (let i = 0; i < limit; i++) {
+        const point = ring[i]
+        vertices.push(Number(point?.[0]) || 0, Number(point?.[1]) || 0)
+      }
+    }
+    if (vertices.length < 6) continue
+    const triangles = Earcut.triangulate(vertices, holeIndices, 2)
+    if (!Array.isArray(triangles) || triangles.length === 0) continue
+    for (let i = 0; i < vertices.length; i += 2) {
+      positions.push(vertices[i], vertices[i + 1], zOffset)
+      normals.push(0, 0, 1)
+    }
+    for (let i = 0; i < triangles.length; i++) {
+      indices.push(vertexOffset + triangles[i])
+    }
+    vertexOffset += vertices.length / 2
+  }
+
+  if (positions.length === 0 || indices.length === 0) return null
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
+  geometry.setIndex(indices)
+  return geometry
+}
+
 const cloneMultiPolygon = multiPolygon => {
   if (!Array.isArray(multiPolygon)) return null
   const cloned = multiPolygon
@@ -588,12 +868,14 @@ const unionMultiPolygon = (existing, addition, stats = null) => {
   }
   const start = typeof performance !== 'undefined' ? performance.now() : null
   try {
-    const result = polygonClipping.union(existing, addition)
+    const result = clipper2
+      ? clipperBooleanOp(clipper2.ClipType.Union, existing, addition)
+      : polygonClipping.union(existing, addition)
     if (start !== null && stats) {
       stats.unionCount = (stats.unionCount || 0) + 1
       stats.unionTime = (stats.unionTime || 0) + (performance.now() - start)
     }
-    return sanitizeMultiPolygon(result)
+    return clipper2 ? result : sanitizeMultiPolygon(result)
   } catch (error) {
     const message = error?.message || 'unknown'
     if (!reportedUnionFailures.has(message)) {
@@ -608,17 +890,19 @@ const unionMultiPolygon = (existing, addition, stats = null) => {
   }
 }
 
-const subtractMultiPolygon = (subject, removal, stats = null) => {
+const subtractMultiPolygon = (subject, removal, stats = null, clipperOptions = null) => {
   if (!subject || subject.length === 0) return null
   if (!removal || removal.length === 0) return cloneMultiPolygon(subject)
   const start = typeof performance !== 'undefined' ? performance.now() : null
   try {
-    const result = polygonClipping.difference(subject, removal)
+    const result = clipper2
+      ? clipperBooleanOp(clipper2.ClipType.Difference, subject, removal, clipperOptions || undefined)
+      : polygonClipping.difference(subject, removal)
     if (start !== null && stats) {
       stats.diffCount = (stats.diffCount || 0) + 1
       stats.diffTime = (stats.diffTime || 0) + (performance.now() - start)
     }
-    return sanitizeMultiPolygon(result)
+    return clipper2 ? result : sanitizeMultiPolygon(result)
   } catch (error) {
     const message = error?.message || 'unknown'
     if (!reportedUnionFailures.has(`diff:${message}`)) {
@@ -629,17 +913,19 @@ const subtractMultiPolygon = (subject, removal, stats = null) => {
   }
 }
 
-const intersectMultiPolygon = (subject, clip, stats = null) => {
+const intersectMultiPolygon = (subject, clip, stats = null, clipperOptions = null) => {
   if (!subject || subject.length === 0) return null
   if (!clip || clip.length === 0) return null
   const start = typeof performance !== 'undefined' ? performance.now() : null
   try {
-    const result = polygonClipping.intersection(subject, clip)
+    const result = clipper2
+      ? clipperBooleanOp(clipper2.ClipType.Intersection, subject, clip, clipperOptions || undefined)
+      : polygonClipping.intersection(subject, clip)
     if (start !== null && stats) {
       stats.intersectCount = (stats.intersectCount || 0) + 1
       stats.intersectTime = (stats.intersectTime || 0) + (performance.now() - start)
     }
-    return sanitizeMultiPolygon(result)
+    return clipper2 ? result : sanitizeMultiPolygon(result)
   } catch (error) {
     const message = error?.message || 'unknown'
     if (!reportedUnionFailures.has(`intersect:${message}`)) {
@@ -682,6 +968,108 @@ const getMultiPolygonBounds = multiPolygon => {
   return bounds
 }
 
+const boundsOverlapForUnion = (a, b) => {
+  if (!a || !b) return true
+  return !(
+    a.maxX < b.minX ||
+    a.minX > b.maxX ||
+    a.maxY < b.minY ||
+    a.minY > b.maxY
+  )
+}
+
+const buildUnionClusters = (multiPolygons) => {
+  const count = multiPolygons.length
+  if (count < 64) return null
+  const boundsList = new Array(count)
+  const sizeList = []
+  let overallMinX = Number.POSITIVE_INFINITY
+  let overallMinY = Number.POSITIVE_INFINITY
+  let overallMaxX = Number.NEGATIVE_INFINITY
+  let overallMaxY = Number.NEGATIVE_INFINITY
+  for (let index = 0; index < count; index++) {
+    const bounds = getMultiPolygonBounds(multiPolygons[index])
+    if (!bounds) return null
+    boundsList[index] = bounds
+    overallMinX = Math.min(overallMinX, bounds.minX)
+    overallMinY = Math.min(overallMinY, bounds.minY)
+    overallMaxX = Math.max(overallMaxX, bounds.maxX)
+    overallMaxY = Math.max(overallMaxY, bounds.maxY)
+    const size = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY)
+    if (Number.isFinite(size) && size > 0) sizeList.push(size)
+  }
+  if (!sizeList.length) return null
+  sizeList.sort((a, b) => a - b)
+  const medianSize = sizeList[Math.floor(sizeList.length / 2)] || 0
+  const extent = Math.max(overallMaxX - overallMinX, overallMaxY - overallMinY, medianSize)
+  const densityBased = extent / Math.sqrt(count)
+  const cellSize = Math.max(medianSize * 4, densityBased, Number.EPSILON)
+  if (!Number.isFinite(cellSize) || cellSize <= 0) return null
+
+  const parent = new Array(count)
+  for (let i = 0; i < count; i++) parent[i] = i
+  const find = (i) => {
+    let root = i
+    while (parent[root] !== root) root = parent[root]
+    while (parent[i] !== i) {
+      const next = parent[i]
+      parent[i] = root
+      i = next
+    }
+    return root
+  }
+  const unite = (a, b) => {
+    const ra = find(a)
+    const rb = find(b)
+    if (ra !== rb) parent[rb] = ra
+  }
+
+  const grid = new Map()
+  for (let index = 0; index < count; index++) {
+    const bounds = boundsList[index]
+    const ix0 = Math.floor((bounds.minX - overallMinX) / cellSize)
+    const ix1 = Math.floor((bounds.maxX - overallMinX) / cellSize)
+    const iy0 = Math.floor((bounds.minY - overallMinY) / cellSize)
+    const iy1 = Math.floor((bounds.maxY - overallMinY) / cellSize)
+    const cellCount = (ix1 - ix0 + 1) * (iy1 - iy0 + 1)
+    if (!Number.isFinite(cellCount) || cellCount > 4096) return null
+    for (let ix = ix0; ix <= ix1; ix++) {
+      for (let iy = iy0; iy <= iy1; iy++) {
+        const key = `${ix},${iy}`
+        const bucket = grid.get(key)
+        if (bucket) {
+          for (const other of bucket) {
+            if (boundsOverlapForUnion(bounds, boundsList[other])) {
+              unite(index, other)
+            }
+          }
+          bucket.push(index)
+        } else {
+          grid.set(key, [index])
+        }
+      }
+    }
+  }
+
+  const groupsMap = new Map()
+  for (let index = 0; index < count; index++) {
+    const root = find(index)
+    const group = groupsMap.get(root)
+    if (group) {
+      group.push(index)
+    } else {
+      groupsMap.set(root, [index])
+    }
+  }
+  if (groupsMap.size <= 1) return null
+  return Array.from(groupsMap.values()).map(group => group.map(index => multiPolygons[index]))
+}
+
+const unionPolygonListDirect = (multiPolygons) => {
+  if (clipper2) return clipperUnionMultiPolygons(multiPolygons)
+  return sanitizeMultiPolygon(polygonClipping.union(...multiPolygons))
+}
+
 const unionPolygonList = (polygons, stats = null) => {
   if (!Array.isArray(polygons) || polygons.length === 0) return null
   const valid = polygons.filter(Boolean)
@@ -689,12 +1077,25 @@ const unionPolygonList = (polygons, stats = null) => {
   if (valid.length === 1) return valid[0]
   const start = typeof performance !== 'undefined' ? performance.now() : null
   try {
-    const result = sanitizeMultiPolygon(polygonClipping.union(...valid))
+    const clusters = buildUnionClusters(valid)
+    const result = clusters
+      ? clusters.reduce((acc, cluster) => {
+          if (!Array.isArray(cluster) || cluster.length === 0) return acc
+          if (cluster.length === 1) {
+            const mp = cluster[0]
+            if (Array.isArray(mp) && mp.length) acc.push(...mp)
+            return acc
+          }
+          const unioned = unionPolygonListDirect(cluster)
+          if (Array.isArray(unioned) && unioned.length) acc.push(...unioned)
+          return acc
+        }, [])
+      : unionPolygonListDirect(valid)
     if (start !== null && stats) {
       stats.unionCount = (stats.unionCount || 0) + 1
       stats.unionTime = (stats.unionTime || 0) + (performance.now() - start)
     }
-    return result
+    return Array.isArray(result) && result.length ? result : null
   } catch (error) {
     const message = error?.message || 'unknown'
     if (!reportedUnionFailures.has(`list:${message}`)) {
@@ -707,12 +1108,10 @@ const unionPolygonList = (polygons, stats = null) => {
 
 const combineShapeEntriesPolygon = entries => {
   if (!Array.isArray(entries) || entries.length === 0) return null
-  return entries.reduce((acc, entry) => {
-    if (!entry?.shape) return acc
-    const polygon = shapeToMultiPolygon(entry.shape)
-    if (!polygon) return acc
-    return unionMultiPolygon(acc, polygon)
-  }, null)
+  const polygons = entries
+    .map(entry => (entry?.shape ? shapeToMultiPolygon(entry.shape) : null))
+    .filter(Boolean)
+  return unionPolygonList(polygons)
 }
 
 const contourizeCirclePath = (segment, width) => {
@@ -916,6 +1315,8 @@ const buildPlanarLayerGeometry = (
 let boardHolePolygon = buildBoardHolePolygon(boardShapePolygons, boardShapeRegions)
 boardHolePolygon = simplifyMultiPolygonForLayer(boardHolePolygon, 'outline', simplifyTolerances)
 const boardHoleBounds = boardHolePolygon ? getMultiPolygonBounds(boardHolePolygon) : null
+const boardHoleClipperPaths =
+  clipper2 && boardHolePolygon ? multiPolygonToClipperPathsD(boardHolePolygon) : null
 
 let boardClipPolygon = buildBoardClipPolygon(
   boardShapePolygons,
@@ -926,6 +1327,9 @@ let boardClipPolygon = buildBoardClipPolygon(
 )
 boardClipPolygon = simplifyMultiPolygonForLayer(boardClipPolygon, 'outline', simplifyTolerances)
 const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygon) : null
+const boardClipClipperPaths =
+  clipper2 && boardClipPolygon ? multiPolygonToClipperPathsD(boardClipPolygon) : null
+let drillHoleClipperPaths = null
 
   if (isSolderMaskLayer) {
     let boardMaskPolygon = boardClipPolygon
@@ -998,7 +1402,12 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
       const shouldApplyBoardClip =
         !resultBounds || !boardClipBounds || boundsOverlap(resultBounds, boardClipBounds)
       if (shouldApplyBoardClip) {
-        result = intersectMultiPolygon(result, boardClipPolygon)
+        result = intersectMultiPolygon(
+          result,
+          boardClipPolygon,
+          null,
+          boardClipClipperPaths ? {clipPaths: boardClipClipperPaths} : null
+        )
         resultBounds = getMultiPolygonBounds(result)
       }
     }
@@ -1007,7 +1416,12 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
         !resultBounds || !drillHoleBounds || boundsOverlap(resultBounds, drillHoleBounds)
       if (shouldApplyDrill) {
         // Carve global drill holes from every chunk
-        result = subtractMultiPolygon(result, drillHolePolygon)
+        result = subtractMultiPolygon(
+          result,
+          drillHolePolygon,
+          null,
+          drillHoleClipperPaths ? {clipPaths: drillHoleClipperPaths} : null
+        )
         resultBounds = getMultiPolygonBounds(result)
       }
     }
@@ -1015,7 +1429,12 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
       const shouldApplyBoardHole =
         !resultBounds || !boardHoleBounds || boundsOverlap(resultBounds, boardHoleBounds)
       if (shouldApplyBoardHole) {
-        result = subtractMultiPolygon(result, boardHolePolygon)
+        result = subtractMultiPolygon(
+          result,
+          boardHolePolygon,
+          null,
+          boardHoleClipperPaths ? {clipPaths: boardHoleClipperPaths} : null
+        )
         resultBounds = getMultiPolygonBounds(result)
       }
     }
@@ -1035,11 +1454,8 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
   const emitChunkPolygons = chunk => {
     const finalPolygon = chunk.multiPolygon ?? buildChunkMultiPolygon(chunk)
     if (!finalPolygon) return
-    const shapes = multiPolygonToShapes(finalPolygon, {skipNormalization: true})
-    if (!shapes.length) return
-    const geometry = new THREE.ShapeGeometry(shapes)
-    geometry.deleteAttribute('uv')
-    geometry.translate(0, 0, -PLANE_THICKNESS / 2)
+    const geometry = multiPolygonToPlanarGeometry(finalPolygon, -PLANE_THICKNESS / 2)
+    if (!geometry) return
     planarEntries.push({geometry})
   }
 
@@ -1048,6 +1464,9 @@ const boardClipBounds = boardClipPolygon ? getMultiPolygonBounds(boardClipPolygo
 let drillHolePolygon = drillTreesToMultiPolygon(drillTrees)
 drillHolePolygon = simplifyMultiPolygonForLayer(drillHolePolygon, 'drill', simplifyTolerances)
 const drillHoleBounds = drillHolePolygon ? getMultiPolygonBounds(drillHolePolygon) : null
+if (clipper2 && drillHolePolygon) {
+  drillHoleClipperPaths = multiPolygonToClipperPathsD(drillHolePolygon)
+}
 
   for (let index = 0; index < children.length; index++) {
     const element = children[index]
@@ -1096,6 +1515,22 @@ const drillHoleBounds = drillHolePolygon ? getMultiPolygonBounds(drillHolePolygo
   }
 
   chunkList.forEach(emitChunkPolygons)
+
+  try {
+    boardHoleClipperPaths?.delete?.()
+  } catch (error) {
+    // ignore dispose errors
+  }
+  try {
+    boardClipClipperPaths?.delete?.()
+  } catch (error) {
+    // ignore dispose errors
+  }
+  try {
+    drillHoleClipperPaths?.delete?.()
+  } catch (error) {
+    // ignore dispose errors
+  }
 
   planarEntries.forEach(entry => {
     const material = new THREE.MeshBasicMaterial({

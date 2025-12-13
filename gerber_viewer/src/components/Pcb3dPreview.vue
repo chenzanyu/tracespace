@@ -216,14 +216,14 @@ const bottomLayerRenderOrders = {
 }
 
 const layerMaterialProfiles = Object.freeze({
-  default: { metalness: 0.25, roughness: 0.85 },
-  copper: { metalness: 0.75, roughness: 0.3 },
-  soldermask: { metalness: 0.08, roughness: 0.92 },
-  silkscreen: { metalness: 0.05, roughness: 0.65 },
-  solderpaste: { metalness: 0.55, roughness: 0.4 },
-  drill: { metalness: 0.18, roughness: 0.55 },
-  outline: { metalness: 0.12, roughness: 0.75 },
-  core: { metalness: 0.05, roughness: 0.9 },
+  default: { metalness: 0.12, roughness: 0.92, emissiveIntensity: 0.04 },
+  copper: { metalness: 0.48, roughness: 0.45, emissiveIntensity: 0.06 },
+  soldermask: { metalness: 0.05, roughness: 0.96, emissiveIntensity: 0.08 },
+  silkscreen: { metalness: 0.02, roughness: 0.78, emissiveIntensity: 0.05 },
+  solderpaste: { metalness: 0.22, roughness: 0.62, emissiveIntensity: 0.04 },
+  drill: { metalness: 0.08, roughness: 0.72, emissiveIntensity: 0.02 },
+  outline: { metalness: 0.06, roughness: 0.92, emissiveIntensity: 0.02 },
+  core: { metalness: 0.02, roughness: 0.96, emissiveIntensity: 0.01 },
 })
 
 const applyMaterialFinish = (material, type, isClear = false) => {
@@ -235,6 +235,10 @@ const applyMaterialFinish = (material, type, isClear = false) => {
     if (!target) return
     if (typeof target.metalness === 'number') target.metalness = profile.metalness
     if (typeof target.roughness === 'number') target.roughness = profile.roughness
+    if (target.emissive?.copy && target.color) {
+      target.emissive.copy(target.color)
+      target.emissiveIntensity = profile.emissiveIntensity ?? 0
+    }
     target.needsUpdate = true
   }
   if (Array.isArray(material)) material.forEach(setProps)
@@ -305,6 +309,25 @@ const createColor = (value, fallback) => {
   }
 }
 
+const DISPLAY_SATURATION_BOOST = 0.22
+const DISPLAY_LIGHTNESS_BOOST = 0.02
+
+const boostColorForDisplay = (color, type) => {
+  if (!color) return color
+  const boosted = color.clone()
+  const hsl = { h: 0, s: 0, l: 0 }
+  boosted.getHSL(hsl)
+  const satBoost =
+    type === 'outline' || type === 'drill'
+      ? 0.06
+      : type === 'silkscreen'
+        ? 0.04
+        : DISPLAY_SATURATION_BOOST
+  const lightBoost = type === 'outline' ? 0.05 : DISPLAY_LIGHTNESS_BOOST
+  boosted.setHSL(hsl.h, Math.min(1, hsl.s + satBoost), Math.min(1, hsl.l + lightBoost))
+  return boosted
+}
+
 const resolveLayerColor = (type, fallbackColor) => {
   if (props.layerColors && props.layerColors[type]) {
     return props.layerColors[type]
@@ -322,8 +345,8 @@ const isLayerTypeVisible = (type) => {
 
 const setMeshColor = (object, color, type = null) => {
   if (!object) return
-  const next = createColor(color, '#ffffff')
-  const coreColor = createColor(props.coreColor || props.borderColor, '#ffffff')
+  const next = boostColorForDisplay(createColor(color, '#ffffff'), type)
+  const coreColor = boostColorForDisplay(createColor(props.coreColor || props.borderColor, '#ffffff'), 'outline')
   object.traverse((child) => {
     if (child.isMesh) {
       const targetColor = child.userData?.isClear ? coreColor : next
@@ -851,9 +874,9 @@ const createSceneLights = () => {
     lightingGroup = null
   }
   lightingGroup = new THREE.Group()
-  const ambient = new THREE.AmbientLight(0xffffff, 1.25)
+  const ambient = new THREE.AmbientLight(0xffffff, 1.1)
   lightingGroup.add(ambient)
-  const hemi = new THREE.HemisphereLight(0xcad6ff, 0x0c1016, 1.2)
+  const hemi = new THREE.HemisphereLight(0xf2f7ff, 0xcbd5e1, 1.55)
   hemi.position.set(0, 10, 0)
   lightingGroup.add(hemi)
   const createDirectional = (color, intensity, position) => {
@@ -863,14 +886,9 @@ const createSceneLights = () => {
     lightingGroup.add(light)
     return light
   }
-  createDirectional(0xffffff, 1.8, new THREE.Vector3(6, 11, 7))
-  createDirectional(0xffd7b0, 1.05, new THREE.Vector3(-6, 4, 6))
-  createDirectional(0x9bb9ff, 1.05, new THREE.Vector3(0, -7, -6))
-  createDirectional(0xcfe4ff, 0.8, new THREE.Vector3(0, -4, 5))
-  createDirectional(0xfff3d2, 0.55, new THREE.Vector3(4, -3, -6))
-  const bottomFill = new THREE.PointLight(0xffffff, 0.9)
-  bottomFill.position.set(0, -6, 0)
-  lightingGroup.add(bottomFill)
+  createDirectional(0xffffff, 1.1, new THREE.Vector3(6, 11, 7))
+  createDirectional(0xffe3bf, 0.45, new THREE.Vector3(-6, 4, 6))
+  createDirectional(0xffffff, 0.95, new THREE.Vector3(-6, -9, -7))
   scene.add(lightingGroup)
 }
 
@@ -888,7 +906,7 @@ const initThree = () => {
   })
   renderer.outputColorSpace = SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping
-  renderer.toneMappingExposure = 1.7
+  renderer.toneMappingExposure = 1.6
   renderer.physicallyCorrectLights = true
   renderer.setPixelRatio(window.devicePixelRatio || 1)
   renderer.domElement.style.display = 'block'

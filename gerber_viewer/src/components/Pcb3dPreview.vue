@@ -20,6 +20,7 @@ const props = defineProps({
   coreColor: { type: String, default: 'rgb(234, 226, 118)' },
   layerColors: { type: Object, default: () => ({}) },
   layerVisibility: { type: Object, default: () => ({}) },
+  surfaceFinishType: { type: String, default: 'enig' },
   backgroundColor: { type: String, default: '#0f1220' },
   containerWidth: { type: String, default: '100%' },
   containerHeight: { type: String, default: '100%' },
@@ -225,7 +226,7 @@ const layerMaterialProfiles = Object.freeze({
   default: { metalness: 0.12, roughness: 0.92, emissiveIntensity: 0.04 },
   copper: { metalness: 0.48, roughness: 0.45, emissiveIntensity: 0.06 },
   soldermask: { metalness: 0.05, roughness: 0.96, emissiveIntensity: 0.08 },
-  surfacefinish: { metalness: 0.82, roughness: 0.28, emissiveIntensity: 0.03 },
+  surfacefinish: { metalness: 0.14, roughness: 0.86, emissiveIntensity: 0.01 },
   silkscreen: { metalness: 0.02, roughness: 0.78, emissiveIntensity: 0.05 },
   solderpaste: { metalness: 0.22, roughness: 0.62, emissiveIntensity: 0.04 },
   drill: { metalness: 0.08, roughness: 0.72, emissiveIntensity: 0.02 },
@@ -233,10 +234,25 @@ const layerMaterialProfiles = Object.freeze({
   core: { metalness: 0.02, roughness: 0.96, emissiveIntensity: 0.01 },
 })
 
+const surfaceFinishProfiles = Object.freeze({
+  enig: { metalness: 0.92, roughness: 0.24, emissiveIntensity: 0 },
+  'immersion-silver': { metalness: 0.98, roughness: 0.18, emissiveIntensity: 0 },
+  'immersion-tin': { metalness: 0.88, roughness: 0.32, emissiveIntensity: 0 },
+  'leadfree-hasl': { metalness: 0.22, roughness: 0.62, emissiveIntensity: 0.01 },
+  osp: { metalness: 0.06, roughness: 0.9, emissiveIntensity: 0.01 },
+})
+
+const resolveSurfaceFinishProfile = () => {
+  const key = typeof props.surfaceFinishType === 'string' ? props.surfaceFinishType : ''
+  return surfaceFinishProfiles[key] || layerMaterialProfiles.surfacefinish
+}
+
 const applyMaterialFinish = (material, type, isClear = false) => {
-  const profileKey = isClear ? 'core' : type
-  const profile =
-    (profileKey && layerMaterialProfiles[profileKey]) || layerMaterialProfiles.default
+  const profile = isClear
+    ? layerMaterialProfiles.core
+    : type === 'surfacefinish'
+      ? resolveSurfaceFinishProfile()
+      : layerMaterialProfiles[type] || layerMaterialProfiles.default
   if (!material) return
   const setProps = (target) => {
     if (!target) return
@@ -321,25 +337,6 @@ const createColor = (value, fallback) => {
   }
 }
 
-const DISPLAY_SATURATION_BOOST = 0.22
-const DISPLAY_LIGHTNESS_BOOST = 0.02
-
-const boostColorForDisplay = (color, type) => {
-  if (!color) return color
-  const boosted = color.clone()
-  const hsl = { h: 0, s: 0, l: 0 }
-  boosted.getHSL(hsl)
-  const satBoost =
-    type === 'outline' || type === 'drill'
-      ? 0.06
-      : type === 'silkscreen'
-        ? 0.04
-        : DISPLAY_SATURATION_BOOST
-  const lightBoost = type === 'outline' ? 0.05 : DISPLAY_LIGHTNESS_BOOST
-  boosted.setHSL(hsl.h, Math.min(1, hsl.s + satBoost), Math.min(1, hsl.l + lightBoost))
-  return boosted
-}
-
 const resolveLayerColor = (type, fallbackColor) => {
   if (props.layerColors && props.layerColors[type]) {
     return props.layerColors[type]
@@ -357,8 +354,8 @@ const isLayerTypeVisible = (type) => {
 
 const setMeshColor = (object, color, type = null) => {
   if (!object) return
-  const next = boostColorForDisplay(createColor(color, '#ffffff'), type)
-  const coreColor = boostColorForDisplay(createColor(props.coreColor || props.borderColor, '#ffffff'), 'outline')
+  const next = createColor(color, '#ffffff')
+  const coreColor = createColor(props.coreColor || props.borderColor, '#ffffff')
   object.traverse((child) => {
     if (child.isMesh) {
       const targetColor = child.userData?.isClear ? coreColor : next
@@ -1032,21 +1029,12 @@ const updateStructuralColors = () => {
 }
 
 const SOLDER_MASK_EXPORT_OPACITY = 0.98
-const SOLDER_MASK_SATURATION_BOOST = 0.3
-const SOLDER_MASK_LIGHTNESS_BOOST = 0.1
 
 const enhanceSoldermaskMaterialForExport = (material) => {
   if (!material) return
   const targetOpacity = Math.max(SOLDER_MASK_EXPORT_OPACITY, material.opacity ?? 1)
   material.opacity = Math.min(1, targetOpacity)
   material.transparent = material.opacity < 1
-  if (material.color) {
-    const hsl = { h: 0, s: 0, l: 0 }
-    material.color.getHSL(hsl)
-    hsl.s = Math.min(1, hsl.s + SOLDER_MASK_SATURATION_BOOST)
-    hsl.l = Math.min(1, hsl.l + SOLDER_MASK_LIGHTNESS_BOOST)
-    material.color.setHSL(hsl.h, hsl.s, hsl.l)
-  }
   material.needsUpdate = true
 }
 

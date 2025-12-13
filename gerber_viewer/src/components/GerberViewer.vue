@@ -92,16 +92,39 @@
                 class="absolute left-0 mt-3 ml-2 w-[320px] rounded-xl border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50 px-3 py-2.5 space-y-3"
                 style="transform: translateX(0)" @click.stop>
                 <div class="text-xs font-semibold text-gray-300 tracking-wide">3D 显示设置</div>
-                <div class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 flex flex-col gap-2">
-                  <div class="text-[11px] text-gray-300 tracking-wide">表面处理方式</div>
-                  <select v-model="surfaceFinishType"
-                    class="w-full px-2 py-1.5 rounded-md border border-gray-700 bg-gray-950/40 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-cyan-400/60">
-                    <option v-for="opt in surfaceFinishOptions" :key="opt.value" :value="opt.value">
-                      {{ opt.label }} ({{ (opt.color || '').toUpperCase() }})
-                    </option>
-                  </select>
-                </div>
                 <div class="grid grid-cols-2 gap-2">
+                  <div class="col-span-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 flex flex-col gap-2">
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="text-[11px] text-gray-300 tracking-wide">表面处理</div>
+                      <button
+                        class="w-8 h-8 shrink-0 flex items-center justify-center rounded border border-gray-600 hover:bg-gray-800 transition"
+                        :title="isPcb3dLayerVisible('surfacefinish') ? '隐藏' : '显示'"
+                        @click="togglePcb3dLayerVisibility('surfacefinish')">
+                        <span :class="isPcb3dLayerVisible('surfacefinish') ? 'pi pi-eye' : 'pi pi-eye-slash'" />
+                      </button>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 items-end">
+                      <div class="flex flex-col gap-1">
+                        <div class="text-[11px] text-gray-400 tracking-wide">方式</div>
+                        <select v-model="surfaceFinishType"
+                          class="w-full px-2 py-1.5 rounded-md border border-gray-700 bg-gray-950/40 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-cyan-400/60">
+                          <option v-for="opt in surfaceFinishOptions" :key="opt.value" :value="opt.value">
+                            {{ opt.label }} ({{ (opt.color || '').toUpperCase() }})
+                          </option>
+                        </select>
+                      </div>
+                      <div class="flex flex-col gap-1">
+                        <div class="text-[11px] text-gray-400 tracking-wide">颜色</div>
+                        <div class="flex items-center gap-3">
+                          <input type="color" v-model="pcb3dColors.surfacefinish"
+                            class="w-9 h-7 border border-gray-600 rounded bg-transparent" />
+                          <span class="text-[11px] font-mono text-gray-400 uppercase">
+                            {{ (pcb3dColors.surfacefinish || '').toUpperCase() }}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                   <div v-for="item in pcb3dColorOptions" :key="item.key"
                     class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 flex flex-col gap-1">
                     <div class="text-[11px] text-gray-300 tracking-wide flex items-center justify-between">
@@ -243,6 +266,7 @@
           :display-height="previewSize.height" :explosion-active="explosionActive"
           :explosion-spacing-multiplier="explosionSpacing" :border-color="pcb3dColors.core"
           :core-color="pcb3dColors.core" :layer-colors="pcb3dColors" :layer-visibility="pcb3dVisibility"
+          :surface-finish-type="surfaceFinishType"
           :layer-simplify-tolerances-mm="layerSimplifyTolerancesMm"
           :fitPadding="1.55"
           :drillLimit="drillLimit"
@@ -752,6 +776,7 @@ const pcb3dVisibility = reactive({ ...defaultPcb3dVisibility })
 const surfaceFinishOptions = Object.freeze([
   { value: 'enig', label: '沉金', color: '#dabf01' },
   { value: 'leadfree-hasl', label: '无铅喷锡', color: '#D0D0D6' },
+  { value: 'osp', label: 'OSP', color: '#ddb4c1' },
   { value: 'immersion-tin', label: '沉锡', color: '#C0C2C4' },
   { value: 'immersion-silver', label: '沉银', color: '#D8D8D8' },
 ])
@@ -778,7 +803,6 @@ const layerSimplifyTolerancesMm = reactive({ ...defaultLayerSimplifyTolerancesMm
 const pcb3dColorOptions = [
   { key: 'copper', label: '铜层', toggleable: true },
   { key: 'soldermask', label: '阻焊', toggleable: true },
-  { key: 'surfacefinish', label: '表面处理', toggleable: true },
   { key: 'silkscreen', label: '丝印', toggleable: true },
   { key: 'core', label: '芯板', toggleable: false },
 ]

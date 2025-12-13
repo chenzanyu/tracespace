@@ -310,3 +310,51 @@ export const enqueueComputeTraceDataJob = ({ projectId, layerIds }) => {
     payload: { projectId, layerIds },
   })
 }
+
+export const enqueueComputeProjectSummaryJob = async ({
+  projectId,
+  layers,
+  plotTreesById,
+  fileUnits,
+  maxGapUnits,
+  drillLimit,
+} = {}) => {
+  const pool = getPool()
+  if (!currentProject || currentProject.id !== projectId) {
+    throw new Error('compute project not initialized')
+  }
+  const units = fileUnits === 'in' ? 'in' : 'mm'
+  const plotSizesById = {}
+  if (plotTreesById && typeof plotTreesById === 'object') {
+    Object.entries(plotTreesById).forEach(([layerId, value]) => {
+      const size = Array.isArray(value?.size) ? value.size : Array.isArray(value) ? value : null
+      if (Array.isArray(size)) plotSizesById[layerId] = size
+    })
+  }
+  const gapUnits =
+    Number.isFinite(Number(maxGapUnits)) && Number(maxGapUnits) > 0
+      ? Number(maxGapUnits)
+      : units === 'mm'
+        ? 0.5
+        : 0.02
+  const normalizedLayers = Array.isArray(layers) ? layers : []
+  const outlineLayer = normalizedLayers.find((layer) => normalizeType(layer?.type) === 'outline')
+  const outlineLayerId = outlineLayer?.id || null
+  const limitValue = Number(drillLimit)
+  const drillLimitValue =
+    Number.isFinite(limitValue) && limitValue > 0 ? limitValue : Infinity
+  return pool.enqueue({
+    workerIndex: 0,
+    action: 'compute-project-summary',
+    priority: PRIORITY.pipeline,
+    payload: {
+      projectId,
+      layers: normalizedLayers,
+      plotSizesById,
+      outlineLayerId,
+      fileUnits: units,
+      maxGapUnits: gapUnits,
+      drillLimit: drillLimitValue,
+    },
+  })
+}

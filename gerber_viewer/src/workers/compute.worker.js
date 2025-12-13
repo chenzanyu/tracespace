@@ -125,24 +125,199 @@ const buildDrillShapesPayload = ({ layers, drillLimit }) => {
     }
   }
 
+  const clampNumber = (value) => {
+    const numeric = Number(value)
+    return Number.isFinite(numeric) ? numeric : 0
+  }
+  const scoreFromBounds = (bounds) => {
+    if (!bounds) return 0
+    const width = Math.abs(clampNumber(bounds.maxX) - clampNumber(bounds.minX))
+    const height = Math.abs(clampNumber(bounds.maxY) - clampNumber(bounds.minY))
+    return Math.max(width, height)
+  }
+  const extendBounds = (bounds, x, y) => {
+    const px = clampNumber(x)
+    const py = clampNumber(y)
+    if (!bounds) {
+      return { minX: px, minY: py, maxX: px, maxY: py }
+    }
+    return {
+      minX: Math.min(bounds.minX, px),
+      minY: Math.min(bounds.minY, py),
+      maxX: Math.max(bounds.maxX, px),
+      maxY: Math.max(bounds.maxY, py),
+    }
+  }
+  const boundsFromSegments = (segments) => {
+    if (!Array.isArray(segments) || segments.length === 0) return null
+    let bounds = null
+    for (const segment of segments) {
+      bounds = extendBounds(bounds, segment?.start?.[0], segment?.start?.[1])
+      bounds = extendBounds(bounds, segment?.end?.[0], segment?.end?.[1])
+      if (segment?.type === plotter.ARC) {
+        const centerX = clampNumber(segment?.center?.[0])
+        const centerY = clampNumber(segment?.center?.[1])
+        const radius = Math.abs(clampNumber(segment?.radius))
+        bounds = extendBounds(bounds, centerX - radius, centerY - radius)
+        bounds = extendBounds(bounds, centerX + radius, centerY + radius)
+      }
+    }
+    return bounds
+  }
+  const boundsFromShape = (shape) => {
+    if (!shape) return null
+    switch (shape.type) {
+      case plotter.CIRCLE: {
+        const r = Math.abs(clampNumber(shape.r))
+        const cx = clampNumber(shape.cx)
+        const cy = clampNumber(shape.cy)
+        return { minX: cx - r, minY: cy - r, maxX: cx + r, maxY: cy + r }
+      }
+      case plotter.RECTANGLE: {
+        const x = clampNumber(shape.x)
+        const y = clampNumber(shape.y)
+        const w = Math.abs(clampNumber(shape.xSize))
+        const h = Math.abs(clampNumber(shape.ySize))
+        return { minX: x, minY: y, maxX: x + w, maxY: y + h }
+      }
+      case plotter.POLYGON: {
+        if (!Array.isArray(shape.points) || shape.points.length === 0) return null
+        let bounds = null
+        for (const point of shape.points) {
+          bounds = extendBounds(bounds, point?.[0], point?.[1])
+        }
+        return bounds
+      }
+      case plotter.OUTLINE:
+        return boundsFromSegments(shape.segments)
+      case plotter.LAYERED_SHAPE: {
+        if (!Array.isArray(shape.shapes) || shape.shapes.length === 0) return null
+        let merged = null
+        for (const sub of shape.shapes) {
+          const subBounds = boundsFromShape(sub)
+          if (!subBounds) continue
+          merged = extendBounds(merged, subBounds.minX, subBounds.minY)
+          merged = extendBounds(merged, subBounds.maxX, subBounds.maxY)
+        }
+        return merged
+      }
+      default:
+        return null
+    }
+  }
+  const boundsFromElement = (element) => {
+    if (!element) return null
+    if (element.type === plotter.IMAGE_SHAPE) return boundsFromShape(element.shape)
+    if (element.type === plotter.IMAGE_REGION || element.type === plotter.IMAGE_PATH) {
+      return boundsFromSegments(element.segments)
+    }
+    return null
+  }
+  const scoreForElement = (element) => scoreFromBounds(boundsFromElement(element))
+
+  const createHeap = () => {
+    const heap = []
+    const worseFirst = (a, b) => {
+      if (a.score !== b.score) return a.score - b.score
+      return b.index - a.index
+    }
+    const swap = (i, j) => {
+      const tmp = heap[i]
+      heap[i] = heap[j]
+      heap[j] = tmp
+    }
+    const bubbleUp = (pos) => {
+      let index = pos
+      while (index > 0) {
+        const parent = Math.floor((index - 1) / 2)
+        if (worseFirst(heap[index], heap[parent]) >= 0) break
+        swap(index, parent)
+        index = parent
+      }
+    }
+    const bubbleDown = (pos) => {
+      let index = pos
+      for (;;) {
+        const left = index * 2 + 1
+        const right = left + 1
+        let smallest = index
+        if (left < heap.length && worseFirst(heap[left], heap[smallest]) < 0) {
+          smallest = left
+        }
+        if (right < heap.length && worseFirst(heap[right], heap[smallest]) < 0) {
+          smallest = right
+        }
+        if (smallest === index) break
+        swap(index, smallest)
+        index = smallest
+      }
+    }
+    return {
+      push(entry) {
+        heap.push(entry)
+        bubbleUp(heap.length - 1)
+      },
+      pop() {
+        if (heap.length === 0) return null
+        const top = heap[0]
+        const tail = heap.pop()
+        if (heap.length && tail) {
+          heap[0] = tail
+          bubbleDown(0)
+        }
+        return top
+      },
+      peek() {
+        return heap.length ? heap[0] : null
+      },
+      size() {
+        return heap.length
+      },
+      values() {
+        return heap.slice()
+      },
+    }
+  }
+
+  const limitCount = Math.max(0, Math.floor(limit))
+  const heap = createHeap()
+  let globalIndex = 0
+  for (const entry of imageEntries) {
+    const children = entry?.tree?.children
+    if (!Array.isArray(children) || children.length === 0) continue
+    for (const element of children) {
+      globalIndex += 1
+      const scored = {
+        layerId: entry.layerId,
+        element,
+        score: scoreForElement(element),
+        index: globalIndex,
+      }
+      heap.push(scored)
+      if (heap.size() > limitCount) heap.pop()
+    }
+  }
+
+  const keepByLayerId = new Map()
+  for (const scored of heap.values()) {
+    if (!scored?.layerId) continue
+    const set = keepByLayerId.get(scored.layerId) ?? new Set()
+    set.add(scored.element)
+    keepByLayerId.set(scored.layerId, set)
+  }
+
   const keep = []
   const keepLayerIds = []
   let kept = 0
   for (const entry of imageEntries) {
-    if (!Array.isArray(entry.tree.children)) continue
-    const remaining = Math.max(0, limit - kept)
-    if (remaining <= 0) break
-    if (entry.tree.children.length <= remaining) {
-      keep.push(entry.tree)
-      keepLayerIds.push(entry.layerId)
-      kept += entry.tree.children.length
-      continue
-    }
-    const sliced = { ...entry.tree, children: entry.tree.children.slice(0, remaining) }
-    keep.push(sliced)
+    const keepSet = keepByLayerId.get(entry.layerId)
+    if (!keepSet) continue
+    const children = Array.isArray(entry.tree?.children) ? entry.tree.children : []
+    const filtered = children.filter((child) => keepSet.has(child))
+    if (filtered.length === 0) continue
+    keep.push(filtered.length === children.length ? entry.tree : { ...entry.tree, children: filtered })
     keepLayerIds.push(entry.layerId)
-    kept += remaining
-    break
+    kept += filtered.length
   }
 
   return {
@@ -154,6 +329,7 @@ const buildDrillShapesPayload = ({ layers, drillLimit }) => {
     },
     stats: {
       applied: true,
+      strategy: 'largest-first',
       total: totalElements,
       kept,
       dropped: Math.max(0, totalElements - kept),

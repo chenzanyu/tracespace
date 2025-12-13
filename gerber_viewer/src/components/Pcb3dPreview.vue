@@ -713,6 +713,73 @@ const rebuildModel = async () => {
   }
 }
 
+let rebuildScheduleHandle = null
+let rebuildScheduleKind = null
+let rebuildInFlight = false
+let rebuildQueued = false
+
+const cancelScheduledRebuild = () => {
+  if (!rebuildScheduleHandle) return
+  try {
+    if (rebuildScheduleKind === 'idle' && typeof cancelIdleCallback === 'function') {
+      cancelIdleCallback(rebuildScheduleHandle)
+    } else {
+      clearTimeout(rebuildScheduleHandle)
+    }
+  } catch {
+    // ignore cancellation failures
+  }
+  rebuildScheduleHandle = null
+  rebuildScheduleKind = null
+}
+
+const performRebuild = async () => {
+  if (!scene) return
+  if (rebuildInFlight) {
+    rebuildQueued = true
+    return
+  }
+  rebuildInFlight = true
+  try {
+    await rebuildModel()
+  } finally {
+    rebuildInFlight = false
+    if (rebuildQueued) {
+      rebuildQueued = false
+      scheduleRebuild({ immediate: props.active })
+    }
+  }
+}
+
+const scheduleRebuild = ({ immediate = false } = {}) => {
+  if (!scene) return
+  rebuildQueued = true
+  cancelScheduledRebuild()
+  const run = () => {
+    rebuildScheduleHandle = null
+    rebuildScheduleKind = null
+    if (!rebuildQueued) return
+    rebuildQueued = false
+    performRebuild()
+  }
+
+  const shouldRunSoon = Boolean(immediate || props.active)
+  if (shouldRunSoon) {
+    rebuildScheduleKind = 'timeout'
+    rebuildScheduleHandle = setTimeout(run, 0)
+    return
+  }
+
+  if (typeof requestIdleCallback === 'function') {
+    rebuildScheduleKind = 'idle'
+    rebuildScheduleHandle = requestIdleCallback(run, { timeout: 1200 })
+    return
+  }
+
+  rebuildScheduleKind = 'timeout'
+  rebuildScheduleHandle = setTimeout(run, 120)
+}
+
 const computeFitDistance = (box, width, height, padding) => {
   if (!box || width <= 0 || height <= 0 || !camera) return camera?.position.z || 1
   const size = new THREE.Vector3()
@@ -992,7 +1059,7 @@ watch(
   () => [props.modelData?.version, props.thickness],
   () => {
     if (!scene) return
-    rebuildModel()
+    scheduleRebuild()
   }
 )
 
@@ -1021,7 +1088,7 @@ watch(
   () => props.drillLimit,
   () => {
     if (!scene) return
-    rebuildModel()
+    scheduleRebuild()
   }
 )
 watch(() => props.explosionActive, (isActive) => {
@@ -1046,15 +1113,17 @@ watch(() => props.active, async (isActive) => {
   }
   await nextTick()
   handleViewportResize()
+  scheduleRebuild({ immediate: true })
 })
 
 onMounted(async () => {
   initThree()
   await nextTick()
-  rebuildModel()
+  scheduleRebuild({ immediate: true })
 })
 
 onBeforeUnmount(() => {
+  cancelScheduledRebuild()
   destroyThree()
 })
 

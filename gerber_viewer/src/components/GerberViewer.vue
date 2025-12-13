@@ -574,6 +574,7 @@ import {
   buildPipelineFromMemoryLayers,
   broadcastCompute3dGlobals,
   enqueueComputePcb3dJob,
+  enqueueComputeProjectSummaryJob,
   enqueueComputeTraceDataJob,
   disposeComputePool,
   resetComputeProject,
@@ -697,6 +698,32 @@ const pcb3dModel = reactive({
   layers: [],
   version: 0,
 })
+
+const PCB3D_MODEL_FLUSH_ACTIVE_MS = 220
+let pcb3dModelFlushHandle = null
+let pcb3dModelDirty = false
+const cancelPcb3dModelFlush = () => {
+  if (pcb3dModelFlushHandle) {
+    clearTimeout(pcb3dModelFlushHandle)
+    pcb3dModelFlushHandle = null
+  }
+  pcb3dModelDirty = false
+}
+const flushPcb3dModel = () => {
+  if (!pcb3dModelDirty || componentDestroyed) return
+  pcb3dModelDirty = false
+  pcb3dModel.version += 1
+}
+const schedulePcb3dModelFlush = ({ immediate = false } = {}) => {
+  if (componentDestroyed) return
+  pcb3dModelDirty = true
+  if (pcb3dModelFlushHandle) return
+  const delay = immediate ? 0 : activeView.value === '3d' ? PCB3D_MODEL_FLUSH_ACTIVE_MS : 0
+  pcb3dModelFlushHandle = setTimeout(() => {
+    pcb3dModelFlushHandle = null
+    flushPcb3dModel()
+  }, delay)
+}
 const defaultPcb3dColors = Object.freeze({
   copper: '#cc9933',
   soldermask: '#004200',
@@ -712,8 +739,8 @@ const defaultPcb3dVisibility = Object.freeze({
 })
 const pcb3dVisibility = reactive({ ...defaultPcb3dVisibility })
 const defaultLayerSimplifyTolerancesMm = Object.freeze({
-  copper: 0.02,
-  soldermask: 0.02,
+  copper: 0.01,
+  soldermask: 0.01,
   silkscreen: 0.01,
   drill: 0.01,
   outline: 0.01,
@@ -734,6 +761,9 @@ watch(
   (pending) => {
     if (pending === 0) {
       modelUpdateLockReason.value = null
+      if (pcb3dModelDirty) {
+        schedulePcb3dModelFlush({ immediate: true })
+      }
     }
   }
 )
@@ -1620,6 +1650,7 @@ const disposePcbWorkers = () => {
   pcbWorkerActive = 0
   activeComputeProjectId = null
   activePcbModelBuildId = 0
+  cancelPcb3dModelFlush()
 }
 
 const getLayerColor = (layerId, type) => {
@@ -1629,6 +1660,7 @@ const getLayerColor = (layerId, type) => {
 }
 
 const resetPcbModelState = () => {
+  cancelPcb3dModelFlush()
   pcb3dModel.layers = []
   pcb3dModel.version += 1
 }
@@ -1703,7 +1735,11 @@ const applyWorkerLayer = (payload, buildId) => {
     meshSummary: payload.meshSummary ?? summarizeMeshData(payload.mesh),
   })
   pcb3dModel.layers = layers
-  pcb3dModel.version += 1
+  if (activeView.value === '3d') {
+    schedulePcb3dModelFlush()
+  } else {
+    pcb3dModelDirty = true
+  }
 }
 
 const refreshBoardOutlineState = (plotResult) => {
@@ -2170,29 +2206,103 @@ const applySettings = async () => {
   }
   let jobsQueued = false
   try {
-    disposePcbWorkers()
-    await resetComputeProject()
-    const pipeline = await runPerfAsync('settings:pipeline', () =>
-      buildPipelineFromMemoryLayers(list, { drillLimit: drillLimit.value })
+    const currentProjectId = fmRef.value?.__compute?.projectId ?? null
+    const drillGroupingChanged = changes.some((change) => {
+      const prev = normalizeLayerType(change?.prev?.type)
+      const next = normalizeLayerType(change?.next?.type)
+      return prev.includes('drill') !== next.includes('drill')
+    })
+
+    if (!currentProjectId || drillGroupingChanged) {
+      disposePcbWorkers()
+      await resetComputeProject()
+      const pipeline = await runPerfAsync('settings:pipeline', () =>
+        buildPipelineFromMemoryLayers(list, { drillLimit: drillLimit.value })
+      )
+      applyModernResult(pipeline, { preserveVisuals: true })
+      recenterSignal.value += 1
+      const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
+      const computeProjectId = pipeline?.__compute?.projectId ?? null
+      await broadcastCompute3dGlobals({
+        projectId: computeProjectId,
+        boardOutline: outlineDescriptor
+          ? {
+              bounds: outlineDescriptor.bounds,
+              regions: outlineDescriptor.regions,
+              polygons: outlineDescriptor.polygons,
+            }
+          : null,
+        drillShapes: pipeline?.__compute?.drillShapes ?? null,
+      })
+      jobsQueued = Boolean(
+        buildPcbModelFromLayers(
+          pipeline.plotResult?.layers,
+          outlineDescriptor,
+          pipeline.plotResult,
+          { reset: true, reason: 'settings-rebuild', projectId: computeProjectId }
+        )
+      )
+      memoryLayers.value = list
+      if (!jobsQueued) finalizePerfSessionIfIdle()
+      return
+    }
+
+    const editedById = new Map(
+      editableLayers.map((entry) => [entry.id, { type: entry.type ?? undefined, side: entry.side ?? undefined }])
     )
-    applyModernResult(pipeline, { preserveVisuals: true })
+    const nextLayers = fmLayers.map((layer) => {
+      const edited = editedById.get(layer.id)
+      if (!edited) return layer
+      return { ...layer, type: edited.type, side: edited.side }
+    })
+    const fileUnits = fmRef.value?.unitMeta?.units === 'in' ? 'in' : 'mm'
+    const summary = await runPerfAsync('settings:summary', () =>
+      enqueueComputeProjectSummaryJob({
+        projectId: currentProjectId,
+        layers: nextLayers,
+        plotTreesById: fmRef.value?.plotResult?.plotTreesById,
+        fileUnits,
+        drillLimit: drillLimit.value,
+      })
+    )
+
+    const nextFm = {
+      ...(fmRef.value || {}),
+      plotResult: {
+        ...(fmRef.value?.plotResult || {}),
+        layers: nextLayers,
+        boardShape: summary?.boardShape ?? null,
+      },
+      boardViewBox: summary?.boardViewBox ?? fmRef.value?.boardViewBox ?? [0, 0, 0, 0],
+      compositeViewBox: summary?.compositeViewBox ?? fmRef.value?.compositeViewBox ?? [0, 0, 0, 0],
+      compositeWidthMm: summary?.compositeWidthMm ?? fmRef.value?.compositeWidthMm ?? '0mm',
+      compositeHeightMm: summary?.compositeHeightMm ?? fmRef.value?.compositeHeightMm ?? '0mm',
+      unitMeta: summary?.unitMeta ?? fmRef.value?.unitMeta,
+      __compute: {
+        ...(fmRef.value?.__compute || {}),
+        projectId: currentProjectId,
+        drillShapes: summary?.drillShapes ?? fmRef.value?.__compute?.drillShapes ?? null,
+        drillStats: summary?.drillStats ?? fmRef.value?.__compute?.drillStats ?? null,
+      },
+    }
+
+    applyModernResult(nextFm, { preserveVisuals: true })
     recenterSignal.value += 1
-    const outlineDescriptor = refreshBoardOutlineState(pipeline.plotResult)
-    const computeProjectId = pipeline?.__compute?.projectId ?? null
+    const outlineDescriptor = refreshBoardOutlineState(nextFm.plotResult)
     await broadcastCompute3dGlobals({
-      projectId: computeProjectId,
+      projectId: currentProjectId,
       boardOutline: outlineDescriptor
         ? { bounds: outlineDescriptor.bounds, regions: outlineDescriptor.regions, polygons: outlineDescriptor.polygons }
         : null,
-      drillShapes: pipeline?.__compute?.drillShapes ?? null,
+      drillShapes: nextFm?.__compute?.drillShapes ?? null,
     })
+
     jobsQueued = Boolean(
-      buildPcbModelFromLayers(
-        pipeline.plotResult?.layers,
-        outlineDescriptor,
-        pipeline.plotResult,
-        { reset: true, reason: 'settings-rebuild', projectId: computeProjectId }
-      )
+      buildPcbModelFromLayers(nextFm.plotResult?.layers, outlineDescriptor, nextFm.plotResult, {
+        reset: true,
+        reason: 'settings-meta',
+        projectId: currentProjectId,
+      })
     )
     memoryLayers.value = list
     if (!jobsQueued) finalizePerfSessionIfIdle()
@@ -2219,7 +2329,11 @@ watch(
     })
     if (changed) {
       pcb3dModel.layers = nextLayers
-      pcb3dModel.version += 1
+      if (activeView.value === '3d') {
+        schedulePcb3dModelFlush()
+      } else {
+        pcb3dModelDirty = true
+      }
     }
   }
 )
@@ -2242,6 +2356,10 @@ watch(currentStatusIndex, (value) => {
 })
 
 watch(activeView, (value) => {
+  if (value === '3d') {
+    if (pcb3dModelDirty) schedulePcb3dModelFlush({ immediate: true })
+    return
+  }
   if (value !== '3d') {
     displayMenuOpen.value = false
     spacingPanelVisible.value = false

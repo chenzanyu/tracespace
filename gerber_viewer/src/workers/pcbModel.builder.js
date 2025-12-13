@@ -500,7 +500,8 @@ export const buildPcbLayerPayload = (payload) => {
         boardBounds,
         boardClipRegions,
         boardShapePolygons,
-        simplifyTolerances
+        simplifyTolerances,
+        metrics
       )
     )
     const meshResult = measureWorkerStage(metrics, 'collect-mesh', () => collectMeshChunks(group))
@@ -537,4 +538,3 @@ export const buildPcbLayerPayload = (payload) => {
     throw new Error(`${error?.message || 'worker failure'} | ctx=${contextJson}`)
   }
 }
-

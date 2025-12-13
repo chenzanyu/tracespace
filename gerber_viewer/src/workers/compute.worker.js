@@ -478,7 +478,8 @@ const handleSet3dGlobals = (payload) => {
 
 const handleBuild3dLayer = async (payload) => {
   const layerId = payload?.layerId
-  const entry = layerStateById.get(layerId)
+  const sourceLayerId = payload?.sourceLayerId ?? layerId
+  const entry = layerStateById.get(sourceLayerId)
   const plotTree = entry?.plotTree ?? null
   const parseTree = entry?.parseTree ?? null
   const { buildPcbLayerPayload } = await ensurePcbModelBuilder()

@@ -33,6 +33,10 @@ const RING_AREA_EPSILON = 1e-12
 const RING_POINT_EPSILON = 1e-8
 const SIMPLIFY_ABSOLUTE_TOLERANCE = 5e-4
 const SHAPE_SAMPLING_DIVISIONS = 16
+const TRIANGULATION_TILE_MIN_POINTS = 30000
+const TRIANGULATION_TILE_TARGET_POINTS = 20000
+const TRIANGULATION_TILE_MAX_TILES = 64
+const TRIANGULATION_TILE_MAX_DIMENSION = 16
 const reportedUnionFailures = new Set()
 const CLIPPER_COORD_SCALE = SNAP_PRECISION
 let clipper2 = null
@@ -67,9 +71,32 @@ try {
 const PCBMODEL_BOOLEAN_BACKEND = clipper2 ? 'clipper2-wasm' : 'polygon-clipping'
 console.info('[pcbModel] Boolean backend:', PCBMODEL_BOOLEAN_BACKEND)
 
+const getPerfNow = () =>
+  typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
+
+const recordWorkerTimelineStage = (metrics, name, durationMs) => {
+  if (!metrics || !Array.isArray(metrics.timeline)) return
+  metrics.timeline.push({
+    name,
+    durationMs: Number.isFinite(durationMs) ? Number(durationMs.toFixed(2)) : null,
+    memoryStart: null,
+    memoryEnd: null,
+  })
+}
+
 const toClipperCoord = value => {
   const number = Number(value) || 0
   return Math.round(number * CLIPPER_COORD_SCALE)
+}
+
+const toClipperCoordFloor = value => {
+  const number = Number(value) || 0
+  return Math.floor(number * CLIPPER_COORD_SCALE)
+}
+
+const toClipperCoordCeil = value => {
+  const number = Number(value) || 0
+  return Math.ceil(number * CLIPPER_COORD_SCALE)
 }
 
 const ringToClipperPathD = (ring, {desiredPositive = null} = {}) => {
@@ -142,17 +169,29 @@ const multiPolygonToClipperPathsD = (multiPolygon) => {
 
 const pathDToRing = (pathD) => {
   if (!clipper2 || !pathD) return null
-  const count = typeof pathD.size === 'function' ? pathD.size() : 0
+  let trimmed = null
+  try {
+    trimmed = clipper2.TrimCollinearD(pathD, 0, true)
+  } catch (error) {
+    trimmed = null
+  }
+  const activePath = trimmed || pathD
+  const count = typeof activePath.size === 'function' ? activePath.size() : 0
   if (!count || count < 3) return null
   const ring = new Array(count + 1)
   for (let index = 0; index < count; index++) {
-    const point = pathD.get(index)
+    const point = activePath.get(index)
     const x = Number(point?.x ?? 0) / CLIPPER_COORD_SCALE
     const y = Number(point?.y ?? 0) / CLIPPER_COORD_SCALE
     ring[index] = [x, y]
     point?.delete?.()
   }
   ring[count] = [...ring[0]]
+  try {
+    trimmed?.delete?.()
+  } catch (error) {
+    // ignore dispose errors
+  }
   return ring
 }
 
@@ -208,7 +247,8 @@ const clipperUnionMultiPolygons = (multiPolygons) => {
       clipper2.FillRule.NonZero,
       subjectPaths,
       clipPaths,
-      solution
+      solution,
+      0
     )
     return clipperPolyPathToMultiPolygon(solution)
   } finally {
@@ -242,7 +282,8 @@ const clipperBooleanOp = (clipType, subject, clip, {clipPaths: prebuiltClipPaths
       clipper2.FillRule.NonZero,
       subjectPaths,
       clipPaths,
-      solution
+      solution,
+      0
     )
     return clipperPolyPathToMultiPolygon(solution)
   } finally {
@@ -745,15 +786,26 @@ const multiPolygonToShapes = (multiPolygon, options = {}) => {
 
 const multiPolygonToPlanarGeometry = (multiPolygon, zOffset = 0) => {
   if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) return null
-  const positions = []
-  const normals = []
-  const indices = []
-  let vertexOffset = 0
+  const buffers = createTriangulationBuffers()
+  appendMultiPolygonToTriangulationBuffers(multiPolygon, zOffset, buffers)
+  return buildPlanarGeometryFromTriangulationBuffers(buffers)
+}
 
+const createTriangulationBuffers = () => ({
+  positionParts: [],
+  indexParts: [],
+  positionValues: 0,
+  indexValues: 0,
+  vertexOffset: 0,
+})
+
+const appendMultiPolygonToTriangulationBuffers = (multiPolygon, zOffset, buffers) => {
+  if (!Array.isArray(multiPolygon) || multiPolygon.length === 0 || !buffers) return
   for (const polygon of multiPolygon) {
     if (!Array.isArray(polygon) || polygon.length === 0) continue
-    const vertices = []
+    let totalVertices = 0
     const holeIndices = []
+    let hasOuter = false
     for (let ringIndex = 0; ringIndex < polygon.length; ringIndex++) {
       const ring = polygon[ringIndex]
       if (!Array.isArray(ring) || ring.length < 3) continue
@@ -762,31 +814,255 @@ const multiPolygonToPlanarGeometry = (multiPolygon, zOffset = 0) => {
       const closed = pointsClose(first, last)
       const limit = closed ? ring.length - 1 : ring.length
       if (limit < 3) continue
-      if (ringIndex > 0) holeIndices.push(vertices.length / 2)
+      if (hasOuter) {
+        holeIndices.push(totalVertices)
+      } else {
+        hasOuter = true
+      }
+      totalVertices += limit
+    }
+    if (!hasOuter || totalVertices < 3) continue
+
+    const vertices = new Float64Array(totalVertices * 2)
+    let vertexOffset = 0
+    for (let ringIndex = 0; ringIndex < polygon.length; ringIndex++) {
+      const ring = polygon[ringIndex]
+      if (!Array.isArray(ring) || ring.length < 3) continue
+      const first = ring[0]
+      const last = ring[ring.length - 1]
+      const closed = pointsClose(first, last)
+      const limit = closed ? ring.length - 1 : ring.length
+      if (limit < 3) continue
       for (let i = 0; i < limit; i++) {
         const point = ring[i]
-        vertices.push(Number(point?.[0]) || 0, Number(point?.[1]) || 0)
+        vertices[vertexOffset++] = Number(point?.[0]) || 0
+        vertices[vertexOffset++] = Number(point?.[1]) || 0
       }
     }
-    if (vertices.length < 6) continue
+
     const triangles = Earcut.triangulate(vertices, holeIndices, 2)
     if (!Array.isArray(triangles) || triangles.length === 0) continue
+
+    const positionPart = new Float32Array(totalVertices * 3)
+    let positionOffset = 0
     for (let i = 0; i < vertices.length; i += 2) {
-      positions.push(vertices[i], vertices[i + 1], zOffset)
-      normals.push(0, 0, 1)
+      positionPart[positionOffset++] = vertices[i]
+      positionPart[positionOffset++] = vertices[i + 1]
+      positionPart[positionOffset++] = zOffset
     }
+
+    const baseIndex = buffers.vertexOffset
+    const indexPart = new Uint32Array(triangles.length)
     for (let i = 0; i < triangles.length; i++) {
-      indices.push(vertexOffset + triangles[i])
+      indexPart[i] = baseIndex + triangles[i]
     }
-    vertexOffset += vertices.length / 2
+
+    buffers.positionParts.push(positionPart)
+    buffers.indexParts.push(indexPart)
+    buffers.positionValues += positionPart.length
+    buffers.indexValues += indexPart.length
+    buffers.vertexOffset += totalVertices
+  }
+}
+
+const buildPlanarGeometryFromTriangulationBuffers = (buffers) => {
+  if (
+    !buffers ||
+    buffers.positionValues <= 0 ||
+    buffers.indexValues <= 0 ||
+    buffers.vertexOffset <= 0
+  ) {
+    return null
   }
 
-  if (positions.length === 0 || indices.length === 0) return null
   const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
-  geometry.setIndex(indices)
+  const positions = new Float32Array(buffers.positionValues)
+  let positionOffset = 0
+  for (const part of buffers.positionParts) {
+    positions.set(part, positionOffset)
+    positionOffset += part.length
+  }
+  const vertexCount = Math.floor(positions.length / 3)
+
+  const IndexArray = vertexCount > 65535 ? Uint32Array : Uint16Array
+  const indices = new IndexArray(buffers.indexValues)
+  let indexOffset = 0
+  for (const part of buffers.indexParts) {
+    indices.set(part, indexOffset)
+    indexOffset += part.length
+  }
+
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1))
+
+  const normals = new Float32Array(positions.length)
+  for (let i = 2; i < normals.length; i += 3) {
+    normals[i] = 1
+  }
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
+
   return geometry
+}
+
+const countPolygonPoints = (polygon) => {
+  if (!Array.isArray(polygon) || polygon.length === 0) return 0
+  let count = 0
+  for (const ring of polygon) {
+    if (!Array.isArray(ring) || ring.length < 3) continue
+    const first = ring[0]
+    const last = ring[ring.length - 1]
+    const closed = pointsClose(first, last)
+    count += closed ? Math.max(0, ring.length - 1) : ring.length
+  }
+  return count
+}
+
+const countMultiPolygonPoints = (multiPolygon) => {
+  if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) return 0
+  let count = 0
+  for (const polygon of multiPolygon) {
+    count += countPolygonPoints(polygon)
+  }
+  return count
+}
+
+const appendMultiPolygonToTriangulationBuffersByTiling = (multiPolygon, zOffset, buffers) => {
+  if (!clipper2 || !Array.isArray(multiPolygon) || multiPolygon.length === 0 || !buffers) {
+    return false
+  }
+
+  const totalPoints = countMultiPolygonPoints(multiPolygon)
+  if (!totalPoints || totalPoints < TRIANGULATION_TILE_MIN_POINTS) {
+    return false
+  }
+
+  const bounds = getMultiPolygonBounds(multiPolygon)
+  if (!bounds) return false
+
+  const minX = toClipperCoordFloor(bounds.minX)
+  const minY = toClipperCoordFloor(bounds.minY)
+  const maxX = toClipperCoordCeil(bounds.maxX)
+  const maxY = toClipperCoordCeil(bounds.maxY)
+  const width = maxX - minX
+  const height = maxY - minY
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return false
+  }
+
+  const targetTilesRaw = Math.ceil(totalPoints / TRIANGULATION_TILE_TARGET_POINTS)
+  const targetTiles = Math.max(2, Math.min(TRIANGULATION_TILE_MAX_TILES, targetTilesRaw))
+  const aspect = width / Math.max(height, 1)
+  let tilesX = Math.max(1, Math.round(Math.sqrt(targetTiles * aspect)))
+  let tilesY = Math.max(1, Math.ceil(targetTiles / tilesX))
+  tilesX = Math.min(tilesX, TRIANGULATION_TILE_MAX_DIMENSION)
+  tilesY = Math.min(tilesY, TRIANGULATION_TILE_MAX_DIMENSION)
+  if (tilesX * tilesY > TRIANGULATION_TILE_MAX_TILES) {
+    if (tilesX >= tilesY) {
+      tilesX = Math.max(1, Math.floor(TRIANGULATION_TILE_MAX_TILES / tilesY))
+    } else {
+      tilesY = Math.max(1, Math.floor(TRIANGULATION_TILE_MAX_TILES / tilesX))
+    }
+  }
+  if (tilesX <= 1 && tilesY <= 1) {
+    return false
+  }
+
+  const subjectPaths = multiPolygonToClipperPathsD(multiPolygon)
+  if (!subjectPaths) return false
+
+  const stepX = Math.max(1, Math.ceil(width / tilesX))
+  const stepY = Math.max(1, Math.ceil(height / tilesY))
+  let appended = false
+
+  try {
+    for (let ix = 0; ix < tilesX; ix++) {
+      const left = minX + ix * stepX
+      const right = ix === tilesX - 1 ? maxX : Math.min(maxX, left + stepX)
+      if (right <= left) continue
+      for (let iy = 0; iy < tilesY; iy++) {
+        const top = minY + iy * stepY
+        const bottom = iy === tilesY - 1 ? maxY : Math.min(maxY, top + stepY)
+        if (bottom <= top) continue
+        const rect = new clipper2.RectD(left, top, right, bottom)
+        let clipped = null
+        let solution = null
+        let empty = null
+        try {
+          clipped = clipper2.RectClipPathsD(rect, subjectPaths, 0)
+          const clippedCount = typeof clipped?.size === 'function' ? clipped.size() : 0
+          if (!clippedCount) continue
+          empty = new clipper2.PathsD()
+          solution = new clipper2.PolyPathD()
+          clipper2.BooleanOpOutD(
+            clipper2.ClipType.Union,
+            clipper2.FillRule.EvenOdd,
+            clipped,
+            empty,
+            solution,
+            0
+          )
+          const tileMultiPolygon = clipperPolyPathToMultiPolygon(solution)
+          if (tileMultiPolygon) {
+            appendMultiPolygonToTriangulationBuffers(tileMultiPolygon, zOffset, buffers)
+            appended = true
+          }
+        } finally {
+          try {
+            solution?.delete?.()
+          } catch {
+            // ignore dispose errors
+          }
+          try {
+            empty?.delete?.()
+          } catch {
+            // ignore dispose errors
+          }
+          try {
+            clipped?.delete?.()
+          } catch {
+            // ignore dispose errors
+          }
+          try {
+            rect.delete?.()
+          } catch {
+            // ignore dispose errors
+          }
+        }
+      }
+    }
+  } finally {
+    try {
+      subjectPaths.delete?.()
+    } catch {
+      // ignore dispose errors
+    }
+  }
+
+  return appended
+}
+
+const multiPolygonToPlanarGeometryTiled = (multiPolygon, zOffset = 0) => {
+  if (!Array.isArray(multiPolygon) || multiPolygon.length === 0) return null
+  if (!clipper2) {
+    return multiPolygonToPlanarGeometry(multiPolygon, zOffset)
+  }
+
+  const buffers = createTriangulationBuffers()
+  for (const polygon of multiPolygon) {
+    if (!Array.isArray(polygon) || polygon.length === 0) continue
+    const polygonPoints = countPolygonPoints(polygon)
+    if (polygonPoints >= TRIANGULATION_TILE_MIN_POINTS) {
+      const appended = appendMultiPolygonToTriangulationBuffersByTiling([polygon], zOffset, buffers)
+      if (!appended) {
+        appendMultiPolygonToTriangulationBuffers([polygon], zOffset, buffers)
+      }
+    } else {
+      appendMultiPolygonToTriangulationBuffers([polygon], zOffset, buffers)
+    }
+  }
+
+  const geometry = buildPlanarGeometryFromTriangulationBuffers(buffers)
+  return geometry || multiPolygonToPlanarGeometry(multiPolygon, zOffset)
 }
 
 const cloneMultiPolygon = multiPolygon => {
@@ -1245,7 +1521,8 @@ export function renderThree(
   boardBounds = null,
   boardClipRegions = null,
   boardShapePolygons = null,
-  simplifyTolerances = null
+  simplifyTolerances = null,
+  workerMetrics = null
 ) {
   if (!imageTree) {
     return new THREE.Group()
@@ -1271,7 +1548,8 @@ export function renderThree(
     boardClipRegions,
     drillTrees,
     boardShapePolygons,
-    simplifyTolerances
+    simplifyTolerances,
+    workerMetrics
   )
 }
 
@@ -1285,13 +1563,24 @@ const buildPlanarLayerGeometry = (
   boardClipRegions = null,
   drillTrees = null,
   boardShapePolygons = null,
-  simplifyTolerances = null
+  simplifyTolerances = null,
+  workerMetrics = null
 ) => {
   const group = new THREE.Group()
   let current = 0
   progress(current)
   const children = imageTree.children || []
   const planarEntries = []
+  const perfTotals = workerMetrics ? {booleanMs: 0, triangulateMs: 0} : null
+  const measure = (bucket, fn) => {
+    if (!perfTotals) return fn()
+    const start = getPerfNow()
+    try {
+      return fn()
+    } finally {
+      perfTotals[bucket] += getPerfNow() - start
+    }
+  }
 
   const chunkList = []
   const initialDarkPolygons = []
@@ -1352,8 +1641,16 @@ let drillHoleClipperPaths = null
     }
   }
 
+  const storePlanarMultiPolygon = (multiPolygon) => {
+    if (!multiPolygon) return null
+    if (clipper2) {
+      return Array.isArray(multiPolygon) && multiPolygon.length ? multiPolygon : null
+    }
+    return sanitizeMultiPolygon(multiPolygon)
+  }
+
   const applyDarkPolygon = (multiPolygon) => {
-    const stored = sanitizeMultiPolygon(multiPolygon)
+    const stored = storePlanarMultiPolygon(multiPolygon)
     if (!stored) return
     const entryBounds = getMultiPolygonBounds(stored)
     if (!entryBounds) return
@@ -1364,7 +1661,7 @@ let drillHoleClipperPaths = null
   }
 
   const applyClearPolygon = (multiPolygon) => {
-    const stored = sanitizeMultiPolygon(multiPolygon)
+    const stored = storePlanarMultiPolygon(multiPolygon)
     if (!stored) return
     const entryBounds = getMultiPolygonBounds(stored)
     if (!entryBounds) return
@@ -1390,13 +1687,29 @@ let drillHoleClipperPaths = null
     }
     let result = darkUnion
     let resultBounds = getMultiPolygonBounds(result)
-    const relevantClears = chunk.clearEntries.filter(entry =>
-      resultBounds && boundsOverlap(resultBounds, entry.bounds)
-    ).map(entry => entry.polygon)
-    const clearUnion = unionPolygonList(relevantClears)
-    if (clearUnion) {
-        result = subtractMultiPolygon(result, clearUnion)
-      resultBounds = getMultiPolygonBounds(result)
+    const relevantClears = chunk.clearEntries
+      .filter(entry => resultBounds && boundsOverlap(resultBounds, entry.bounds))
+      .map(entry => entry.polygon)
+    if (relevantClears.length) {
+      if (clipper2) {
+        const removal =
+          relevantClears.length === 1
+            ? relevantClears[0]
+            : relevantClears.reduce((acc, mp) => {
+                if (Array.isArray(mp) && mp.length) acc.push(...mp)
+                return acc
+              }, [])
+        if (removal && Array.isArray(removal) && removal.length) {
+          result = subtractMultiPolygon(result, removal)
+          resultBounds = getMultiPolygonBounds(result)
+        }
+      } else {
+        const clearUnion = unionPolygonList(relevantClears)
+        if (clearUnion) {
+          result = subtractMultiPolygon(result, clearUnion)
+          resultBounds = getMultiPolygonBounds(result)
+        }
+      }
     }
     if (result && boardClipPolygon) {
       const shouldApplyBoardClip =
@@ -1452,9 +1765,11 @@ let drillHoleClipperPaths = null
   }
 
   const emitChunkPolygons = chunk => {
-    const finalPolygon = chunk.multiPolygon ?? buildChunkMultiPolygon(chunk)
+    const finalPolygon = chunk.multiPolygon ?? measure('booleanMs', () => buildChunkMultiPolygon(chunk))
     if (!finalPolygon) return
-    const geometry = multiPolygonToPlanarGeometry(finalPolygon, -PLANE_THICKNESS / 2)
+    const geometry = measure('triangulateMs', () =>
+      multiPolygonToPlanarGeometryTiled(finalPolygon, -PLANE_THICKNESS / 2)
+    )
     if (!geometry) return
     planarEntries.push({geometry})
   }
@@ -1547,6 +1862,10 @@ if (clipper2 && drillHolePolygon) {
     mesh.userData = {planar: true}
     group.add(mesh)
   })
+  if (perfTotals) {
+    recordWorkerTimelineStage(workerMetrics, 'render-three:boolean', perfTotals.booleanMs)
+    recordWorkerTimelineStage(workerMetrics, 'render-three:triangulate', perfTotals.triangulateMs)
+  }
 
   return group
 }

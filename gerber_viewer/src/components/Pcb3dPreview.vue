@@ -105,6 +105,7 @@ const emitViewerPerfSample = (stage, durationMs, meta, memoryStart, memoryEnd) =
 const defaultLayerColors = {
   copper: '#cc9933',
   soldermask: '#004200',
+  surfacefinish: '#dabf01',
   silkscreen: '#ffffff',
   solderpaste: '#b2b2b2',
 }
@@ -185,6 +186,7 @@ const laminarDefaults = {
   total: 1.6,
   copper: 0.035,
   solderMask: 0.04,
+  surfaceFinish: 0.005,
   silkscreen: 0.01,
   solderPaste: 0.015,
   oil: 0.01,
@@ -205,12 +207,14 @@ let explosionBaseSpan = laminarDefaults.total
 const topLayerRenderOrders = {
   copper: 90,
   soldermask: 92,
+  surfacefinish: 93,
   silkscreen: 94,
   solderpaste: 96,
 }
 const bottomLayerRenderOrders = {
   copper: 10,
   soldermask: 12,
+  surfacefinish: 13,
   silkscreen: 14,
   solderpaste: 16,
 }
@@ -219,6 +223,7 @@ const layerMaterialProfiles = Object.freeze({
   default: { metalness: 0.12, roughness: 0.92, emissiveIntensity: 0.04 },
   copper: { metalness: 0.48, roughness: 0.45, emissiveIntensity: 0.06 },
   soldermask: { metalness: 0.05, roughness: 0.96, emissiveIntensity: 0.08 },
+  surfacefinish: { metalness: 0.82, roughness: 0.28, emissiveIntensity: 0.03 },
   silkscreen: { metalness: 0.02, roughness: 0.78, emissiveIntensity: 0.05 },
   solderpaste: { metalness: 0.22, roughness: 0.62, emissiveIntensity: 0.04 },
   drill: { metalness: 0.08, roughness: 0.72, emissiveIntensity: 0.02 },
@@ -293,10 +298,12 @@ const explosionLayerSequence = [
   { type: 'drill', side: 'bottom', order: -5 },
   { type: 'solderpaste', side: 'bottom', order: -4 },
   { type: 'silkscreen', side: 'bottom', order: -3 },
+  { type: 'surfacefinish', side: 'bottom', order: -2.5 },
   { type: 'soldermask', side: 'bottom', order: -2 },
   { type: 'copper', side: 'bottom', order: -1 },
   { type: 'copper', side: 'top', order: 1 },
   { type: 'soldermask', side: 'top', order: 2 },
+  { type: 'surfacefinish', side: 'top', order: 2.5 },
   { type: 'silkscreen', side: 'top', order: 3 },
   { type: 'solderpaste', side: 'top', order: 4 },
 ]
@@ -546,12 +553,13 @@ const computeLaminate = () => {
   const scale = total / laminarDefaults.total
   const copper = laminarDefaults.copper * scale
   const solderMask = laminarDefaults.solderMask * scale
+  const surfaceFinish = laminarDefaults.surfaceFinish * scale
   const silkscreen = laminarDefaults.silkscreen * scale
   const solderPaste = laminarDefaults.solderPaste * scale
   const oil = laminarDefaults.oil * scale
   let core = total - 2 * (copper + solderMask + silkscreen + solderPaste + oil)
   if (core <= 0) core = total * 0.6
-  return { total, core, copper, solderMask, silkscreen, solderPaste, oil }
+  return { total, core, copper, solderMask, surfaceFinish, silkscreen, solderPaste, oil }
 }
 
 const classifyLayers = (entries) => {
@@ -665,12 +673,19 @@ const assembleLayers = (entries) => {
     { key: 'silkscreen', thickness: laminate.silkscreen },
     { key: 'solderpaste', thickness: laminate.solderPaste },
   ]
+  const biasStep = Math.max(laminate.total * 0.01, 1e-6)
+  let soldermaskZTop = null
+  let soldermaskZBottom = null
+  let silkscreenZTop = null
+  let silkscreenZBottom = null
   let cursorTop = halfCore
   for (const layer of stack) {
     const mesh = classification.top[layer.key]
     if (!mesh) continue
     cursorTop += layer.thickness / 2
     placeLayer(modelGroup, mesh, cursorTop, layer.thickness, layer.key, 'top')
+    if (layer.key === 'soldermask') soldermaskZTop = cursorTop
+    if (layer.key === 'silkscreen') silkscreenZTop = cursorTop
     cursorTop += layer.thickness / 2
   }
   let cursorBottom = -halfCore
@@ -679,8 +694,32 @@ const assembleLayers = (entries) => {
     if (!mesh) continue
     cursorBottom -= layer.thickness / 2
     placeLayer(modelGroup, mesh, cursorBottom, layer.thickness, layer.key, 'bottom')
+    if (layer.key === 'soldermask') soldermaskZBottom = cursorBottom
+    if (layer.key === 'silkscreen') silkscreenZBottom = cursorBottom
     cursorBottom -= layer.thickness / 2
   }
+  const placeSurfaceFinishDecal = (side) => {
+    const mesh = side === 'bottom' ? classification.bottom.surfacefinish : classification.top.surfacefinish
+    if (!mesh) return
+    const soldermaskZ = side === 'bottom' ? soldermaskZBottom : soldermaskZTop
+    const silkscreenZ = side === 'bottom' ? silkscreenZBottom : silkscreenZTop
+    const fallbackZ =
+      side === 'bottom'
+        ? (-halfCore - laminate.copper - laminate.solderMask / 2)
+        : (halfCore + laminate.copper + laminate.solderMask / 2)
+    const baseZ = Number.isFinite(soldermaskZ) ? soldermaskZ : fallbackZ
+    const targetZ = side === 'bottom' ? baseZ - biasStep : baseZ + biasStep
+    if (Number.isFinite(silkscreenZ)) {
+      const minZ = Math.min(baseZ, silkscreenZ) + biasStep
+      const maxZ = Math.max(baseZ, silkscreenZ) - biasStep
+      const clamped = Math.min(Math.max(targetZ, minZ), maxZ)
+      placeLayer(modelGroup, mesh, clamped, laminate.surfaceFinish, 'surfacefinish', side)
+      return
+    }
+    placeLayer(modelGroup, mesh, targetZ, laminate.surfaceFinish, 'surfacefinish', side)
+  }
+  placeSurfaceFinishDecal('top')
+  placeSurfaceFinishDecal('bottom')
   scene.add(modelGroup)
   applyLayerColorOverrides()
   applyLayerVisibility()
@@ -1088,6 +1127,7 @@ watch(
   () => [
     props.layerColors?.copper,
     props.layerColors?.soldermask,
+    props.layerColors?.surfacefinish,
     props.layerColors?.silkscreen,
     props.layerColors?.solderpaste,
   ],
@@ -1097,6 +1137,7 @@ watch(
   () => [
     props.layerVisibility?.copper,
     props.layerVisibility?.soldermask,
+    props.layerVisibility?.surfacefinish,
     props.layerVisibility?.silkscreen,
     props.layerVisibility?.solderpaste,
   ],

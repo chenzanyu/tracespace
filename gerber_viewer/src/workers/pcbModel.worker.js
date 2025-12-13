@@ -292,7 +292,8 @@ const buildLayerPayload = payload => {
           boardBounds,
           boardClipRegions,
           boardShapePolygons,
-          simplifyTolerances
+          simplifyTolerances,
+          metrics
         )
       )
       logWorker('renderThree-complete', {

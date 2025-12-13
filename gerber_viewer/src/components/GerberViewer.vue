@@ -92,6 +92,15 @@
                 class="absolute left-0 mt-3 ml-2 w-[320px] rounded-xl border border-gray-700 bg-gray-900/95 text-sm text-white shadow-xl z-50 px-3 py-2.5 space-y-3"
                 style="transform: translateX(0)" @click.stop>
                 <div class="text-xs font-semibold text-gray-300 tracking-wide">3D 显示设置</div>
+                <div class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 flex flex-col gap-2">
+                  <div class="text-[11px] text-gray-300 tracking-wide">表面处理方式</div>
+                  <select v-model="surfaceFinishType"
+                    class="w-full px-2 py-1.5 rounded-md border border-gray-700 bg-gray-950/40 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-cyan-400/60">
+                    <option v-for="opt in surfaceFinishOptions" :key="opt.value" :value="opt.value">
+                      {{ opt.label }} ({{ (opt.color || '').toUpperCase() }})
+                    </option>
+                  </select>
+                </div>
                 <div class="grid grid-cols-2 gap-2">
                   <div v-for="item in pcb3dColorOptions" :key="item.key"
                     class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 flex flex-col gap-1">
@@ -727,6 +736,7 @@ const schedulePcb3dModelFlush = ({ immediate = false } = {}) => {
 const defaultPcb3dColors = Object.freeze({
   copper: '#cc9933',
   soldermask: '#004200',
+  surfacefinish: '#dabf01',
   silkscreen: '#ffffff',
   core: '#292900',
 })
@@ -734,13 +744,32 @@ const pcb3dColors = reactive({ ...defaultPcb3dColors })
 const defaultPcb3dVisibility = Object.freeze({
   copper: true,
   soldermask: true,
+  surfacefinish: true,
   silkscreen: true,
   core: true,
 })
 const pcb3dVisibility = reactive({ ...defaultPcb3dVisibility })
+const surfaceFinishOptions = Object.freeze([
+  { value: 'enig', label: '沉金', color: '#dabf01' },
+  { value: 'leadfree-hasl', label: '无铅喷锡', color: '#D0D0D6' },
+  { value: 'immersion-tin', label: '沉锡', color: '#C0C2C4' },
+  { value: 'immersion-silver', label: '沉银', color: '#D8D8D8' },
+])
+const surfaceFinishType = ref('enig')
+watch(
+  surfaceFinishType,
+  (next) => {
+    const selected = surfaceFinishOptions.find((opt) => opt.value === next)
+    if (selected?.color) {
+      pcb3dColors.surfacefinish = selected.color
+    }
+  },
+  { immediate: true }
+)
 const defaultLayerSimplifyTolerancesMm = Object.freeze({
   copper: 0.01,
   soldermask: 0.01,
+  surfacefinish: 0.01,
   silkscreen: 0.01,
   drill: 0.01,
   outline: 0.01,
@@ -749,6 +778,7 @@ const layerSimplifyTolerancesMm = reactive({ ...defaultLayerSimplifyTolerancesMm
 const pcb3dColorOptions = [
   { key: 'copper', label: '铜层', toggleable: true },
   { key: 'soldermask', label: '阻焊', toggleable: true },
+  { key: 'surfacefinish', label: '表面处理', toggleable: true },
   { key: 'silkscreen', label: '丝印', toggleable: true },
   { key: 'core', label: '芯板', toggleable: false },
 ]
@@ -1350,6 +1380,7 @@ const togglePcb3dLayerVisibility = (key) => {
   pcb3dVisibility[key] = next
 }
 const resetPcb3dDisplaySettings = () => {
+  surfaceFinishType.value = 'enig'
   Object.entries(defaultPcb3dColors).forEach(([key, value]) => {
     pcb3dColors[key] = value
   })
@@ -1552,6 +1583,7 @@ const editableLayers = reactive([])
 const defaultLayerColors = {
   copper: '#f2c55b',
   soldermask: '#1c7a2a',
+  surfacefinish: '#dabf01',
   silkscreen: '#ffffff',
   drill: '#333333',
   outline: '#bfa782',
@@ -1788,10 +1820,30 @@ const buildPcbModelFromLayers = (layers, boardOutline, plotResult = null, option
   const layersFor3d = candidateLayers.filter(
     (layer) => isLayerEligibleFor3d(layer) && layerHasRenderableGeometry(layer, plotResult)
   )
+  const surfaceFinishJobs = []
+  const soldermaskBySide = new Map()
+  for (const layer of layersFor3d) {
+    const normalizedType = normalizeLayerType(layer?.type)
+    if (normalizedType !== 'soldermask') continue
+    const side = normalizeLayerSide(layer?.side)
+    if (side !== 'top' && side !== 'bottom') continue
+    if (!soldermaskBySide.has(side)) {
+      soldermaskBySide.set(side, layer.id)
+    }
+  }
+  for (const [side, sourceLayerId] of soldermaskBySide.entries()) {
+    surfaceFinishJobs.push({
+      layerId: `${sourceLayerId}__surfacefinish__`,
+      sourceLayerId,
+      type: 'surfacefinish',
+      side,
+    })
+  }
   const hasOutlineLayer = layersFor3d.some((layer) => layer.type === 'outline')
   const syntheticOutlineNeeded =
     reset && !hasOutlineLayer && Array.isArray(boardRegions) && boardRegions.length > 0
-  const totalJobs = layersFor3d.length + (syntheticOutlineNeeded ? 1 : 0)
+  const totalJobs =
+    layersFor3d.length + surfaceFinishJobs.length + (syntheticOutlineNeeded ? 1 : 0)
   if (totalJobs === 0) {
     planPerfWorkerJobs(0)
     pcbModelJobs.total = 0
@@ -1807,6 +1859,23 @@ const buildPcbModelFromLayers = (layers, boardOutline, plotResult = null, option
       side: layer.side ?? null,
       color: getLayerColor(layer.id, layer.type),
       outline: layer.type === 'outline',
+      simplifyTolerances: simplifyTolerancePayload,
+    })
+      .then((result) => {
+        applyWorkerLayer(result, buildId)
+      })
+      .catch((error) => {
+        console.error('[GerberViewer] PCB worker failed', error)
+      })
+  }
+  for (const job of surfaceFinishJobs) {
+    queueWorkerJob(projectId, {
+      layerId: job.layerId,
+      sourceLayerId: job.sourceLayerId,
+      type: job.type,
+      side: job.side ?? null,
+      color: pcb3dColors.surfacefinish ?? '#dabf01',
+      outline: false,
       simplifyTolerances: simplifyTolerancePayload,
     })
       .then((result) => {

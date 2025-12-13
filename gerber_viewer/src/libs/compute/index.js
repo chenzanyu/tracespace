@@ -289,7 +289,8 @@ export const enqueueComputePcb3dJob = ({ projectId, payload }) => {
   if (!currentProject || currentProject.id !== projectId) {
     return Promise.reject(new Error('compute project not initialized'))
   }
-  const workerIndex = currentProject.workerIndexByLayerId.get(payload.layerId) || 0
+  const routingLayerId = payload?.sourceLayerId ?? payload.layerId
+  const workerIndex = currentProject.workerIndexByLayerId.get(routingLayerId) || 0
   return pool.enqueue({
     workerIndex,
     action: 'build-3d-layer',

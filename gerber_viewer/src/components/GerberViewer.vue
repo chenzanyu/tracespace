@@ -110,7 +110,7 @@
                         <select v-model="surfaceFinishType"
                           class="w-full px-2 py-1.5 rounded-md border border-gray-700 bg-gray-950/40 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-cyan-400/60">
                           <option v-for="opt in surfaceFinishOptions" :key="opt.value" :value="opt.value">
-                            {{ opt.label }} ({{ (opt.color || '').toUpperCase() }})
+                            {{ opt.label }}
                           </option>
                         </select>
                       </div>

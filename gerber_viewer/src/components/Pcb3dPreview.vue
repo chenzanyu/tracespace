@@ -11,6 +11,7 @@ import {ref, watch, onMounted, onBeforeUnmount, nextTick, defineExpose, defineEm
 import * as THREE from 'three'
 import {SRGBColorSpace} from 'three'
 import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js'
+import {RoomEnvironment} from 'three/examples/jsm/environments/RoomEnvironment.js'
 import {GLTFExporter} from 'three/examples/jsm/exporters/GLTFExporter.js'
 
 const props = defineProps({
@@ -20,8 +21,9 @@ const props = defineProps({
   coreColor: { type: String, default: 'rgb(234, 226, 118)' },
   layerColors: { type: Object, default: () => ({}) },
   layerVisibility: { type: Object, default: () => ({}) },
-  surfaceFinishType: { type: String, default: 'enig' },
+  surfaceFinishType: { type: String, default: 'leadfree-hasl' },
   backgroundColor: { type: String, default: '#0f1220' },
+  envMapIntensity: { type: Number, default: 0.45 },
   containerWidth: { type: String, default: '100%' },
   containerHeight: { type: String, default: '100%' },
   displayWidth: { type: Number, default: 0 },
@@ -61,6 +63,8 @@ let rafId = 0
 let running = false
 const objectLoader = new THREE.ObjectLoader()
 let lightingGroup = null
+let pmremGenerator = null
+let environmentTarget = null
 const typedArrayConstructors = {
   Float32Array,
   Float64Array,
@@ -107,7 +111,7 @@ const emitViewerPerfSample = (stage, durationMs, meta, memoryStart, memoryEnd) =
 const defaultLayerColors = {
   copper: '#cc9933',
   soldermask: '#004200',
-  surfacefinish: '#dabf01',
+  surfacefinish: '#D0D0D6',
   silkscreen: '#ffffff',
   solderpaste: '#b2b2b2',
 }
@@ -247,6 +251,20 @@ const resolveSurfaceFinishProfile = () => {
   return surfaceFinishProfiles[key] || layerMaterialProfiles.surfacefinish
 }
 
+const resolveEnvMapIntensity = () => {
+  const value = Number(props.envMapIntensity)
+  if (!Number.isFinite(value)) return 1
+  return THREE.MathUtils.clamp(value, 0, 4)
+}
+
+const applyEnvironmentIntensity = () => {
+  if (!scene) return
+  const intensity = resolveEnvMapIntensity()
+  if (typeof scene.environmentIntensity === 'number') {
+    scene.environmentIntensity = intensity
+  }
+}
+
 const applyMaterialFinish = (material, type, isClear = false) => {
   const profile = isClear
     ? layerMaterialProfiles.core
@@ -254,6 +272,7 @@ const applyMaterialFinish = (material, type, isClear = false) => {
       ? resolveSurfaceFinishProfile()
       : layerMaterialProfiles[type] || layerMaterialProfiles.default
   if (!material) return
+  const envMapIntensity = resolveEnvMapIntensity()
   const setProps = (target) => {
     if (!target) return
     if (typeof target.metalness === 'number') target.metalness = profile.metalness
@@ -261,6 +280,9 @@ const applyMaterialFinish = (material, type, isClear = false) => {
     if (target.emissive?.copy && target.color) {
       target.emissive.copy(target.color)
       target.emissiveIntensity = profile.emissiveIntensity ?? 0
+    }
+    if (typeof target.envMapIntensity === 'number') {
+      target.envMapIntensity = envMapIntensity
     }
     target.needsUpdate = true
   }
@@ -389,6 +411,22 @@ const applyLayerVisibility = () => {
     const type = child.userData?.layerType
     if (!type) return
     child.visible = isLayerTypeVisible(type)
+  })
+  requestRender()
+}
+
+const applyEnvMapIntensityOverrides = () => {
+  const envMapIntensity = resolveEnvMapIntensity()
+  applyEnvironmentIntensity()
+  if (!modelGroup) return
+  modelGroup.traverse((child) => {
+    if (!child.isMesh) return
+    const updateMaterial = (mat) => {
+      if (!mat || typeof mat.envMapIntensity !== 'number') return
+      mat.envMapIntensity = envMapIntensity
+    }
+    if (Array.isArray(child.material)) child.material.forEach(updateMaterial)
+    else updateMaterial(child.material)
   })
   requestRender()
 }
@@ -919,6 +957,37 @@ const setSceneBackground = () => {
   }
 }
 
+const disposeSceneEnvironment = () => {
+  if (scene) scene.environment = null
+  if (scene && typeof scene.environmentIntensity === 'number') {
+    scene.environmentIntensity = 1
+  }
+  if (environmentTarget) {
+    environmentTarget.dispose()
+    environmentTarget = null
+  }
+  if (pmremGenerator) {
+    pmremGenerator.dispose()
+    pmremGenerator = null
+  }
+}
+
+const createSceneEnvironment = () => {
+  if (!scene || !renderer) return
+  if (!pmremGenerator) {
+    pmremGenerator = new THREE.PMREMGenerator(renderer)
+  }
+  if (environmentTarget) {
+    environmentTarget.dispose()
+    environmentTarget = null
+  }
+  const environmentScene = new RoomEnvironment()
+  environmentTarget = pmremGenerator.fromScene(environmentScene, 0.1)
+  scene.environment = environmentTarget.texture
+  applyEnvironmentIntensity()
+  environmentScene?.dispose?.()
+}
+
 const createSceneLights = () => {
   if (!scene) return
   if (lightingGroup) {
@@ -938,8 +1007,8 @@ const createSceneLights = () => {
     lightingGroup.add(light)
     return light
   }
-  createDirectional(0xffffff, 1.1, new THREE.Vector3(6, 11, 7))
-  createDirectional(0xffe3bf, 0.45, new THREE.Vector3(-6, 4, 6))
+  createDirectional(0xffffff, 0.7, new THREE.Vector3(6, 11, 7))
+  createDirectional(0xffe3bf, 0.25, new THREE.Vector3(-6, 4, 6))
   createDirectional(0xffffff, 0.95, new THREE.Vector3(-6, -9, -7))
   scene.add(lightingGroup)
 }
@@ -966,6 +1035,7 @@ const initThree = () => {
   renderer.domElement.style.height = '100%'
   container.value.appendChild(renderer.domElement)
   setSceneBackground()
+  createSceneEnvironment()
   createSceneLights()
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
@@ -995,6 +1065,7 @@ const destroyThree = () => {
   explosionEntries = []
   geometryBox = null
   geometryCenter.set(0, 0, 0)
+  disposeSceneEnvironment()
   renderer?.dispose?.()
   if (lightingGroup && scene) {
     scene.remove(lightingGroup)
@@ -1138,6 +1209,7 @@ watch(
   () => applyLayerColorOverrides()
 )
 watch(() => props.surfaceFinishType, () => applyLayerColorOverrides())
+watch(() => props.envMapIntensity, () => applyEnvMapIntensityOverrides())
 watch(
   () => [
     props.layerVisibility?.copper,

@@ -764,7 +764,7 @@ const schedulePcb3dModelFlush = ({ immediate = false } = {}) => {
 const defaultPcb3dColors = Object.freeze({
   copper: '#cc9933',
   soldermask: '#004200',
-  surfacefinish: '#dabf01',
+  surfacefinish: '#D0D0D6',
   silkscreen: '#ffffff',
   core: '#292900',
 })
@@ -778,13 +778,13 @@ const defaultPcb3dVisibility = Object.freeze({
 })
 const pcb3dVisibility = reactive({ ...defaultPcb3dVisibility })
 const surfaceFinishOptions = Object.freeze([
-  { value: 'enig', label: '沉金', color: '#dabf01' },
   { value: 'leadfree-hasl', label: '无铅喷锡', color: '#D0D0D6' },
-  { value: 'osp', label: 'OSP', color: '#ddb4c1' },
+  { value: 'enig', label: '沉金', color: '#dabf01' },
+  { value: 'osp', label: 'OSP', color: '#B37589' },
   { value: 'immersion-tin', label: '沉锡', color: '#C0C2C4' },
   { value: 'immersion-silver', label: '沉银', color: '#D8D8D8' },
 ])
-const surfaceFinishType = ref('enig')
+const surfaceFinishType = ref('leadfree-hasl')
 watch(
   surfaceFinishType,
   (next, prev) => {
@@ -1414,7 +1414,7 @@ const togglePcb3dLayerVisibility = (key) => {
   pcb3dVisibility[key] = next
 }
 const resetPcb3dDisplaySettings = () => {
-  surfaceFinishType.value = 'enig'
+  surfaceFinishType.value = 'leadfree-hasl'
   Object.entries(defaultPcb3dColors).forEach(([key, value]) => {
     pcb3dColors[key] = value
   })
@@ -1617,7 +1617,7 @@ const editableLayers = reactive([])
 const defaultLayerColors = {
   copper: '#f2c55b',
   soldermask: '#1c7a2a',
-  surfacefinish: '#dabf01',
+  surfacefinish: '#D0D0D6',
   silkscreen: '#ffffff',
   drill: '#333333',
   outline: '#bfa782',

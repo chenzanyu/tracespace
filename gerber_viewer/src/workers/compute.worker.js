@@ -399,11 +399,14 @@ const handleComputeProjectSummary = (payload) => {
     const size = plotSizesById[layer.id]
     plotTreesById[layer.id] = { size: Array.isArray(size) ? size : null }
   }
-  if (outlineLayerId) {
-    const outlineState = layerStateById.get(outlineLayerId)
-    if (outlineState?.plotTree) {
-      plotTreesById[outlineLayerId] = outlineState.plotTree
-    }
+  const wantsFullTree = (type) => {
+    const normalized = normalizeType(type)
+    return normalized === 'outline' || normalized === 'copper' || normalized === 'soldermask'
+  }
+  for (const layer of layers) {
+    if (!wantsFullTree(layer?.type)) continue
+    const state = layerStateById.get(layer.id)
+    if (state?.plotTree) plotTreesById[layer.id] = state.plotTree
   }
 
   const maxGapUnits = Number(payload?.maxGapUnits) || 0.02

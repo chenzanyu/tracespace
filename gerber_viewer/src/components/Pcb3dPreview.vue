@@ -988,7 +988,7 @@ const createSceneEnvironment = () => {
     environmentTarget = null
   }
   const environmentScene = new RoomEnvironment()
-  environmentTarget = pmremGenerator.fromScene(environmentScene, 0.1)
+  environmentTarget = pmremGenerator.fromScene(environmentScene, 0.04)
   scene.environment = environmentTarget.texture
   applyEnvironmentIntensity()
   environmentScene?.dispose?.()

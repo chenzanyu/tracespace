@@ -299,6 +299,7 @@ export function plotBoardShape(
 
   const finalSize = derivedRegionBounds ?? BoundingBox.fromGraphics(mergedRegions) ?? size
 
+  const derivedBoundsArea = boundingBoxArea(derivedRegionBounds)
   if (
     (!mergedPolygonArea || mergedPolygonArea <= 0) &&
     derivedBoundsArea > 0
@@ -982,6 +983,47 @@ const reconstructStrokeBoardPolygons = (
     return null
   }
 }
+
+const CLIPPER_SNAP_PRECISION = 1e7
+
+const snapClipperValue = (value: number): number => {
+  const number = Number(value) || 0
+  return Math.round(number * CLIPPER_SNAP_PRECISION) / CLIPPER_SNAP_PRECISION
+}
+
+const snapClipperPoint = (point: [number, number]): [number, number] => [
+  snapClipperValue(point[0]),
+  snapClipperValue(point[1]),
+]
+
+const pointsEqual = (a: [number, number], b: [number, number]): boolean =>
+  a[0] === b[0] && a[1] === b[1]
+
+const sanitizeRingForPolygonClipping = (
+  ring?: [number, number][]
+): [number, number][] | null => {
+  if (!Array.isArray(ring) || ring.length < 3) return null
+  const deduped: [number, number][] = []
+  for (const raw of ring) {
+    const snapped = snapClipperPoint([Number(raw?.[0]) || 0, Number(raw?.[1]) || 0])
+    const prev = deduped[deduped.length - 1]
+    if (!prev || !pointsEqual(prev, snapped)) deduped.push(snapped)
+  }
+  if (deduped.length < 3) return null
+  const first = deduped[0]
+  const last = deduped[deduped.length - 1]
+  if (!pointsEqual(first, last)) deduped.push([...first] as [number, number])
+  if (deduped.length < 4) return null
+  return deduped
+}
+
+const sanitizePolygonForPolygonClipping = (polygon?: Polygon | null): Polygon | null => {
+  if (!Array.isArray(polygon) || polygon.length === 0) return null
+  const rings = polygon
+    .map(ring => sanitizeRingForPolygonClipping(ring as [number, number][]))
+    .filter((ring): ring is [number, number][] => Boolean(ring))
+  return rings.length ? rings : null
+}
 const mergeBoardRegions = (
   regions: ImageRegion[]
 ): {regions: ImageRegion[]; polygons: MultiPolygon | null} => {
@@ -990,6 +1032,7 @@ const mergeBoardRegions = (
   }
   const polygons = regions
     .map(regionToPolygon)
+    .map(sanitizePolygonForPolygonClipping)
     .filter((polygon): polygon is Polygon => Boolean(polygon))
   if (polygons.length === 0) return {regions, polygons: null}
   try {
@@ -1003,7 +1046,11 @@ const mergeBoardRegions = (
     }
   } catch (error) {
     console.warn('[tracespace][board-shape] Failed to merge regions', error)
-    return {regions, polygons: null}
+    const fallbackPolygons = polygons as unknown as MultiPolygon
+    return {
+      regions,
+      polygons: fallbackPolygons.length ? fallbackPolygons : null,
+    }
   }
 }
 

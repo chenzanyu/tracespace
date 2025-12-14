@@ -170,11 +170,14 @@ const buildMeshGroupFromData = (meshData, defaultColor) => {
       const metadata = chunk?.metadata ? {...chunk.metadata} : {}
       if (metadata.planar) {
         material.side = THREE.DoubleSide
-        material.depthWrite = false
         material.depthTest = true
+        const opacity = Number(material.opacity)
+        material.transparent = Number.isFinite(opacity) ? opacity < 0.999 : false
+        material.depthWrite = true
         material.polygonOffset = true
         material.polygonOffsetFactor = metadata.isClear ? -0.5 : -0.2
         material.polygonOffsetUnits = metadata.isClear ? -0.5 : -0.2
+        material.needsUpdate = true
       }
       const mesh = new THREE.Mesh(geometry, material)
       mesh.userData = metadata
@@ -301,12 +304,7 @@ const getLayerRenderOrder = (type, side) => {
 
 const applyMaterialDepthBias = (material, order) => {
   if (!material) return
-  material.polygonOffset = true
-  const factor = -order * 0.02
-  const units = -order * 0.5
-  material.polygonOffsetFactor = factor
-  material.polygonOffsetUnits = units
-  material.needsUpdate = true
+  material.polygonOffset = false
 }
 
 const configureLayerVisuals = (mesh, type, side) => {
@@ -475,6 +473,7 @@ const requestRender = () => {
   if (!renderer || !scene || !camera) return
   if (!running) {
     controls?.update()
+    updateCameraDepthRange()
     renderer.render(scene, camera)
   }
 }
@@ -925,7 +924,14 @@ const updateCameraDepthRange = () => {
   const radius = Math.max(geometryRadius || 0, props.thickness || 0.001, 0.001)
   const target = controls?.target ?? geometryCenter
   const distance = camera.position.distanceTo(target)
-  const margin = radius * 1.05
+  let explodedMargin = 0
+  if (explosionEntries.length && explosionState.progress > 1e-6) {
+    for (const entry of explosionEntries) {
+      const offset = Math.abs(entry?.offset ?? 0) * explosionState.progress
+      if (offset > explodedMargin) explodedMargin = offset
+    }
+  }
+  const margin = (radius + explodedMargin) * 1.1
   const nextNear = Math.max(0.001, distance - margin)
   const nextFar = Math.max(nextNear + 0.01, distance + margin)
   const nearChanged = Math.abs(camera.near - nextNear) > Math.max(1e-4, nextNear * 1e-3)
@@ -1023,7 +1029,7 @@ const initThree = () => {
     alpha: false,
     depth: true,
     stencil: false,
-    logarithmicDepthBuffer: true,
+    logarithmicDepthBuffer: false,
   })
   renderer.outputColorSpace = SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping

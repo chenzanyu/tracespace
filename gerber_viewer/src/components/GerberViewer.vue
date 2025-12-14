@@ -2315,8 +2315,13 @@ const applySettings = async () => {
       const next = normalizeLayerType(change?.next?.type)
       return prev.includes('drill') !== next.includes('drill')
     })
+    const outlineGroupingChanged = changes.some((change) => {
+      const prev = normalizeLayerType(change?.prev?.type)
+      const next = normalizeLayerType(change?.next?.type)
+      return prev.includes('outline') !== next.includes('outline')
+    })
 
-    if (!currentProjectId || drillGroupingChanged) {
+    if (!currentProjectId || drillGroupingChanged || outlineGroupingChanged) {
       disposePcbWorkers()
       await resetComputeProject()
       const pipeline = await runPerfAsync('settings:pipeline', () =>

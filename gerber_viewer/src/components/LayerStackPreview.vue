@@ -8,6 +8,50 @@
     @mouseleave="onCompositeMouseLeave"
   >
     <div
+      v-if="boardSizeOverlayVisible && boardSizeOverlayFrameStyle && boardSizeOverlayMaskStyles"
+      :key="boardSizeOverlayToken"
+      class="board-size-overlay pointer-events-none absolute inset-0 z-20"
+    >
+      <div
+        class="board-size-overlay__mask"
+        :style="boardSizeOverlayMaskStyles.top"
+      />
+      <div
+        class="board-size-overlay__mask"
+        :style="boardSizeOverlayMaskStyles.bottom"
+      />
+      <div
+        class="board-size-overlay__mask"
+        :style="boardSizeOverlayMaskStyles.left"
+      />
+      <div
+        class="board-size-overlay__mask"
+        :style="boardSizeOverlayMaskStyles.right"
+      />
+
+      <div class="board-size-overlay__frame" :style="boardSizeOverlayFrameStyle" />
+
+      <div v-if="boardSizeOverlayHeightLabel && boardSizeOverlayHeightLabelStyle"
+        class="board-size-overlay__dim board-size-overlay__dim--height"
+        :style="boardSizeOverlayHeightLabelStyle"
+      >
+        <div class="board-size-overlay__dim-content board-size-overlay__dim-content--height">
+          <span class="board-size-overlay__dim-label">高</span>
+          <span class="board-size-overlay__dim-value">{{ boardSizeOverlayHeightLabel }}</span>
+        </div>
+      </div>
+      <div v-if="boardSizeOverlayWidthLabel && boardSizeOverlayWidthLabelStyle"
+        class="board-size-overlay__dim board-size-overlay__dim--width"
+        :style="boardSizeOverlayWidthLabelStyle"
+      >
+        <div class="board-size-overlay__dim-content board-size-overlay__dim-content--width">
+          <span class="board-size-overlay__dim-label">长</span>
+          <span class="board-size-overlay__dim-value">{{ boardSizeOverlayWidthLabel }}</span>
+        </div>
+      </div>
+    </div>
+
+    <div
       v-if="measurementOverlayVisible"
       class="pointer-events-none absolute inset-0 z-30"
     >
@@ -101,6 +145,17 @@ const emitLayerPerfSample = (stage, durationMs, meta = {}, memoryStart = null, m
 const compositeContainer = ref(null)
 const viewScale = ref(1)
 const viewTranslate = reactive({ x: 0, y: 0 })
+const containerSize = reactive({ width: 0, height: 0 })
+
+const boardSizeOverlayState = reactive({
+  visible: false,
+  token: 0,
+  viewBox: null,
+  widthMm: null,
+  heightMm: null,
+  source: null,
+})
+let boardSizeOverlayTimer = null
 
 const measurementStart = ref(null)
 const measurementEnd = ref(null)
@@ -110,6 +165,136 @@ const PIXELS_PER_MM = 96 / 25.4
 const measurementOverlayVisible = computed(() => props.active && props.measurementActive)
 const measurementRectFill = 'rgba(63, 211, 255, 0.22)'
 const measurementRectBorder = '#3fd3ff'
+
+const normalizeOverlayViewBox = (value) => {
+  if (!Array.isArray(value) || value.length < 4) return null
+  const [x, y, w, h] = value.map((entry) => Number(entry))
+  if (![x, y, w, h].every((entry) => Number.isFinite(entry))) return null
+  if (w <= 0 || h <= 0) return null
+  return [x, y, w, h]
+}
+
+const showBoardSizeOverlay = (payload) => {
+  const viewBox = normalizeOverlayViewBox(payload?.viewBox)
+  const widthMm = Number(payload?.widthMm)
+  const heightMm = Number(payload?.heightMm)
+  if (!viewBox || !Number.isFinite(widthMm) || !Number.isFinite(heightMm) || widthMm <= 0 || heightMm <= 0) {
+    return
+  }
+  boardSizeOverlayState.viewBox = viewBox
+  boardSizeOverlayState.widthMm = widthMm
+  boardSizeOverlayState.heightMm = heightMm
+  boardSizeOverlayState.source = payload?.source ?? null
+  boardSizeOverlayState.visible = true
+  boardSizeOverlayState.token += 1
+  if (boardSizeOverlayTimer) clearTimeout(boardSizeOverlayTimer)
+  boardSizeOverlayTimer = setTimeout(() => {
+    boardSizeOverlayState.visible = false
+    boardSizeOverlayTimer = null
+  }, 3000)
+}
+
+defineExpose({ showBoardSizeOverlay })
+
+const boardSizeOverlayVisible = computed(() => props.active && boardSizeOverlayState.visible)
+const boardSizeOverlayToken = computed(() => boardSizeOverlayState.token)
+
+const formatDimensionValue = (value) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return null
+  if (numeric >= 100) return numeric.toFixed(1)
+  if (numeric >= 10) return numeric.toFixed(2)
+  return numeric.toFixed(2)
+}
+
+const boardSizeOverlayWidthLabel = computed(() => {
+  if (!boardSizeOverlayVisible.value) return null
+  const formatted = formatDimensionValue(boardSizeOverlayState.widthMm)
+  return formatted ? `${formatted}mm` : null
+})
+
+const boardSizeOverlayHeightLabel = computed(() => {
+  if (!boardSizeOverlayVisible.value) return null
+  const formatted = formatDimensionValue(boardSizeOverlayState.heightMm)
+  return formatted ? `${formatted}mm` : null
+})
+
+const boardSizeOverlayRectPx = computed(() => {
+  if (!boardSizeOverlayVisible.value) return null
+  const highlight = normalizeOverlayViewBox(boardSizeOverlayState.viewBox)
+  if (!highlight) return null
+  const composite = getCompositeViewBox()
+  if (!Array.isArray(composite) || composite.length < 4) return null
+  const unitsToPx = getUnitsToPx()
+  const xUnits = Number(highlight[0]) - Number(composite[0])
+  const yUnits = Number(highlight[1]) - Number(composite[1])
+  const wUnits = Number(highlight[2])
+  const hUnits = Number(highlight[3])
+  if (![xUnits, yUnits, wUnits, hUnits].every((entry) => Number.isFinite(entry))) return null
+  const baseX = xUnits * unitsToPx
+  const baseY = yUnits * unitsToPx
+  const baseW = wUnits * unitsToPx
+  const baseH = hUnits * unitsToPx
+  const scale = Number(viewScale.value)
+  if (!Number.isFinite(scale) || scale <= 0) return null
+  return {
+    left: baseX * scale + viewTranslate.x,
+    top: baseY * scale + viewTranslate.y,
+    width: baseW * scale,
+    height: baseH * scale,
+  }
+})
+
+const boardSizeOverlayFrameStyle = computed(() => {
+  const rect = boardSizeOverlayRectPx.value
+  if (!rect) return null
+  return {
+    left: `${rect.left}px`,
+    top: `${rect.top}px`,
+    width: `${rect.width}px`,
+    height: `${rect.height}px`,
+  }
+})
+
+const boardSizeOverlayMaskStyles = computed(() => {
+  const rect = boardSizeOverlayRectPx.value
+  const w = containerSize.width
+  const h = containerSize.height
+  if (!rect || w <= 0 || h <= 0) return null
+
+  const right = rect.left + rect.width
+  const bottom = rect.top + rect.height
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
+  const cutLeft = clamp(rect.left, 0, w)
+  const cutTop = clamp(rect.top, 0, h)
+  const cutRight = clamp(right, 0, w)
+  const cutBottom = clamp(bottom, 0, h)
+  const cutHeight = Math.max(0, cutBottom - cutTop)
+
+  const toCss = (value) => `${Math.max(0, value)}px`
+  return {
+    top: { left: '0px', top: '0px', width: toCss(w), height: toCss(cutTop) },
+    bottom: { left: '0px', top: toCss(cutBottom), width: toCss(w), height: toCss(h - cutBottom) },
+    left: { left: '0px', top: toCss(cutTop), width: toCss(cutLeft), height: toCss(cutHeight) },
+    right: { left: toCss(cutRight), top: toCss(cutTop), width: toCss(w - cutRight), height: toCss(cutHeight) },
+  }
+})
+
+const boardSizeOverlayHeightLabelStyle = computed(() => {
+  const rect = boardSizeOverlayRectPx.value
+  if (!rect) return null
+  const x = rect.left - 14
+  const y = rect.top + rect.height / 2
+  return { left: `${x}px`, top: `${y}px` }
+})
+
+const boardSizeOverlayWidthLabelStyle = computed(() => {
+  const rect = boardSizeOverlayRectPx.value
+  if (!rect) return null
+  const x = rect.left + rect.width / 2
+  const y = rect.top + rect.height + 14
+  return { left: `${x}px`, top: `${y}px` }
+})
 
 const measurementRect = computed(() => {
   if (!measurementOverlayVisible.value || !measurementStart.value || !measurementEnd.value) return null
@@ -329,11 +514,14 @@ const applyViewTransform = () => {
 }
 
 const resizePixiToHost = () => {
-  const app = pixiApp.value
   const host = compositeContainer.value
-  if (!app || !host) return
+  if (!host) return
   const width = Math.max(host.clientWidth, 1)
   const height = Math.max(host.clientHeight, 1)
+  containerSize.width = width
+  containerSize.height = height
+  const app = pixiApp.value
+  if (!app) return
   if (app.renderer.width !== width || app.renderer.height !== height) {
     app.renderer.resize(width, height)
     requestManualRender()
@@ -933,6 +1121,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (typeof window !== 'undefined') window.removeEventListener('resize', handleResize)
+  if (boardSizeOverlayTimer) clearTimeout(boardSizeOverlayTimer)
+  boardSizeOverlayTimer = null
   if (resizeObserver) {
     resizeObserver.disconnect()
     resizeObserver = null
@@ -940,3 +1130,157 @@ onBeforeUnmount(() => {
   destroyPixi()
 })
 </script>
+
+<style scoped>
+@keyframes boardSizeOverlayLife {
+  0% {
+    opacity: 0;
+    transform: scale(0.992);
+  }
+  10% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  82% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+@keyframes boardSizeFramePulse {
+  0% {
+    opacity: 0;
+    box-shadow: 0 0 0 rgba(34, 211, 238, 0);
+  }
+  14% {
+    opacity: 1;
+    box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.25), 0 0 36px rgba(34, 211, 238, 0.45);
+  }
+  70% {
+    opacity: 1;
+    box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.18), 0 0 28px rgba(34, 211, 238, 0.32);
+  }
+  100% {
+    opacity: 0;
+    box-shadow: 0 0 0 rgba(34, 211, 238, 0);
+  }
+}
+
+@keyframes boardSizeLabelFade {
+  0%,
+  8% {
+    opacity: 0;
+  }
+  18%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes boardSizeSlideLeft {
+  0%,
+  10% {
+    transform: translateX(-10px);
+  }
+  18%,
+  80% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-6px);
+  }
+}
+
+@keyframes boardSizeSlideUp {
+  0%,
+  10% {
+    transform: translateY(10px);
+  }
+  18%,
+  80% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(6px);
+  }
+}
+
+.board-size-overlay {
+  animation: boardSizeOverlayLife 3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: center;
+}
+
+.board-size-overlay__mask {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(2px) saturate(120%);
+}
+
+.board-size-overlay__frame {
+  position: absolute;
+  border: 2px solid rgba(34, 211, 238, 0.92);
+  border-radius: 0.55rem;
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.22), 0 0 30px rgba(34, 211, 238, 0.28);
+  animation: boardSizeFramePulse 3s ease both;
+}
+
+.board-size-overlay__dim {
+  position: absolute;
+  animation: boardSizeLabelFade 3s ease both;
+}
+
+.board-size-overlay__dim--height {
+  transform: translate(-100%, -50%);
+}
+
+.board-size-overlay__dim--width {
+  transform: translate(-50%, 0%);
+}
+
+.board-size-overlay__dim-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.32rem 0.62rem;
+  border-radius: 999px;
+  background: rgba(4, 17, 31, 0.92);
+  border: 1px solid rgba(34, 211, 238, 0.45);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(34, 211, 238, 0.14);
+  color: rgba(236, 254, 255, 0.95);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.55);
+}
+
+.board-size-overlay__dim-content--height {
+  animation: boardSizeSlideLeft 3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.board-size-overlay__dim-content--width {
+  animation: boardSizeSlideUp 3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.board-size-overlay__dim-label {
+  color: rgba(34, 211, 238, 0.95);
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.board-size-overlay__dim-value {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+</style>

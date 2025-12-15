@@ -233,7 +233,7 @@
         </div>
 
         <!-- 层叠视图 -->
-        <LayerStackPreview v-show="activeView === 'layers'" :ordered-layers="orderedLayers" :fm-result="fmRef"
+        <LayerStackPreview ref="layerStackPreviewRef" v-show="activeView === 'layers'" :ordered-layers="orderedLayers" :fm-result="fmRef"
           :board-view-box="boardViewBox" :board-width-mm="boardWidthMm" :board-height-mm="boardHeightMm"
           :measurement-active="measurementActive" :recenter-signal="recenterSignal" :active="activeView === 'layers'"
           @exit-measurement="measurementActive = false" @loading-change="handleLayerPreviewLoading"
@@ -349,6 +349,16 @@
                       type="button"
                       :disabled="!copperLayerOptions.length"
                       @click.stop="openCopperLayerModal"
+                    >
+                      <span class="pi pi-search text-[11px]"></span>
+                      查看
+                    </button>
+                    <button
+                      v-if="row.key === 'boardSize'"
+                      class="analysis-panel-row__view-button"
+                      type="button"
+                      :disabled="!canViewBoardSizeOverlay"
+                      @click.stop="showBoardSizeOverlay"
                     >
                       <span class="pi pi-search text-[11px]"></span>
                       查看
@@ -758,6 +768,7 @@ const boardOutlineDescriptor = ref(null)
 const boardViewBox = ref([0, 0, 0, 0])
 const boardWidthMm = ref(0)
 const boardHeightMm = ref(0)
+const layerStackPreviewRef = ref(null)
 const pcb3dRef = ref(null)
 const defaultBoardThicknessMm = 1.6
 const unitMmPerUnit = ref(1)
@@ -1100,6 +1111,79 @@ const formatBoardSizeValue = (size) => {
   const height = formatDimensionValue(size.heightMm)
   if (!width || !height) return '待解析'
   return `${width}mm × ${height}mm`
+}
+
+const normalizeBounds = (value) => {
+  if (!Array.isArray(value) || value.length < 4) return null
+  const [x1, y1, x2, y2] = value.map((entry) => Number(entry))
+  if (![x1, y1, x2, y2].every((entry) => Number.isFinite(entry))) return null
+  const minX = Math.min(x1, x2)
+  const minY = Math.min(y1, y2)
+  const maxX = Math.max(x1, x2)
+  const maxY = Math.max(y1, y2)
+  if (maxX <= minX || maxY <= minY) return null
+  return [minX, minY, maxX, maxY]
+}
+
+const mergeBounds = (current, candidate) => {
+  const next = normalizeBounds(candidate)
+  if (!next) return current
+  if (!current) return next
+  return [
+    Math.min(current[0], next[0]),
+    Math.min(current[1], next[1]),
+    Math.max(current[2], next[2]),
+    Math.max(current[3], next[3]),
+  ]
+}
+
+const boundsToViewBox = (bounds) => {
+  const normalized = normalizeBounds(bounds)
+  if (!normalized) return null
+  const [minX, , maxX, maxY] = normalized
+  return [minX, -maxY, maxX - minX, normalized[3] - normalized[1]]
+}
+
+const collectOutlineBounds = (fm) => {
+  const layers = fm?.plotResult?.layers ?? []
+  const plotTrees = fm?.plotResult?.plotTreesById ?? {}
+  let bounds = null
+  for (const layer of layers) {
+    if (String(layer?.type || '').toLowerCase() !== 'outline') continue
+    bounds = mergeBounds(bounds, plotTrees?.[layer.id]?.size)
+  }
+  return bounds
+}
+
+const resolveBoardSizeOverlayPayload = computed(() => {
+  const fm = fmRef.value
+  if (!fm) return null
+  const outlineBounds = collectOutlineBounds(fm)
+  const resolvedBounds =
+    outlineBounds ?? normalizeBounds(boardOutlineDescriptor.value?.bounds)
+  if (!resolvedBounds) return null
+  const viewBox = boundsToViewBox(resolvedBounds)
+  if (!viewBox) return null
+  const mmScale = Number(unitMmPerUnit.value)
+  const mmPerUnit = Number.isFinite(mmScale) && mmScale > 0 ? mmScale : 1
+  const widthMm = (resolvedBounds[2] - resolvedBounds[0]) * mmPerUnit
+  const heightMm = (resolvedBounds[3] - resolvedBounds[1]) * mmPerUnit
+  if (!Number.isFinite(widthMm) || !Number.isFinite(heightMm) || widthMm <= 0 || heightMm <= 0) return null
+  return {
+    viewBox,
+    widthMm,
+    heightMm,
+    source: outlineBounds ? 'outline' : 'fallback',
+  }
+})
+
+const canViewBoardSizeOverlay = computed(() => Boolean(resolveBoardSizeOverlayPayload.value))
+
+const showBoardSizeOverlay = () => {
+  if (activeView.value !== 'layers') return
+  const payload = resolveBoardSizeOverlayPayload.value
+  if (!payload) return
+  layerStackPreviewRef.value?.showBoardSizeOverlay?.(payload)
 }
 const formatTraceWidthValue = (value) => {
   if (!Number.isFinite(value) || value <= 0) return '待解析'

@@ -8,8 +8,13 @@
     <!-- 预览阶段 -->
     <div v-else class="h-full flex relative">
       <!-- 预览画布 -->
-      <section ref="previewAreaRef"
-        class="flex-1 relative overflow-hidden bg-gradient-to-br from-[#0f1b2d] to-[#050b16]">
+      <section
+        class="flex-1 flex flex-col overflow-hidden bg-gradient-to-br from-[#0f1b2d] to-[#050b16]">
+        <div
+          ref="previewAreaRef"
+          class="flex-1 relative overflow-hidden"
+          :class="activeView === '3d' ? 'bg-[#0f1220]' : ''"
+        >
         <transition name="layer-panel-fade" :css="layerPanelTransitionEnabled">
           <aside v-if="layerPanelVisible"
             class="absolute inset-y-0 left-0 w-80 border-r border-gray-800 bg-gradient-to-b from-gray-900 to-gray-800 flex flex-col z-30 shadow-[0_20px_40px_rgba(0,0,0,0.55)]">
@@ -265,8 +270,8 @@
 
         <!-- 3D 视图 -->
         <Pcb3dPreview ref="pcb3dRef" v-show="activeView === '3d'" :model-data="pcb3dModel" :thickness="boardThicknessUnits"
-          :active="activeView === '3d'" :container-width="previewContainerWidth"
-          :container-height="previewContainerHeight" :display-width="previewSize.width"
+          :active="activeView === '3d'" container-width="100%"
+          container-height="100%" :display-width="previewSize.width"
           :display-height="previewSize.height" :explosion-active="explosionActive"
           :explosion-spacing-multiplier="explosionSpacing" :border-color="pcb3dColors.core"
           :core-color="pcb3dColors.core" :layer-colors="pcb3dColors" :layer-visibility="pcb3dVisibility"
@@ -306,41 +311,54 @@
           </div>
         </div>
 
-        <div class="absolute left-4 bottom-4 z-40 flex flex-col items-start gap-3 pointer-events-auto">
-          <transition name="analysis-panel">
-            <div v-if="analysisPanelOpen" class="analysis-panel text-sm text-gray-100 space-y-4" @click.stop>
-              <div class="flex items-center justify-between gap-3">
-                <div>
-                  <p class="text-base font-semibold tracking-wide">参数解析</p>
-                  <p class="text-[11px] uppercase tracking-[0.3em] text-cyan-300/80">预览</p>
-                </div>
-                <button
-                  class="w-9 h-9 rounded-full border border-white/15 flex items-center justify-center text-white/70 hover:text-white hover:border-white/40 transition"
-                  title="关闭面板" @click.stop="closeAnalysisPanel">
-                  <span class="pi pi-times text-sm"></span>
-                </button>
-              </div>
-              <p class="text-xs text-gray-400 leading-relaxed">
-                当前显示为示例数据，稍后将接入真实的 PCB 解析结果。
-              </p>
+        <div v-if="activeView === 'layers'"
+          class="absolute left-4 bottom-4 z-40 flex flex-col items-start gap-3 pointer-events-auto">
+          <button v-show="!analysisPanelOpen"
+            class="analysis-trigger__button flex items-center gap-2 px-4 py-3 rounded-2xl border border-cyan-400/40 bg-cyan-500/15 text-cyan-100 shadow-[0_12px_35px_rgba(0,0,0,0.45)] hover:bg-cyan-500/30 hover:border-cyan-200/70 transition"
+            :aria-pressed="analysisPanelOpen" title="DFM" @click.stop="toggleAnalysisPanel">
+            <span class="pi pi-sliders-h text-base"></span>
+            <span class="text-xs font-semibold uppercase tracking-[0.3em]">DFM</span>
+          </button>
+        </div>
+        </div>
+
+        <transition name="dfm-drawer" :css="layerPanelTransitionEnabled">
+          <div v-if="analysisPanelOpen && activeView === 'layers'" class="dfm-drawer text-sm text-gray-100" @click.stop>
+            <div class="dfm-drawer__header">
+              <button
+                class="dfm-drawer__collapse text-sm text-gray-100 hover:text-white px-3 py-1.5 rounded-md border border-white/20 bg-white/5 flex items-center gap-2"
+                @click.stop="closeAnalysisPanel">
+                <span class="pi pi-chevron-down text-xs"></span>
+                折叠
+              </button>
+              <button
+                class="analysis-panel__action-button analysis-panel__action-button--compact"
+                @click.stop="handleAnalysisAction">
+                DFM分析
+              </button>
+            </div>
+            <div class="dfm-drawer__body">
               <div class="analysis-panel__rows">
                 <div v-for="row in analysisResults" :key="row.key" class="analysis-panel-row">
                   <span class="analysis-panel-row__label">{{ row.label }}</span>
-                  <span class="analysis-panel-row__value">{{ row.value }}</span>
+                  <div class="analysis-panel-row__value-row">
+                    <span class="analysis-panel-row__value">{{ row.value }}</span>
+                    <button
+                      v-if="row.key === 'layerCount'"
+                      class="analysis-panel-row__view-button"
+                      type="button"
+                      :disabled="!copperLayerOptions.length"
+                      @click.stop="openCopperLayerModal"
+                    >
+                      <span class="pi pi-search text-[11px]"></span>
+                      查看
+                    </button>
+                  </div>
                 </div>
               </div>
-              <button class="analysis-panel__action-button" @click.stop="handleAnalysisAction">
-                参数分析
-              </button>
             </div>
-          </transition>
-          <button
-            class="analysis-trigger__button flex items-center gap-2 px-4 py-3 rounded-2xl border border-cyan-400/40 bg-cyan-500/15 text-cyan-100 shadow-[0_12px_35px_rgba(0,0,0,0.45)] hover:bg-cyan-500/30 hover:border-cyan-200/70 transition"
-            :aria-pressed="analysisPanelOpen" title="参数解析" @click.stop="toggleAnalysisPanel">
-            <span class="pi pi-sliders-h text-base"></span>
-            <span class="text-xs font-semibold uppercase tracking-[0.3em]">参数解析</span>
-          </button>
-        </div>
+          </div>
+        </transition>
       </section>
     </div>
 
@@ -576,6 +594,58 @@
           <p v-else class="text-sm text-center text-gray-400 py-12">
             还没有性能数据。请先上传或重新保存设置以触发 3D 处理。
           </p>
+        </div>
+      </div>
+    </div>
+
+      <div
+        v-if="copperLayerModalOpen && activeView === 'layers'"
+        class="fixed inset-0 z-[80] flex items-center justify-center"
+      >
+        <div class="absolute inset-0 bg-black/60" @click="closeCopperLayerModal"></div>
+        <div
+          class="relative w-[980px] max-w-[96vw] max-h-[85vh] bg-gray-900 text-gray-100 rounded-2xl border border-gray-700 shadow-2xl overflow-hidden flex flex-col"
+        >
+        <div class="px-6 py-3 border-b border-gray-800 flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <div class="text-base font-semibold tracking-wide">
+              铜层预览<template v-if="copperLayerOptions.length">（{{ copperLayerOptions.length }}层）</template>
+            </div>
+            <div class="text-xs text-gray-400 mt-1 truncate">
+              选择铜层以查看对应 Gerber 图形
+            </div>
+          </div>
+          <button
+            class="px-4 py-2 text-sm border border-gray-600 rounded-lg hover:bg-gray-800 transition"
+            @click="closeCopperLayerModal"
+          >
+            关闭
+          </button>
+        </div>
+        <div class="p-4 flex flex-col gap-3 overflow-hidden flex-1">
+          <div v-if="copperLayerOptions.length" class="copper-layer-list">
+            <button v-for="entry in copperLayerOptions" :key="entry.id" type="button" class="copper-layer-pill"
+              :class="entry.id === selectedCopperLayerId ? 'copper-layer-pill--active' : ''"
+              @click="selectedCopperLayerId = entry.id">
+              <div class="copper-layer-pill__line">
+                <span class="copper-layer-pill__label">{{ entry.label }}</span>
+                <span class="copper-layer-pill__filename" :title="entry.filename">{{ entry.filename }}</span>
+              </div>
+            </button>
+          </div>
+          <div v-else class="text-sm text-gray-400 py-10 text-center">
+            未检测到铜层文件。
+          </div>
+          <div class="flex-1 min-h-[280px] flex items-center justify-center overflow-hidden">
+            <div class="copper-preview-square overflow-hidden">
+              <div class="w-full h-full pointer-events-none">
+                <LayerStackPreview v-if="selectedCopperPreviewLayers.length" :ordered-layers="selectedCopperPreviewLayers"
+                  :fm-result="fmRef" :board-view-box="boardViewBox" :board-width-mm="boardWidthMm"
+                  :board-height-mm="boardHeightMm" :measurement-active="false"
+                  :recenter-signal="copperPreviewRecenterSignal" :active="copperLayerModalOpen" />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -885,6 +955,132 @@ const toggleAnalysisPanel = () => {
 const closeAnalysisPanel = () => {
   analysisPanelOpen.value = false
 }
+
+const copperLayerModalOpen = ref(false)
+const selectedCopperLayerId = ref(null)
+const copperPreviewRecenterSignal = ref(0)
+const normalizeCopperSide = (value) => {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return normalized || 'null'
+}
+const buildCopperLayerOptions = () => {
+  const fmLayers = fmRef.value?.plotResult?.layers ?? []
+  const indexById = new Map(fmLayers.map((layer, index) => [layer.id, index]))
+  const isCopperLayer = (layer) => String(layer?.type || '').toLowerCase() === 'copper'
+  const copperLayers = orderedLayers.filter(isCopperLayer)
+
+  const byIndex = (a, b) => {
+    const aIndex = Number.isFinite(Number(a?.sourceIndex)) ? Number(a.sourceIndex) : (indexById.get(a.id) ?? 0)
+    const bIndex = Number.isFinite(Number(b?.sourceIndex)) ? Number(b.sourceIndex) : (indexById.get(b.id) ?? 0)
+    return aIndex - bIndex
+  }
+  const getInnerIndex = (layer) => {
+    const parsed = Number(layer?.innerCopperIndex)
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+    return extractInnerCopperIndexFromFilename(layer?.filename) ?? Infinity
+  }
+  const byInnerIndex = (a, b) => {
+    const delta = getInnerIndex(a) - getInnerIndex(b)
+    if (delta !== 0) return delta
+    return byIndex(a, b)
+  }
+
+  const topLayers = copperLayers.filter((layer) => normalizeCopperSide(layer.side) === 'top').sort(byIndex)
+  const innerLayers = copperLayers.filter((layer) => normalizeCopperSide(layer.side) === 'inner').sort(byInnerIndex)
+  const bottomLayers = copperLayers.filter((layer) => normalizeCopperSide(layer.side) === 'bottom').sort(byIndex)
+
+  const usedIds = new Set()
+  const options = []
+  topLayers.forEach((layer, index) => {
+    usedIds.add(layer.id)
+    const suffix = topLayers.length > 1 ? ` ${index + 1}` : ''
+    options.push({
+      id: layer.id,
+      label: `Top Copper${suffix}`,
+      filename: layer.filename,
+      layer,
+    })
+  })
+  innerLayers.forEach((layer, index) => {
+    usedIds.add(layer.id)
+    const innerIndex = getInnerIndex(layer)
+    const labelIndex = Number.isFinite(innerIndex) && innerIndex !== Infinity ? innerIndex : index + 1
+    options.push({
+      id: layer.id,
+      label: `Inner${labelIndex} Copper`,
+      filename: layer.filename,
+      layer,
+    })
+  })
+  bottomLayers.forEach((layer, index) => {
+    usedIds.add(layer.id)
+    const suffix = bottomLayers.length > 1 ? ` ${index + 1}` : ''
+    options.push({
+      id: layer.id,
+      label: `Bottom Copper${suffix}`,
+      filename: layer.filename,
+      layer,
+    })
+  })
+
+  const remaining = copperLayers
+    .filter((layer) => !usedIds.has(layer.id))
+    .sort(byIndex)
+  remaining.forEach((layer, index) => {
+    options.push({
+      id: layer.id,
+      label: `Copper ${index + 1}`,
+      filename: layer.filename,
+      layer,
+    })
+  })
+
+  return options
+}
+const copperLayerOptions = computed(() => buildCopperLayerOptions())
+const selectedCopperPreviewLayers = computed(() => {
+  const selected = copperLayerOptions.value.find((entry) => entry.id === selectedCopperLayerId.value)
+  const layer = selected?.layer
+  if (!layer) return []
+  return [
+    {
+      id: layer.id,
+      side: layer.side,
+      type: layer.type,
+      weight: layer.weight,
+      color: layer.color,
+      visible: true,
+      opacity: typeof layer.opacity === 'number' ? layer.opacity : 1,
+      filename: layer.filename,
+    },
+  ]
+})
+const openCopperLayerModal = () => {
+  copperLayerModalOpen.value = true
+  const first = copperLayerOptions.value[0]
+  selectedCopperLayerId.value = first?.id ?? null
+  copperPreviewRecenterSignal.value += 1
+}
+const closeCopperLayerModal = () => {
+  copperLayerModalOpen.value = false
+}
+watch(selectedCopperLayerId, () => {
+  if (!copperLayerModalOpen.value) return
+  copperPreviewRecenterSignal.value += 1
+})
+watch(copperLayerOptions, (next) => {
+  if (!copperLayerModalOpen.value) return
+  const selected = selectedCopperLayerId.value
+  if (selected && next.some((entry) => entry.id === selected)) return
+  selectedCopperLayerId.value = next[0]?.id ?? null
+  copperPreviewRecenterSignal.value += 1
+})
+watch(copperLayerModalOpen, (open) => {
+  if (!open) return
+  const first = copperLayerOptions.value[0]
+  selectedCopperLayerId.value = first?.id ?? null
+  copperPreviewRecenterSignal.value += 1
+})
 const analysisPending = ref(false)
 const analysisError = ref(null)
 let analysisJobSeq = 0
@@ -986,8 +1182,6 @@ const handleAnalysisAction = () => {
 }
 const previewAreaRef = ref(null)
 const previewSize = reactive({ width: 0, height: 0 })
-const previewContainerWidth = computed(() => (previewSize.width > 0 ? `${previewSize.width}px` : '100%'))
-const previewContainerHeight = computed(() => (previewSize.height > 0 ? `${previewSize.height}px` : '100%'))
 let previewResizeObserver = null
 const workerDebugLog = reactive({
   jobs: [],
@@ -1431,7 +1625,6 @@ const resetPcb3dDisplaySettings = () => {
 const handleGlobalClick = () => {
   downloadMenuOpen.value = false
   displayMenuOpen.value = false
-  closeAnalysisPanel()
 }
 const recordWorkerJobStart = (jobId, payload) => {
   workerDebugLog.jobs.push({
@@ -2234,10 +2427,30 @@ const handleUploadFile = async (file) => {
 }
 
 // 工具
+const extractInnerCopperIndexFromFilename = (filename) => {
+  const raw = String(filename || '')
+  const base = raw.split(/[\\/]/).pop() || raw
+  const match = base.match(/\.g(\d+)$/i)
+  if (!match) return null
+  const parsed = Number(match[1])
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+const isInnerCopperLayer = (layer) => {
+  const type = normalizeLayerType(layer?.type)
+  const side = typeof layer?.side === 'string' ? layer.side.toLowerCase() : ''
+  return type === 'copper' && side === 'inner'
+}
+
 const displayLayerName = (layer) => {
   if (layer?.type === 'outline') return 'outline'
   if (layer?.type === 'drill' && (!layer?.side || layer.side === 'all')) return 'drill'
   if ((!layer?.side || layer.side === undefined || layer.side === null) && layer?.type === 'drawing') return 'unknown layer'
+  if (isInnerCopperLayer(layer)) {
+    const index = Number.isFinite(Number(layer?.innerCopperIndex))
+      ? Number(layer.innerCopperIndex)
+      : extractInnerCopperIndexFromFilename(layer?.filename)
+    return index ? `inner${index} copper` : 'inner copper'
+  }
   const s = layer.side || 'n/a'
   const t = layer.type || 'unknown'
   return `${s} ${t}`
@@ -2297,23 +2510,40 @@ const applyModernResult = (fm, { preserveVisuals = false } = {}) => {
     : null
   orderedLayers.splice(0)
   const fmLayers = fm.plotResult?.layers ?? []
-  for (const layer of fmLayers) {
+  for (let index = 0; index < fmLayers.length; index += 1) {
+    const layer = fmLayers[index]
     const retained = keep?.get(layer.filename)
     const color = retained?.color ?? randomHexColor()
     const visible = retained?.visible ?? true
     const opacity = typeof retained?.opacity === 'number' ? retained.opacity : 1
+    const innerCopperIndex = isInnerCopperLayer(layer)
+      ? extractInnerCopperIndexFromFilename(layer.filename)
+      : null
     orderedLayers.push({
       id: layer.id,
       side: layer.side,
       type: layer.type,
       weight: orderLayerWeight(layer.side, layer.type),
+      sourceIndex: index,
+      innerCopperIndex,
       color,
       visible,
       opacity,
       filename: layer.filename,
     })
   }
-  orderedLayers.sort((a, b) => a.weight - b.weight)
+  orderedLayers.sort((a, b) => {
+    const weightDelta = a.weight - b.weight
+    if (weightDelta !== 0) return weightDelta
+    if (isInnerCopperLayer(a) && isInnerCopperLayer(b)) {
+      const aIdx = Number.isFinite(Number(a.innerCopperIndex)) ? Number(a.innerCopperIndex) : Infinity
+      const bIdx = Number.isFinite(Number(b.innerCopperIndex)) ? Number(b.innerCopperIndex) : Infinity
+      if (aIdx !== bIdx) return aIdx - bIdx
+    }
+    const aSource = Number.isFinite(Number(a.sourceIndex)) ? Number(a.sourceIndex) : 0
+    const bSource = Number.isFinite(Number(b.sourceIndex)) ? Number(b.sourceIndex) : 0
+    return aSource - bSource
+  })
   runAnalysis()
 }
 
@@ -2590,6 +2820,7 @@ watch(
 watch(currentStatusIndex, (value) => {
   if (value === 0) {
     closeAnalysisPanel()
+    closeCopperLayerModal()
     resetAnalysisResults()
     boardOutlineDescriptor.value = null
     analysisError.value = null
@@ -2599,6 +2830,8 @@ watch(currentStatusIndex, (value) => {
 
 watch(activeView, (value) => {
   if (value === '3d') {
+    closeAnalysisPanel()
+    closeCopperLayerModal()
     if (pcb3dModelDirty) schedulePcb3dModelFlush({ immediate: true })
     return
   }
@@ -2871,75 +3104,281 @@ onBeforeUnmount(() => {
   }
 }
 
-.analysis-panel {
-  width: min(340px, 90vw);
-  padding: 1.4rem 1.6rem 1.25rem;
-  border-radius: 1.25rem;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: linear-gradient(155deg, rgba(3, 9, 22, 0.98), rgba(8, 20, 40, 0.94));
+.dfm-drawer {
+  --dfm-drawer-max-height: min(280px, 30vh);
+  width: 100%;
+  max-height: var(--dfm-drawer-max-height);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(155deg, rgba(3, 9, 22, 0.92), rgba(8, 20, 40, 0.84));
   box-shadow:
-    0 18px 45px rgba(0, 0, 0, 0.7),
+    0 -18px 45px rgba(0, 0, 0, 0.7),
     0 0 25px rgba(45, 196, 255, 0.15);
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px) saturate(140%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dfm-drawer__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 1rem 0.6rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.dfm-drawer__collapse {
+  justify-self: start;
+  white-space: nowrap;
+}
+
+.dfm-drawer__body {
+  flex: 1;
+  overflow: auto;
+  padding: 0.85rem 1rem 1rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(34, 211, 238, 0.35) rgba(255, 255, 255, 0.05);
+}
+
+.dfm-drawer__body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.dfm-drawer__body::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 999px;
+}
+
+.dfm-drawer__body::-webkit-scrollbar-thumb {
+  background: rgba(34, 211, 238, 0.28);
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.04);
+}
+
+.dfm-drawer__body::-webkit-scrollbar-thumb:hover {
+  background: rgba(34, 211, 238, 0.4);
 }
 
 .analysis-panel__rows {
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  padding: 0.35rem 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0;
+  overflow: hidden;
+}
+
+@media (min-width: 520px) {
+  .analysis-panel__rows {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 780px) {
+  .analysis-panel__rows {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1080px) {
+  .analysis-panel__rows {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 
 .analysis-panel-row {
+  background: rgba(3, 9, 22, 0.62);
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.45rem 0;
-  font-size: 0.92rem;
-}
-
-.analysis-panel-row + .analysis-panel-row {
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.25rem;
+  padding: 0.6rem 0.85rem;
+  min-height: 2.85rem;
 }
 
 .analysis-panel-row__label {
-  color: rgba(255, 255, 255, 0.68);
-  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 0.78rem;
+  line-height: 1.15;
 }
 
 .analysis-panel-row__value {
   color: #e8fbff;
   font-weight: 600;
   font-size: 0.95rem;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-panel-row__value-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.analysis-panel-row__value-row .analysis-panel-row__value {
+  flex: 1;
+  min-width: 0;
+}
+
+.analysis-panel-row__view-button {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.22rem 0.55rem;
+  border-radius: 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(236, 254, 255, 0.9);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+
+.analysis-panel-row__view-button:hover {
+  background: rgba(34, 211, 238, 0.14);
+  border-color: rgba(34, 211, 238, 0.4);
+  transform: translateY(-1px);
+}
+
+.analysis-panel-row__view-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .analysis-panel__action-button {
-  width: 100%;
   border: none;
   border-radius: 0.95rem;
-  padding: 0.75rem;
-  margin-top: 0.35rem;
+  padding: 0.55rem 0.95rem;
   background: linear-gradient(120deg, #22d3ee, #0ea5e9);
   color: #05121f;
-  font-size: 0.9rem;
+  font-size: 0.86rem;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  box-shadow: 0 14px 35px rgba(14, 165, 233, 0.35);
+  letter-spacing: 0.06em;
+  box-shadow: 0 12px 28px rgba(14, 165, 233, 0.28);
   cursor: pointer;
-  transition: filter 0.2s ease;
+  transition: filter 0.2s ease, transform 0.2s ease;
 }
 
 .analysis-panel__action-button:hover {
   filter: brightness(1.08);
+  transform: translateY(-1px);
 }
 
-.analysis-panel-enter-active,
-.analysis-panel-leave-active {
-  transition: opacity 0.22s ease, transform 0.22s ease;
+.analysis-panel__action-button--compact {
+  white-space: nowrap;
+  justify-self: center;
+  width: clamp(170px, 52vw, 380px);
+  padding-inline: 1.8rem;
+  text-align: center;
 }
 
-.analysis-panel-enter-from,
-.analysis-panel-leave-to {
+.copper-layer-pill {
+  text-align: left;
+  padding: 0.45rem 0.7rem;
+  border-radius: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+  width: 100%;
+}
+
+.copper-layer-pill__line {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.copper-layer-pill__label {
+  color: rgba(34, 211, 238, 0.95);
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.copper-layer-pill__filename {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.76rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+.copper-layer-pill:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
+}
+
+.copper-layer-pill--active {
+  background: rgba(34, 211, 238, 0.12);
+  border-color: rgba(34, 211, 238, 0.55);
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.22), 0 18px 40px rgba(0, 0, 0, 0.35);
+}
+
+.copper-layer-list {
+  height: clamp(150px, 24vh, 220px);
+  overflow-y: auto;
+  padding-right: 0.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(34, 211, 238, 0.35) rgba(255, 255, 255, 0.05);
+}
+
+.copper-layer-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.copper-layer-list::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 999px;
+}
+
+.copper-layer-list::-webkit-scrollbar-thumb {
+  background: rgba(34, 211, 238, 0.28);
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.04);
+}
+
+.copper-layer-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(34, 211, 238, 0.4);
+}
+
+.copper-preview-square {
+  width: min(100%, 54vh);
+  aspect-ratio: 1 / 1;
+  border-radius: 0.85rem;
+  border: 2px solid rgba(34, 211, 238, 0.28);
+  background: rgba(0, 0, 0, 0.12);
+  box-shadow:
+    inset 0 0 0 1px rgba(34, 211, 238, 0.18),
+    0 20px 52px rgba(0, 0, 0, 0.45);
+}
+
+.dfm-drawer-enter-active,
+.dfm-drawer-leave-active {
+  transition: max-height 0.26s ease, opacity 0.22s ease, transform 0.26s ease;
+}
+
+.dfm-drawer-enter-from,
+.dfm-drawer-leave-to {
+  max-height: 0;
   opacity: 0;
-  transform: translateY(14px) scale(0.97);
+  transform: translateY(14px);
 }
 </style>

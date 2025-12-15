@@ -848,7 +848,12 @@ const spacingSliderMin = 0
 const spacingSliderMax = 32
 let spacingHideHandle = null
 const spacingDisplayValue = computed(() => spacingSliderValue.value.toFixed(1))
-const canExplode = computed(() => pcb3dModel.layers.length > 0)
+const canExplode = computed(() => {
+  if (explosionActive.value) return true
+  if (pcb3dModel.layers.length === 0) return false
+  if (isPcb3dLoading.value) return false
+  return innerCopperBuildState.pending === 0
+})
 const downloadMenuOpen = ref(false)
 const defaultAnalysisRows = Object.freeze([
   { key: 'layerCount', label: 'PCB层数', defaultValue: '待解析' },
@@ -1682,6 +1687,20 @@ let pcbModelBuildSeq = 0
 let activePcbModelBuildId = 0
 let pendingInnerCopperBuild = null
 const innerCopperLayerCache = new Map()
+const innerCopperBuildState = reactive({
+  buildId: 0,
+  pending: 0,
+  total: 0,
+})
+const resetInnerCopperBuildState = () => {
+  innerCopperBuildState.buildId = 0
+  innerCopperBuildState.pending = 0
+  innerCopperBuildState.total = 0
+}
+const markInnerCopperBuildJobComplete = (buildId) => {
+  if (innerCopperBuildState.buildId !== buildId) return
+  innerCopperBuildState.pending = Math.max(0, innerCopperBuildState.pending - 1)
+}
 
 const assignQueuedWorkerJobs = () => {
   if (!activeComputeProjectId) return
@@ -1825,6 +1844,7 @@ const applyWorkerLayer = (payload, buildId) => {
 const requestSilentInnerCopperBuild = ({ buildId, projectId, layers, plotResult }) => {
   if (!buildId || !projectId || !Array.isArray(layers) || layers.length === 0) {
     pendingInnerCopperBuild = null
+    resetInnerCopperBuildState()
     return
   }
   const eligible = layers.filter((layer) => {
@@ -1833,6 +1853,9 @@ const requestSilentInnerCopperBuild = ({ buildId, projectId, layers, plotResult 
     if (String(layer.side || '').toLowerCase() !== 'inner') return false
     return layerHasRenderableGeometry(layer, plotResult)
   })
+  innerCopperBuildState.buildId = buildId
+  innerCopperBuildState.pending = eligible.length
+  innerCopperBuildState.total = eligible.length
   pendingInnerCopperBuild = {
     buildId,
     projectId,
@@ -1852,16 +1875,21 @@ const startSilentInnerCopperBuildIfIdle = () => {
   if (!snapshot || snapshot.started) return
   if (pcbModelJobs.pending > 0) return
   if (snapshot.buildId !== activePcbModelBuildId) return
-  if (!Array.isArray(snapshot.layers) || snapshot.layers.length === 0) {
+  const existingLayerIds = new Set(pcb3dModel.layers.map((entry) => entry.id))
+  const layersToBuild = Array.isArray(snapshot.layers)
+    ? snapshot.layers.filter((layer) => layer?.id && !existingLayerIds.has(layer.id))
+    : []
+  if (innerCopperBuildState.buildId === snapshot.buildId) {
+    innerCopperBuildState.pending = layersToBuild.length
+    innerCopperBuildState.total = layersToBuild.length
+  }
+  if (layersToBuild.length === 0) {
     pendingInnerCopperBuild.started = true
     return
   }
   pendingInnerCopperBuild.started = true
-  const existingLayerIds = new Set(pcb3dModel.layers.map((entry) => entry.id))
   const simplifyTolerancePayload = buildSimplifyTolerancePayload()
-  for (const layer of snapshot.layers) {
-    if (!layer?.id) continue
-    if (existingLayerIds.has(layer.id)) continue
+  for (const layer of layersToBuild) {
     queueWorkerJob(
       snapshot.projectId,
       {
@@ -1875,13 +1903,15 @@ const startSilentInnerCopperBuildIfIdle = () => {
       { silent: true }
     )
       .then((result) => {
+        if (snapshot.buildId !== activePcbModelBuildId) return
         if (result?.layerId) innerCopperLayerCache.set(result.layerId, result)
-        if (explosionActive.value) {
-          applyWorkerLayer(result, snapshot.buildId)
-        }
+        if (explosionActive.value) applyWorkerLayer(result, snapshot.buildId)
       })
       .catch((error) => {
         console.warn('[GerberViewer] Silent inner copper build failed', error)
+      })
+      .finally(() => {
+        markInnerCopperBuildJobComplete(snapshot.buildId)
       })
   }
 }
@@ -1936,6 +1966,7 @@ const buildPcbModelFromLayers = (layers, boardOutline, plotResult = null, option
     resetPcbModelState()
     innerCopperLayerCache.clear()
     pendingInnerCopperBuild = null
+    resetInnerCopperBuildState()
     pcbModelJobs.total = 0
     pcbModelJobs.pending = 0
     updateWorkerLoading()

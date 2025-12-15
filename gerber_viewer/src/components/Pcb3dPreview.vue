@@ -348,6 +348,7 @@ const explosionLayerSequence = [
   { type: 'silkscreen', side: 'top', order: 3 },
   { type: 'solderpaste', side: 'top', order: 4 },
 ]
+const UNIFORM_EXPLOSION_MAX_ORDER = 4
 
 const createColor = (value, fallback) => {
   try {
@@ -577,9 +578,10 @@ const resolveExplosionStep = () => {
 }
 
 const computeExplosionOffset = (type, side, orderOverride = null) => {
-  const order = Number.isFinite(Number(orderOverride))
-    ? Number(orderOverride)
-    : determineExplosionOrder(type, side)
+  const order =
+    typeof orderOverride === 'number' && Number.isFinite(orderOverride)
+      ? orderOverride
+      : determineExplosionOrder(type, side)
   const step = resolveExplosionStep()
   return order * step
 }
@@ -692,6 +694,38 @@ const placeLayer = (group, mesh, z, thickness, type, side, orderOverride = null)
   mesh.scale.setZ(Math.max(thickness, 0.0001))
   group.add(mesh)
   explosionEntriesForMesh(mesh, type, side, z, orderOverride)
+}
+
+const applyUniformExplosionOrders = () => {
+  if (!explosionEntries.length) return
+  const movable = explosionEntries.filter((entry) => {
+    if (!entry?.mesh) return false
+    if (!entry.type) return false
+    if (entry.type === 'outline' || entry.type === 'drill') return false
+    return true
+  })
+  if (movable.length <= 1) {
+    movable.forEach((entry) => { entry.orderOverride = 0 })
+    return
+  }
+  const ordered = movable.slice().sort((a, b) => {
+    const az = Number(a.baseZ)
+    const bz = Number(b.baseZ)
+    if (Number.isFinite(az) && Number.isFinite(bz) && az !== bz) return az - bz
+    if (Number.isFinite(az) && !Number.isFinite(bz)) return -1
+    if (!Number.isFinite(az) && Number.isFinite(bz)) return 1
+    const ao = determineExplosionOrder(a.type, a.side)
+    const bo = determineExplosionOrder(b.type, b.side)
+    if (ao !== bo) return ao - bo
+    const typeCompare = String(a.type).localeCompare(String(b.type))
+    if (typeCompare !== 0) return typeCompare
+    return String(a.side ?? '').localeCompare(String(b.side ?? ''))
+  })
+  const lastIndex = ordered.length - 1
+  ordered.forEach((entry, index) => {
+    const t = lastIndex > 0 ? index / lastIndex : 0
+    entry.orderOverride = THREE.MathUtils.lerp(-UNIFORM_EXPLOSION_MAX_ORDER, UNIFORM_EXPLOSION_MAX_ORDER, t)
+  })
 }
 
 const limitDrillMeshesIfNeeded = (drillMeshes) => {
@@ -832,6 +866,7 @@ const assembleLayers = (entries) => {
     geometryRadius = Math.max(props.thickness || 0.001, 0.001)
     explosionBaseSpan = laminarDefaults.total
   }
+  applyUniformExplosionOrders()
   refreshExplosionOffsets()
   updateCameraDepthRange()
   smoothRefitToBox()

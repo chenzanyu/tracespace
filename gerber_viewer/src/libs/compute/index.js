@@ -106,10 +106,20 @@ export const buildPipelineFromMemoryLayers = async (layersInput, options = {}) =
     return { id, filename, type: type || undefined, side }
   })
 
+  const layerInfoById = new Map(layers.map((layer) => [layer.id, { ...layer }]))
+  const rawByLayerId = new Map()
+  layers.forEach((layer, index) => {
+    rawByLayerId.set(layer.id, layersInput?.[index])
+  })
+
   currentProject = {
     id: projectId,
     layerIdMap,
     workerIndexByLayerId: new Map(),
+    layerIdsByWorkerIndex: new Map(),
+    layerInfoById,
+    rawByLayerId,
+    groupMeta: null,
   }
 
   await pool.broadcast({ action: 'reset', payload: { projectId }, priority: PRIORITY.pipeline })
@@ -123,6 +133,10 @@ export const buildPipelineFromMemoryLayers = async (layersInput, options = {}) =
     const filename = layer.filename
     const workerIndex = assignWorkerIndex(workerCount, layer.type, filename)
     currentProject.workerIndexByLayerId.set(layer.id, workerIndex)
+    if (!currentProject.layerIdsByWorkerIndex.has(workerIndex)) {
+      currentProject.layerIdsByWorkerIndex.set(workerIndex, new Set())
+    }
+    currentProject.layerIdsByWorkerIndex.get(workerIndex).add(layer.id)
     const { data, transfer } = coerceGerberPayload(raw?.gerber ?? raw?.Gerber)
     parseJobs.push(
       pool.enqueue({
@@ -170,6 +184,7 @@ export const buildPipelineFromMemoryLayers = async (layersInput, options = {}) =
       zeroSuppression: pickFirst(nonDrillHints, 'zeroSuppression'),
     },
   }
+  currentProject.groupMeta = groupMeta
 
   await pool.broadcast({
     action: 'apply-borrowed-meta',
@@ -356,6 +371,106 @@ export const enqueueComputeProjectSummaryJob = async ({
       fileUnits: units,
       maxGapUnits: gapUnits,
       drillLimit: drillLimitValue,
+    },
+  })
+}
+
+const resolveWorkerIndexForEnig = ({ copperLayerIds, soldermaskLayerIds }) => {
+  const indexFor = (layerId) => {
+    const workerIndex = currentProject?.workerIndexByLayerId?.get(layerId)
+    return Number.isFinite(workerIndex) ? workerIndex : 0
+  }
+  const copperIndices = Array.isArray(copperLayerIds) ? copperLayerIds.map(indexFor) : []
+  const maskIndices = Array.isArray(soldermaskLayerIds) ? soldermaskLayerIds.map(indexFor) : []
+  const shared = copperIndices.find((idx) => maskIndices.includes(idx))
+  if (Number.isFinite(shared)) return shared
+  const preferred = copperIndices[0] ?? maskIndices[0]
+  return Number.isFinite(preferred) ? preferred : 0
+}
+
+const ensureLayersAvailableInWorker = async ({ projectId, workerIndex, layerIds }) => {
+  if (!currentProject) throw new Error('compute project not initialized')
+  const pool = getPool()
+  const index = Math.max(0, Math.min(pool.instances.length - 1, workerIndex))
+  if (!currentProject.layerIdsByWorkerIndex.has(index)) {
+    currentProject.layerIdsByWorkerIndex.set(index, new Set())
+  }
+  const available = currentProject.layerIdsByWorkerIndex.get(index)
+  const missing = (Array.isArray(layerIds) ? layerIds : []).filter((layerId) => layerId && !available.has(layerId))
+  if (missing.length === 0) return
+
+  const parseJobs = missing.map((layerId) => {
+    const info = currentProject.layerInfoById.get(layerId)
+    const raw = currentProject.rawByLayerId.get(layerId)
+    if (!info || !raw) {
+      throw new Error(`Missing cached layer data for ${layerId}`)
+    }
+    const { data, transfer } = coerceGerberPayload(raw?.gerber ?? raw?.Gerber)
+    return pool.enqueue({
+      workerIndex: index,
+      action: 'parse-layer',
+      priority: PRIORITY.analysis,
+      transfer,
+      payload: {
+        projectId,
+        layer: {
+          id: info.id,
+          filename: info.filename,
+          type: info.type,
+          side: info.side,
+          gerber: data,
+        },
+      },
+    })
+  })
+
+  await Promise.all(parseJobs)
+
+  if (currentProject.groupMeta) {
+    await pool.enqueue({
+      workerIndex: index,
+      action: 'apply-borrowed-meta',
+      priority: PRIORITY.analysis,
+      payload: { projectId, groupMeta: currentProject.groupMeta },
+    })
+  }
+
+  missing.forEach((layerId) => available.add(layerId))
+}
+
+export const enqueueComputeEnigAreaJob = async ({
+  projectId,
+  side,
+  copperLayerIds,
+  soldermaskLayerIds,
+  mmPerUnit,
+  boardPolygons,
+  options,
+} = {}) => {
+  const pool = getPool()
+  if (!currentProject || currentProject.id !== projectId) {
+    throw new Error('compute project not initialized')
+  }
+  const normalizedSide = String(side || '').toLowerCase()
+  const workerIndex = resolveWorkerIndexForEnig({ copperLayerIds, soldermaskLayerIds })
+  const resolvedWorkerIndex = Math.max(0, Math.min(pool.instances.length - 1, workerIndex))
+  const requiredLayerIds = [
+    ...(Array.isArray(copperLayerIds) ? copperLayerIds : []),
+    ...(Array.isArray(soldermaskLayerIds) ? soldermaskLayerIds : []),
+  ].filter(Boolean)
+  await ensureLayersAvailableInWorker({ projectId, workerIndex: resolvedWorkerIndex, layerIds: requiredLayerIds })
+  return pool.enqueue({
+    workerIndex: resolvedWorkerIndex,
+    action: 'compute-enig-area',
+    priority: PRIORITY.analysis,
+    payload: {
+      projectId,
+      side: normalizedSide,
+      copperLayerIds: Array.isArray(copperLayerIds) ? copperLayerIds : [],
+      soldermaskLayerIds: Array.isArray(soldermaskLayerIds) ? soldermaskLayerIds : [],
+      mmPerUnit,
+      boardPolygons,
+      options,
     },
   })
 }

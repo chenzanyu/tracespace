@@ -12,6 +12,7 @@
     "@primeuix/themes": "^1.2.3",
     "@tailwindcss/vite": "^4.1.12",
     "@tracespace/core": "workspace:*",
+    "@tracespace/pcb-analysis": "workspace:*",
     "@tracespace/parser": "workspace:*",
     "@tracespace/plotter": "workspace:*",
     "axios": "^1.11.0",

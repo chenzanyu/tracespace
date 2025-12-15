@@ -333,10 +333,14 @@
               </button>
               <button
                 class="analysis-panel__action-button analysis-panel__action-button--compact"
+                type="button"
+                :disabled="analysisPending"
                 @click.stop="handleAnalysisAction">
-                DFM分析
+                <span v-if="analysisPending" class="pi pi-spinner pi-spin text-[12px]"></span>
+                {{ analysisPending ? 'DFM分析中...' : 'DFM分析' }}
               </button>
             </div>
+            <div v-if="analysisError" class="analysis-panel__error">{{ analysisError }}</div>
             <div class="dfm-drawer__body">
               <div class="analysis-panel__rows">
                 <div v-for="row in analysisResults" :key="row.key" class="analysis-panel-row">
@@ -679,6 +683,7 @@ import {
   onMounted,
   onBeforeUnmount,
   markRaw,
+  toRaw,
 } from 'vue'
 import axios from 'axios'
 import UploadPanel from './UploadPanel.vue'
@@ -690,6 +695,7 @@ import { buildAnalysisPayload, runAnalysisJob } from '../libs/analyze'
 import {
   buildPipelineFromMemoryLayers,
   broadcastCompute3dGlobals,
+  enqueueComputeEnigAreaJob,
   enqueueComputePcb3dJob,
   enqueueComputeProjectSummaryJob,
   enqueueComputeTraceDataJob,
@@ -1193,6 +1199,208 @@ const formatTraceWidthValue = (value) => {
 const clearTraceMetrics = () => {
   updateAnalysisValue('minTraceWidth', getDefaultAnalysisValue('minTraceWidth'))
 }
+const formatAreaMm2Value = (value) => {
+  if (!Number.isFinite(value) || value < 0) return null
+  if (value >= 10000) return value.toFixed(0)
+  if (value >= 1000) return value.toFixed(1)
+  if (value >= 100) return value.toFixed(2)
+  return value.toFixed(2)
+}
+const formatPercentValue = (value) => {
+  if (!Number.isFinite(value)) return null
+  return value.toFixed(2)
+}
+const clearEnigMetrics = () => {
+  updateAnalysisValue('enigArea', getDefaultAnalysisValue('enigArea'))
+}
+const formatEnigAreaValue = ({ areaMm2, percent } = {}) => {
+  const area = formatAreaMm2Value(areaMm2)
+  const ratio = formatPercentValue(percent)
+  if (!area || !ratio) return getDefaultAnalysisValue('enigArea')
+  return `${area} mm² (${ratio}%)`
+}
+const runEnigAreaAnalysis = async () => {
+  const fm = fmRef.value
+  const projectId = fm?.__compute?.projectId ?? null
+  const boardOutline = toRaw(boardOutlineDescriptor.value)
+  let boardPolygons = boardOutline?.polygons ?? null
+  if (!Array.isArray(boardPolygons) || boardPolygons.length === 0) {
+    const bounds = Array.isArray(boardOutline?.bounds) ? boardOutline.bounds : null
+    if (bounds && bounds.length >= 4) {
+      const [x1, y1, x2, y2] = bounds.map((value) => Number(value))
+      if ([x1, y1, x2, y2].every((value) => Number.isFinite(value))) {
+        const minX = Math.min(x1, x2)
+        const minY = Math.min(y1, y2)
+        const maxX = Math.max(x1, x2)
+        const maxY = Math.max(y1, y2)
+        if (maxX > minX && maxY > minY) {
+          boardPolygons = [
+            [
+              [
+                [minX, minY],
+                [maxX, minY],
+                [maxX, maxY],
+                [minX, maxY],
+                [minX, minY],
+              ],
+            ],
+          ]
+        }
+      }
+    }
+  }
+  if (!projectId || !Array.isArray(boardPolygons) || boardPolygons.length === 0) return null
+
+  const normalizeType = (value) => String(value || '').toLowerCase()
+  const normalizeSide = (value) => String(value || '').toLowerCase()
+  const basename = (value) => {
+    const raw = String(value || '')
+    const parts = raw.split(/[\\/]/)
+    return (parts[parts.length - 1] || raw).toLowerCase()
+  }
+  const hasToken = (name, token) => {
+    if (!name || !token) return false
+    const escaped = String(token).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, 'i').test(String(name))
+  }
+  const inferSideFromFilename = (filename) => {
+    const name = basename(filename)
+    if (!name) return null
+    if (hasToken(name, 'top') || hasToken(name, 'front')) return 'top'
+    if (hasToken(name, 'bot') || hasToken(name, 'bottom') || hasToken(name, 'back')) return 'bottom'
+    if (name.endsWith('.gtl') || name.endsWith('.gts') || name.endsWith('.gto') || name.endsWith('.gtp')) return 'top'
+    if (name.endsWith('.gbl') || name.endsWith('.gbs') || name.endsWith('.gbo') || name.endsWith('.gbp')) return 'bottom'
+    if (hasToken(name, 'f_cu') || hasToken(name, 'f.mask') || hasToken(name, 'f_mask') || hasToken(name, 'f.paste') || hasToken(name, 'f_paste') || hasToken(name, 'f.silks') || hasToken(name, 'f_silks')) return 'top'
+    if (hasToken(name, 'b_cu') || hasToken(name, 'b.mask') || hasToken(name, 'b_mask') || hasToken(name, 'b.paste') || hasToken(name, 'b_paste') || hasToken(name, 'b.silks') || hasToken(name, 'b_silks')) return 'bottom'
+    return null
+  }
+  const inferTypeFromFilename = (filename) => {
+    const name = basename(filename)
+    if (!name) return null
+    if (name.endsWith('.gtl') || name.endsWith('.gbl')) return 'copper'
+    if (name.endsWith('.gts') || name.endsWith('.gbs')) return 'soldermask'
+    if (name.includes('soldermask') || name.includes('solder_mask') || hasToken(name, 'mask')) return 'soldermask'
+    if (name.includes('copper') || hasToken(name, 'cu')) return 'copper'
+    return null
+  }
+  const classifyLayer = (layer) => {
+    const rawType = normalizeType(layer?.type)
+    const inferredType = inferTypeFromFilename(layer?.filename)
+    const rawSide = normalizeSide(layer?.side)
+    const inferredSide = inferSideFromFilename(layer?.filename)
+    return {
+      type: rawType || inferredType || '',
+      side: rawSide || inferredSide || '',
+    }
+  }
+  const isCopperLayer = (type) => {
+    const normalized = String(type || '').toLowerCase()
+    return normalized === 'copper' || normalized.includes('copper')
+  }
+  const isSoldermaskLayer = (type) => {
+    const normalized = String(type || '').toLowerCase()
+    return normalized === 'soldermask' || normalized.includes('soldermask') || normalized === 'mask'
+  }
+  const fmLayers = fm?.plotResult?.layers ?? []
+
+  const copperTopIds = fmLayers
+    .filter((layer) => {
+      const {type, side} = classifyLayer(layer)
+      return isCopperLayer(type) && side === 'top'
+    })
+    .map((layer) => layer.id)
+  const copperBottomIds = fmLayers
+    .filter((layer) => {
+      const {type, side} = classifyLayer(layer)
+      return isCopperLayer(type) && side === 'bottom'
+    })
+    .map((layer) => layer.id)
+  const maskTopIds = fmLayers
+    .filter((layer) => {
+      const {type, side} = classifyLayer(layer)
+      return isSoldermaskLayer(type) && side === 'top'
+    })
+    .map((layer) => layer.id)
+  const maskBottomIds = fmLayers
+    .filter((layer) => {
+      const {type, side} = classifyLayer(layer)
+      return isSoldermaskLayer(type) && side === 'bottom'
+    })
+    .map((layer) => layer.id)
+
+  const canComputeTop = copperTopIds.length > 0 && maskTopIds.length > 0
+  const canComputeBottom = copperBottomIds.length > 0 && maskBottomIds.length > 0
+  if (!canComputeTop && !canComputeBottom) {
+    console.warn('[GerberViewer] ENIG analysis skipped: missing copper/mask layer pairing', {
+      copperTop: copperTopIds.length,
+      copperBottom: copperBottomIds.length,
+      maskTop: maskTopIds.length,
+      maskBottom: maskBottomIds.length,
+      layers: fmLayers.map((layer) => ({
+        id: layer?.id ?? null,
+        filename: layer?.filename ?? null,
+        type: layer?.type ?? null,
+        side: layer?.side ?? null,
+        classified: classifyLayer(layer),
+      })),
+    })
+    return null
+  }
+
+  const mmPerUnit = unitMmPerUnit.value
+
+  const jobForSide = (side) => {
+    if (side === 'top') {
+      if (!copperTopIds.length || !maskTopIds.length) return Promise.resolve(null)
+      return enqueueComputeEnigAreaJob({
+        projectId,
+        side,
+        copperLayerIds: copperTopIds,
+        soldermaskLayerIds: maskTopIds,
+        mmPerUnit,
+        boardPolygons,
+      })
+    }
+    if (!copperBottomIds.length || !maskBottomIds.length) return Promise.resolve(null)
+    return enqueueComputeEnigAreaJob({
+      projectId,
+      side,
+      copperLayerIds: copperBottomIds,
+      soldermaskLayerIds: maskBottomIds,
+      mmPerUnit,
+      boardPolygons,
+    })
+  }
+
+  const [topResult, bottomResult] = await Promise.allSettled([
+    jobForSide('top'),
+    jobForSide('bottom'),
+  ])
+
+  const unwrap = (settled) => {
+    if (!settled) return { value: null, error: null }
+    if (settled.status === 'fulfilled') return { value: settled.value, error: null }
+    const reason = settled.reason
+    const error = reason instanceof Error ? reason : new Error(reason?.message || String(reason || 'ENIG analysis failed'))
+    return { value: null, error }
+  }
+  const topOutcome = unwrap(topResult)
+  const bottomOutcome = unwrap(bottomResult)
+  if (topOutcome.error) console.warn('[GerberViewer] ENIG top analysis failed', topOutcome.error)
+  if (bottomOutcome.error) console.warn('[GerberViewer] ENIG bottom analysis failed', bottomOutcome.error)
+  const top = topOutcome.value
+  const bottom = bottomOutcome.value
+  if (!top && !bottom) {
+    const messageParts = []
+    if (topOutcome.error) messageParts.push(`top: ${topOutcome.error.message}`)
+    if (bottomOutcome.error) messageParts.push(`bottom: ${bottomOutcome.error.message}`)
+    throw new Error(messageParts.length ? `ENIG analysis failed (${messageParts.join('; ')})` : 'ENIG analysis failed')
+  }
+  const boardAreaMm2 = Number(top?.boardAreaMm2 ?? bottom?.boardAreaMm2 ?? 0)
+  const totalAreaMm2 = Number(top?.enigAreaMm2 ?? 0) + Number(bottom?.enigAreaMm2 ?? 0)
+  const percent = boardAreaMm2 > 0 ? (totalAreaMm2 / boardAreaMm2) * 100 : 0
+  return { areaMm2: totalAreaMm2, percent, boardAreaMm2, top, bottom }
+}
 const applyAnalysisResult = (result) => {
   if (!analysisResults.value.length) return
   const layerCount = Number(result?.copperLayerCount)
@@ -1213,11 +1421,16 @@ const runAnalysis = ({ includeTraceMetrics = false } = {}) => {
     analysisPending.value = true
     analysisError.value = null
     clearTraceMetrics()
+    clearEnigMetrics()
   }
   const jobId = ++analysisJobSeq
   return (async () => {
     try {
       let traceDataByLayerId = null
+      let enigPromise = null
+      if (includeTraceMetrics) {
+        enigPromise = runEnigAreaAnalysis()
+      }
       if (includeTraceMetrics) {
         const projectId = fmRef.value?.__compute?.projectId ?? null
         const fmLayers = fmRef.value?.plotResult?.layers ?? []
@@ -1244,15 +1457,43 @@ const runAnalysis = ({ includeTraceMetrics = false } = {}) => {
         if (includeTraceMetrics) clearTraceMetrics()
         return
       }
-      const result = await runAnalysisJob(payload)
+      const analysisPromise = runAnalysisJob(payload)
+      const [result, enigResult] = await Promise.all([
+        analysisPromise,
+        enigPromise
+          ? enigPromise.catch((error) => ({ __error: error }))
+          : Promise.resolve(null),
+      ])
       if (jobId !== analysisJobSeq) return
       applyAnalysisResult(result)
+      if (includeTraceMetrics) {
+        if (enigResult?.__error) {
+          console.error('[GerberViewer] ENIG analysis failed', enigResult.__error)
+          analysisError.value = enigResult.__error?.message || '沉金面积解析失败'
+          clearEnigMetrics()
+        } else if (enigResult) {
+          updateAnalysisValue(
+            'enigArea',
+            formatEnigAreaValue({ areaMm2: enigResult.areaMm2, percent: enigResult.percent })
+          )
+          if (enablePerfLogs && Number(enigResult.areaMm2) === 0) {
+            console.warn('[GerberViewer] ENIG area computed as 0', {
+              boardAreaMm2: enigResult.boardAreaMm2 ?? null,
+              top: enigResult.top ?? null,
+              bottom: enigResult.bottom ?? null,
+            })
+          }
+        } else {
+          clearEnigMetrics()
+        }
+      }
     } catch (error) {
       if (jobId !== analysisJobSeq) return
       if (includeTraceMetrics) {
         analysisError.value = error?.message || '解析失败'
         console.error('[GerberViewer] analysis worker failed', error)
         clearTraceMetrics()
+        clearEnigMetrics()
       }
     } finally {
       if (jobId === analysisJobSeq && includeTraceMetrics) {
@@ -2212,7 +2453,7 @@ const refreshBoardOutlineState = (plotResult) => {
     return null
   }
   const descriptor = resolveBoardOutlineDescriptor(plotResult)
-  boardOutlineDescriptor.value = descriptor
+  boardOutlineDescriptor.value = descriptor ? markRaw(descriptor) : null
   runAnalysis()
   return descriptor
 }
@@ -3338,6 +3579,10 @@ onBeforeUnmount(() => {
 }
 
 .analysis-panel__action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
   border: none;
   border-radius: 0.95rem;
   padding: 0.55rem 0.95rem;
@@ -3356,11 +3601,27 @@ onBeforeUnmount(() => {
   transform: translateY(-1px);
 }
 
+.analysis-panel__action-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  filter: none;
+  transform: none;
+}
+
 .analysis-panel__action-button--compact {
   white-space: nowrap;
   justify-self: center;
   width: clamp(170px, 52vw, 380px);
   padding-inline: 1.8rem;
+  text-align: center;
+}
+
+.analysis-panel__error {
+  padding: 0.25rem 0.2rem 0 0.2rem;
+  font-size: 0.78rem;
+  line-height: 1.2;
+  color: rgba(253, 186, 116, 0.95);
+  letter-spacing: 0.02em;
   text-align: center;
 }
 

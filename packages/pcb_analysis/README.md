@@ -1,39 +1,65 @@
 # @tracespace/pcb-analysis
 
-Utilities that convert tracespace plot trees into [JSTS](https://github.com/bjornharrtell/jsts) geometries so we can perform accurate PCB analytics such as minimum line width, spacing, and copper area measurement.
+PCB analysis utilities powered by GEOS (via WebAssembly, using `geos-wasm`). The primary goal is to run heavier DFM metrics (boolean ops, buffering, area/length calculations) fast enough to be usable in the browser.
 
 ## Current API
 
 ```ts
-import {gerberToImageGeometries, convertImageTree} from '@tracespace/pcb-analysis'
+import {computeEnigAreaForSide} from '@tracespace/pcb-analysis'
 import {parse} from '@tracespace/parser'
 import {plot} from '@tracespace/plotter'
+import {plotBoardShape} from '@tracespace/core'
 
-const gerberContents = '...'
+const topCopperGerber = '...'
+const topMaskGerber = '...'
+const outlineGerber = '...'
 
-// Run the whole tracespace pipeline in one call
-const result = gerberToImageGeometries(gerberContents)
+const topCopperTree = plot(parse(topCopperGerber))
+const topMaskTree = plot(parse(topMaskGerber))
+const outlineTree = plot(parse(outlineGerber))
 
-console.log(result.units) // -> 'mm' | 'in'
-console.log(result.graphics.length) // -> total plotted graphics
-console.log(result.composite.getArea()) // -> copper area in file units^2
+const mmPerUnit = topCopperTree.units === 'in' ? 25.4 : 1
 
-// Or convert an image tree you already have
-const parseTree = parse(gerberContents)
-const imageTree = plot(parseTree)
-const geometryResult = convertImageTree(imageTree)
+const layers = [
+  {id: 'top-cu', filename: 'top-cu.gbr', type: 'copper', side: 'top'},
+  {id: 'top-mask', filename: 'top-mask.gbr', type: 'soldermask', side: 'top'},
+  {id: 'outline', filename: 'outline.gbr', type: 'outline', side: 'all'},
+]
+const plotTreesById = {
+  'top-cu': topCopperTree,
+  'top-mask': topMaskTree,
+  outline: outlineTree,
+}
+
+const boardShape = plotBoardShape(layers, plotTreesById, mmPerUnit === 25.4 ? 0.02 : 0.5)
+const boardPolygons = boardShape.polygons ?? []
+
+const result = await computeEnigAreaForSide({
+  mmPerUnit,
+  boardPolygons,
+  copperTrees: [topCopperTree],
+  soldermaskTrees: [topMaskTree],
+})
+
+console.log(result.enigAreaMm2, result.enigAreaPercent)
 ```
 
-Each `GeometryGraphicEntry` in `result.graphics` links the generated `Geometry` object back to the original tracespace graphic node, allowing future minimum width / spacing routines to associate measurements with their source aperture.
+**Definitions**
+
+- `沉金面积 (ENIG area)` = `(Copper ∩ soldermask openings)` per side, summed top+bottom in the consumer.
+- `沉金面积百分比` = `(总沉金面积 / 板框总面积) * 100%`.
 
 ## Options
 
-`convertImageTree` and `gerberToImageGeometries` accept the same optional configuration object:
+`computeEnigAreaForSide` accepts an optional `options` object:
 
 ```ts
 {
-  precisionScale?: number          // defaults to 1_000_000 for sub-micron accuracy
-  strokeQuadrantSegments?: number  // stroke buffer smoothness (default: 8)
-  maxArcSegmentAngle?: number      // radians per interpolated arc segment (default: π / 64)
+  arcToleranceRad?: number
+  pathBufferQuadrantSegments?: number
+  polygonSimplifyGridSize?: number | null
+  soldermaskInterpretation?: 'auto' | 'openings' | 'coverage'
+  soldermaskCoverageThreshold?: number
+  clipToBoard?: boolean
 }
 ```

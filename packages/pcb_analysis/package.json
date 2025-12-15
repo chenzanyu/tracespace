@@ -4,7 +4,7 @@
     "access": "public"
   },
   "version": "5.0.0-alpha.0",
-  "description": "Convert tracespace plot trees into JSTS geometries for PCB analysis.",
+  "description": "PCB analysis utilities powered by GEOS (via WebAssembly).",
   "types": "./lib/index.d.ts",
   "exports": {
     "types": "./lib/index.d.ts",
@@ -42,7 +42,9 @@
   "dependencies": {
     "@tracespace/parser": "workspace:*",
     "@tracespace/plotter": "workspace:*",
-    "jsts": "^2.11.4",
-    "polygon-clipping": "^0.15.7"
+    "geos-wasm": "^3.1.1"
+  },
+  "devDependencies": {
+    "@types/geojson": "^7946.0.16"
   }
 }

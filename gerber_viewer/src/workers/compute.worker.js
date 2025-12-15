@@ -9,6 +9,7 @@ let boardShapeCache = null
 let layerMeshBuilder = null
 let pcbModelBuilder = null
 let traceCollector = null
+let pcbAnalysis = null
 
 const normalizeType = (value) => (typeof value === 'string' ? value.toLowerCase() : '')
 const isDrillType = (value) => normalizeType(value).includes('drill')
@@ -93,6 +94,13 @@ const ensureTraceCollector = async () => {
     traceCollector = await import('../libs/analyze/traceCollector.js')
   }
   return traceCollector
+}
+
+const ensurePcbAnalysis = async () => {
+  if (!pcbAnalysis) {
+    pcbAnalysis = await import('@tracespace/pcb-analysis')
+  }
+  return pcbAnalysis
 }
 
 const buildDrillShapesPayload = ({ layers, drillLimit }) => {
@@ -524,6 +532,59 @@ const handleCollectTraceData = async (payload) => {
   return { traceDataByLayerId: result }
 }
 
+const handleComputeEnigArea = async (payload) => {
+  const copperLayerIds = Array.isArray(payload?.copperLayerIds) ? payload.copperLayerIds : []
+  const soldermaskLayerIds = Array.isArray(payload?.soldermaskLayerIds) ? payload.soldermaskLayerIds : []
+  const mmPerUnit = Number(payload?.mmPerUnit) || 1
+  const boardPolygons =
+    payload?.boardPolygons ?? globals3d.boardOutline?.polygons ?? null
+  if (!Array.isArray(boardPolygons) || boardPolygons.length === 0) {
+    throw new Error('Missing board polygons')
+  }
+  const drillShapes = payload?.drillShapes ?? globals3d.drillShapes ?? null
+  const drillTrees =
+    drillShapes?.format === DRILL_SHAPE_FORMAT_IMAGE_TREES && Array.isArray(drillShapes.imageTrees)
+      ? drillShapes.imageTrees.filter(Boolean)
+      : []
+  const getPlotTree = (layerId) => {
+    const entry = layerStateById.get(layerId)
+    if (!entry) return null
+    if (entry.plotTree) return entry.plotTree
+    if (!entry.parseTree) return null
+    try {
+      const plotTree = plotter.plot(entry.parseTree)
+      entry.plotTree = plotTree
+      entry.plotUnits = plotTree?.units ?? null
+      entry.plotSize = Array.isArray(plotTree?.size) ? plotTree.size : null
+      entry.plotRev = (entry.plotRev || 0) + 1
+      return plotTree
+    } catch (error) {
+      return null
+    }
+  }
+  const copperTrees = copperLayerIds.map(getPlotTree).filter(Boolean)
+  const soldermaskTrees = soldermaskLayerIds.map(getPlotTree).filter(Boolean)
+  if (copperTrees.length === 0) {
+    throw new Error('Missing copper plot trees for ENIG analysis')
+  }
+  if (soldermaskTrees.length === 0) {
+    throw new Error('Missing soldermask plot trees for ENIG analysis')
+  }
+  const { computeEnigAreaForSide } = await ensurePcbAnalysis()
+  const result = await computeEnigAreaForSide({
+    mmPerUnit,
+    boardPolygons,
+    copperTrees,
+    soldermaskTrees,
+    drillTrees,
+    options: payload?.options ?? undefined,
+  })
+  return {
+    side: payload?.side ?? null,
+    ...result,
+  }
+}
+
 const dispatch = async (action, payload) => {
   switch (action) {
     case 'reset':
@@ -544,6 +605,8 @@ const dispatch = async (action, payload) => {
       return handleBuild3dLayer(payload)
     case 'collect-trace-data':
       return handleCollectTraceData(payload)
+    case 'compute-enig-area':
+      return handleComputeEnigArea(payload)
     default:
       throw new Error(`Unsupported action: ${action}`)
   }

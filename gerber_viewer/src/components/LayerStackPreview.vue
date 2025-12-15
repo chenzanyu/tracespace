@@ -1258,7 +1258,7 @@ onBeforeUnmount(() => {
   color: rgba(236, 254, 255, 0.95);
   font-weight: 600;
   letter-spacing: 0.05em;
-  font-size: 0.95rem;
+  font-size: 1.12rem;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   text-shadow: 0 1px 10px rgba(0, 0, 0, 0.55);
@@ -1274,13 +1274,13 @@ onBeforeUnmount(() => {
 
 .board-size-overlay__dim-label {
   color: rgba(34, 211, 238, 0.95);
-  font-size: 0.86rem;
+  font-size: 1rem;
   font-weight: 700;
   letter-spacing: 0.08em;
 }
 
 .board-size-overlay__dim-value {
-  font-size: 1.05rem;
+  font-size: 1.4rem;
   font-weight: 700;
 }
 </style>

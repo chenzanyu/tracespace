@@ -405,10 +405,16 @@ const applyLayerColorOverrides = () => {
 }
 const applyLayerVisibility = () => {
   if (!modelGroup) return
+  const isLayerVisible = (type, side) => {
+    if (type === 'copper' && side === 'inner') {
+      return Boolean(props.explosionActive) && isLayerTypeVisible(type)
+    }
+    return isLayerTypeVisible(type)
+  }
   modelGroup.traverse((child) => {
     const type = child.userData?.layerType
     if (!type) return
-    child.visible = isLayerTypeVisible(type)
+    child.visible = isLayerVisible(type, child.userData?.layerSide)
   })
   requestRender()
 }
@@ -570,8 +576,10 @@ const resolveExplosionStep = () => {
   return normalizedSpan * spacingMultiplier
 }
 
-const computeExplosionOffset = (type, side) => {
-  const order = determineExplosionOrder(type, side)
+const computeExplosionOffset = (type, side, orderOverride = null) => {
+  const order = Number.isFinite(Number(orderOverride))
+    ? Number(orderOverride)
+    : determineExplosionOrder(type, side)
   const step = resolveExplosionStep()
   return order * step
 }
@@ -579,7 +587,7 @@ const computeExplosionOffset = (type, side) => {
 const refreshExplosionOffsets = () => {
   if (!explosionEntries.length) return
   explosionEntries.forEach((entry) => {
-    entry.offset = computeExplosionOffset(entry.type, entry.side)
+    entry.offset = computeExplosionOffset(entry.type, entry.side, entry.orderOverride)
   })
   startLoop()
 }
@@ -602,10 +610,20 @@ const computeLaminate = () => {
   return { total, core, copper, solderMask, surfaceFinish, silkscreen, solderPaste, oil }
 }
 
+const extractInnerCopperIndex = (value) => {
+  const raw = typeof value === 'string' ? value : ''
+  const match =
+    raw.match(/(?:^|[^a-z0-9])in(?:ner)?\s*([0-9]{1,3})/i) ||
+    raw.match(/(?:^|[^a-z0-9])l([0-9]{1,3})/i)
+  const parsed = match ? Number(match[1]) : NaN
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 const classifyLayers = (entries) => {
   const outline = []
   const top = {}
   const bottom = {}
+  const innerCopperEntries = []
   const drills = []
   for (const entry of entries) {
     if (!entry?.mesh) continue
@@ -613,12 +631,14 @@ const classifyLayers = (entries) => {
     mesh.userData.layerId = entry.id
     mesh.userData.layerType = entry.type
     mesh.userData.layerSide = entry.side
+    mesh.userData.layerFilename = entry.filename ?? null
     mesh.traverse((child) => {
       if (!child.isMesh) return
       child.userData = child.userData || {}
       child.userData.layerId = entry.id
       child.userData.layerType = entry.type
       child.userData.layerSide = entry.side
+      child.userData.layerFilename = entry.filename ?? null
     })
     const layerColor = resolveLayerColor(entry.type, entry.color)
     setMeshColor(mesh, layerColor, entry.type)
@@ -627,33 +647,51 @@ const classifyLayers = (entries) => {
       outline.push(mesh)
     } else if (entry.type === 'drill') {
       drills.push(mesh)
+    } else if (entry.side === 'inner' && entry.type === 'copper') {
+      innerCopperEntries.push({
+        mesh,
+        index: extractInnerCopperIndex(entry.filename),
+        filename: entry.filename ?? '',
+        id: entry.id ?? '',
+      })
     } else if (entry.side === 'bottom') {
       bottom[entry.type] = mesh
     } else {
       top[entry.type] = mesh
     }
   }
+  innerCopperEntries.sort((a, b) => {
+    const aIdx = a.index
+    const bIdx = b.index
+    if (Number.isFinite(aIdx) && Number.isFinite(bIdx) && aIdx !== bIdx) return aIdx - bIdx
+    if (Number.isFinite(aIdx) && !Number.isFinite(bIdx)) return -1
+    if (!Number.isFinite(aIdx) && Number.isFinite(bIdx)) return 1
+    if (a.filename !== b.filename) return String(a.filename).localeCompare(String(b.filename))
+    return String(a.id).localeCompare(String(b.id))
+  })
+  const innerCopper = innerCopperEntries.map((entry) => entry.mesh)
   const limitedDrills = limitDrillMeshesIfNeeded(drills)
-  return { outline: outline[0] || null, top, bottom, drills: limitedDrills }
+  return { outline: outline[0] || null, top, bottom, innerCopper, drills: limitedDrills }
 }
 
-const explosionEntriesForMesh = (mesh, type, side, baseZ) => {
-  const offset = computeExplosionOffset(type, side)
+const explosionEntriesForMesh = (mesh, type, side, baseZ, orderOverride = null) => {
+  const offset = computeExplosionOffset(type, side, orderOverride)
   explosionEntries.push({
     mesh,
     baseZ,
     offset,
     type,
     side,
+    orderOverride,
   })
 }
 
-const placeLayer = (group, mesh, z, thickness, type, side) => {
+const placeLayer = (group, mesh, z, thickness, type, side, orderOverride = null) => {
   if (!mesh) return
   mesh.position.setZ(z)
   mesh.scale.setZ(Math.max(thickness, 0.0001))
   group.add(mesh)
-  explosionEntriesForMesh(mesh, type, side, z)
+  explosionEntriesForMesh(mesh, type, side, z, orderOverride)
 }
 
 const limitDrillMeshesIfNeeded = (drillMeshes) => {
@@ -706,6 +744,21 @@ const assembleLayers = (entries) => {
     drill.position.setZ(0)
     modelGroup.add(drill)
     explosionEntriesForMesh(drill, 'drill', null, 0)
+  }
+  const innerCopperMeshes = Array.isArray(classification.innerCopper)
+    ? classification.innerCopper
+    : []
+  if (innerCopperMeshes.length > 0) {
+    const count = innerCopperMeshes.length
+    const spacing = laminate.core / (count + 1)
+    for (let idx = 0; idx < count; idx += 1) {
+      const mesh = innerCopperMeshes[idx]
+      if (!mesh) continue
+      const z = halfCore - spacing * (idx + 1)
+      const normalized = halfCore > 0 ? z / halfCore : 0
+      const explosionOrder = THREE.MathUtils.clamp(normalized * 0.8, -0.9, 0.9)
+      placeLayer(modelGroup, mesh, z, laminate.copper, 'copper', 'inner', explosionOrder)
+    }
   }
   const stack = [
     { key: 'copper', thickness: laminate.copper },
@@ -1235,6 +1288,7 @@ watch(
 )
 watch(() => props.explosionActive, (isActive) => {
   explosionState.target = isActive ? 1 : 0
+  applyLayerVisibility()
   startLoop()
 })
 watch(() => props.explosionSpacingMultiplier, () => {

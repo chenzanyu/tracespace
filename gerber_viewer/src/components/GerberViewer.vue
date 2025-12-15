@@ -828,6 +828,7 @@ watch(
       if (pcb3dModelDirty) {
         schedulePcb3dModelFlush({ immediate: true })
       }
+      startSilentInnerCopperBuildIfIdle()
     }
   }
 )
@@ -1679,6 +1680,8 @@ let pcbWorkerActive = 0
 let activeComputeProjectId = null
 let pcbModelBuildSeq = 0
 let activePcbModelBuildId = 0
+let pendingInnerCopperBuild = null
+const innerCopperLayerCache = new Map()
 
 const assignQueuedWorkerJobs = () => {
   if (!activeComputeProjectId) return
@@ -1738,11 +1741,13 @@ const updateWorkerLoading = () => {
   workerLoading.value = pcbModelJobs.pending > 0
 }
 
-const queueWorkerJob = (projectId, payload) => {
+const queueWorkerJob = (projectId, payload, { silent = false } = {}) => {
   const jobId = ++pcbWorkerSeq
-  pcbModelJobs.pending += 1
-  updateWorkerLoading()
-  recordWorkerJobStart(jobId, payload)
+  if (!silent) {
+    pcbModelJobs.pending += 1
+    updateWorkerLoading()
+    recordWorkerJobStart(jobId, payload)
+  }
   const startTime = performance.now()
   if (enablePerfLogs) {
     console.log('[GerberViewer] queue worker job', {
@@ -1750,14 +1755,17 @@ const queueWorkerJob = (projectId, payload) => {
       layerId: payload.layerId,
       type: payload.type,
       side: payload.side,
+      silent,
     })
   }
   return new Promise((resolve, reject) => {
     pcbWorkerJobs.set(jobId, {
       resolve: (result) => {
-        pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
-        updateWorkerLoading()
-        recordWorkerJobResult(jobId, { success: true, result })
+        if (!silent) {
+          pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
+          updateWorkerLoading()
+          recordWorkerJobResult(jobId, { success: true, result })
+        }
         if (enablePerfLogs) {
           console.log('[GerberViewer] worker job finished', {
             jobId,
@@ -1769,9 +1777,11 @@ const queueWorkerJob = (projectId, payload) => {
         resolve(result)
       },
       reject: (error) => {
-        pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
-        updateWorkerLoading()
-        recordWorkerJobResult(jobId, { success: false, message: error?.message })
+        if (!silent) {
+          pcbModelJobs.pending = Math.max(0, pcbModelJobs.pending - 1)
+          updateWorkerLoading()
+          recordWorkerJobResult(jobId, { success: false, message: error?.message })
+        }
         console.warn('[GerberViewer] worker job failed', {
           jobId,
           layerId: payload.layerId,
@@ -1791,11 +1801,15 @@ const queueWorkerJob = (projectId, payload) => {
 const applyWorkerLayer = (payload, buildId) => {
   if (!payload || componentDestroyed) return
   if (!buildId || buildId !== activePcbModelBuildId) return
+  const fmLayers = fmRef.value?.plotResult?.layers ?? []
+  const fmLayer = fmLayers.find((layer) => layer.id === payload.layerId)
+  const filename = fmLayer?.filename ?? payload.layerId
   const layers = pcb3dModel.layers.filter((entry) => entry.id !== payload.layerId)
   layers.push({
     id: payload.layerId,
     type: payload.type,
     side: payload.side,
+    filename,
     color: payload.color,
     mesh: payload.mesh,
     meshSummary: payload.meshSummary ?? summarizeMeshData(payload.mesh),
@@ -1805,6 +1819,83 @@ const applyWorkerLayer = (payload, buildId) => {
     schedulePcb3dModelFlush()
   } else {
     pcb3dModelDirty = true
+  }
+}
+
+const requestSilentInnerCopperBuild = ({ buildId, projectId, layers, plotResult }) => {
+  if (!buildId || !projectId || !Array.isArray(layers) || layers.length === 0) {
+    pendingInnerCopperBuild = null
+    return
+  }
+  const eligible = layers.filter((layer) => {
+    if (!layer) return false
+    if (normalizeLayerType(layer.type) !== 'copper') return false
+    if (String(layer.side || '').toLowerCase() !== 'inner') return false
+    return layerHasRenderableGeometry(layer, plotResult)
+  })
+  pendingInnerCopperBuild = {
+    buildId,
+    projectId,
+    layers: eligible.map((layer) => ({
+      id: layer.id,
+      type: layer.type,
+      side: layer.side ?? null,
+    })),
+    started: false,
+  }
+  startSilentInnerCopperBuildIfIdle()
+}
+
+const startSilentInnerCopperBuildIfIdle = () => {
+  if (componentDestroyed) return
+  const snapshot = pendingInnerCopperBuild
+  if (!snapshot || snapshot.started) return
+  if (pcbModelJobs.pending > 0) return
+  if (snapshot.buildId !== activePcbModelBuildId) return
+  if (!Array.isArray(snapshot.layers) || snapshot.layers.length === 0) {
+    pendingInnerCopperBuild.started = true
+    return
+  }
+  pendingInnerCopperBuild.started = true
+  const existingLayerIds = new Set(pcb3dModel.layers.map((entry) => entry.id))
+  const simplifyTolerancePayload = buildSimplifyTolerancePayload()
+  for (const layer of snapshot.layers) {
+    if (!layer?.id) continue
+    if (existingLayerIds.has(layer.id)) continue
+    queueWorkerJob(
+      snapshot.projectId,
+      {
+        layerId: layer.id,
+        type: layer.type,
+        side: layer.side,
+        color: getLayerColor(layer.id, layer.type),
+        outline: false,
+        simplifyTolerances: simplifyTolerancePayload,
+      },
+      { silent: true }
+    )
+      .then((result) => {
+        if (result?.layerId) innerCopperLayerCache.set(result.layerId, result)
+        if (explosionActive.value) {
+          applyWorkerLayer(result, snapshot.buildId)
+        }
+      })
+      .catch((error) => {
+        console.warn('[GerberViewer] Silent inner copper build failed', error)
+      })
+  }
+}
+
+const applyCachedInnerCopperLayers = () => {
+  if (componentDestroyed) return
+  if (!explosionActive.value) return
+  if (!innerCopperLayerCache.size) return
+  const buildId = activePcbModelBuildId
+  const existingLayerIds = new Set(pcb3dModel.layers.map((entry) => entry.id))
+  for (const result of innerCopperLayerCache.values()) {
+    if (!result?.layerId) continue
+    if (existingLayerIds.has(result.layerId)) continue
+    applyWorkerLayer(result, buildId)
   }
 }
 
@@ -1843,6 +1934,8 @@ const buildPcbModelFromLayers = (layers, boardOutline, plotResult = null, option
   if (reset) {
     disposePcbWorkers()
     resetPcbModelState()
+    innerCopperLayerCache.clear()
+    pendingInnerCopperBuild = null
     pcbModelJobs.total = 0
     pcbModelJobs.pending = 0
     updateWorkerLoading()
@@ -1936,6 +2029,16 @@ const buildPcbModelFromLayers = (layers, boardOutline, plotResult = null, option
         console.error('[GerberViewer] Synthetic board outline build failed', error)
       })
   }
+
+  if (reset) {
+    requestSilentInnerCopperBuild({
+      buildId,
+      projectId,
+      layers: candidateLayers,
+      plotResult,
+    })
+  }
+
   return true
 }
 
@@ -2483,6 +2586,10 @@ watch(canExplode, (value) => {
 })
 
 watch(explosionActive, (active) => {
+  if (active) {
+    applyCachedInnerCopperLayers()
+    return
+  }
   if (!active) {
     spacingPanelVisible.value = false
     spacingPanelInitialized.value = false

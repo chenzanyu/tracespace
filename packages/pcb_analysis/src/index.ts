@@ -71,6 +71,7 @@ export const getSharedGeos = async (): Promise<GeosModule> => {
             : normalized.startsWith('IllegalArgumentException: Overlay input is mixed-dimension')
               ? 'Overlay input is mixed-dimension'
               : normalized
+        if (key === 'TopologyException' || key === 'Overlay input is mixed-dimension') return
         const perKeyCount = (errorCountsByKey.get(key) ?? 0) + 1
         errorCountsByKey.set(key, perKeyCount)
         if (perKeyCount > 3) return
@@ -474,13 +475,21 @@ const unionFeatureCollection = (
 ): number | null => {
   if (!geometries.length) return null
   const grid = normalizePositiveNumber(gridSize)
-  if (geometries.length === 1) {
-    return normalizePolygonalGeometry(geos, geojsonToGeosGeom(geometries[0] as never, geos as never) || null, grid)
-  }
 
-  const collection = {type: 'GeometryCollection', geometries}
-  const collectionPtr = geojsonToGeosGeom(collection as never, geos as never)
-  if (collectionPtr) {
+  const maxUnaryUnionGeometries = 2000
+  const maxMakeValidUnaryUnionGeometries = 200
+
+  const tryUnaryUnion = (
+    slice: Array<{type: string; coordinates: unknown}>,
+    allowMakeValid: boolean
+  ): number | null => {
+    if (!slice.length) return null
+    if (slice.length === 1) {
+      return normalizePolygonalGeometry(geos, geojsonToGeosGeom(slice[0] as never, geos as never) || null, grid)
+    }
+    const collection = {type: 'GeometryCollection', geometries: slice}
+    const collectionPtr = geojsonToGeosGeom(collection as never, geos as never)
+    if (!collectionPtr) return null
     let unionPtr: number | null = null
     try {
       unionPtr = geos.GEOSUnaryUnion(collectionPtr as never) || null
@@ -494,7 +503,7 @@ const unionFeatureCollection = (
         unionPtr = null
       }
     }
-    if (!unionPtr) {
+    if (!unionPtr && allowMakeValid) {
       const fixedCollection = makeValidOrClone(geos, collectionPtr as unknown as number)
       if (fixedCollection) {
         try {
@@ -513,21 +522,42 @@ const unionFeatureCollection = (
       }
     }
     destroyGeom(geos, collectionPtr)
-    if (unionPtr) return normalizePolygonalGeometry(geos, unionPtr, grid)
+    return unionPtr ? normalizePolygonalGeometry(geos, unionPtr, grid) : null
   }
 
-  let pending = geometries.map(geometry => geojsonToGeosGeom(geometry as never, geos as never) || null).filter(Boolean) as number[]
-  while (pending.length > 1) {
-    const next: number[] = []
-    for (let index = 0; index < pending.length; index += 2) {
-      const a = pending[index] ?? null
-      const b = pending[index + 1] ?? null
-      const merged = unionTwo(geos, a, b, grid)
-      if (merged) next.push(merged)
+  const unionRange = (start: number, end: number): number | null => {
+    const count = end - start
+    if (count <= 0) return null
+    if (count === 1) {
+      let geomPtr = geojsonToGeosGeom(geometries[start] as never, geos as never) || null
+      if (!geomPtr) return null
+      let valid = 1
+      try {
+        valid = geos.GEOSisValid(geomPtr as never)
+      } catch {
+        valid = 1
+      }
+      if (valid === 0) {
+        const fixed = makeValidOrClone(geos, geomPtr)
+        destroyGeom(geos, geomPtr)
+        geomPtr = fixed
+      }
+      return normalizePolygonalGeometry(geos, geomPtr, grid)
     }
-    pending = next
+
+    if (count <= maxUnaryUnionGeometries) {
+      const slice = geometries.slice(start, end)
+      const unary = tryUnaryUnion(slice, count <= maxMakeValidUnaryUnionGeometries)
+      if (unary) return unary
+    }
+
+    const mid = start + Math.floor(count / 2)
+    const left = unionRange(start, mid)
+    const right = unionRange(mid, end)
+    return unionTwo(geos, left, right, grid)
   }
-  return normalizePolygonalGeometry(geos, pending[0] ?? null, grid)
+
+  return unionRange(0, geometries.length)
 }
 
 const unionTwo = (geos: GeosModule, a: number | null, b: number | null, gridSize?: number | null): number | null => {

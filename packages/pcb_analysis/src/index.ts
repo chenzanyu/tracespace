@@ -38,8 +38,6 @@ export interface EnigAreaOptions {
   arcToleranceRad: number
   pathBufferQuadrantSegments: number
   polygonSimplifyGridSize: number | null
-  soldermaskInterpretation: 'auto' | 'openings' | 'coverage'
-  soldermaskCoverageThreshold: number
   clipToBoard: boolean
 }
 
@@ -47,7 +45,6 @@ export interface EnigAreaSideResult {
   enigAreaMm2: number
   boardAreaMm2: number
   enigAreaPercent: number
-  soldermaskInterpretation: 'openings' | 'coverage'
   debug: {
     copperAreaMm2: number
     soldermaskOpenAreaMm2: number
@@ -60,9 +57,38 @@ let sharedGeosPromise: Promise<GeosModule> | null = null
 
 export const getSharedGeos = async (): Promise<GeosModule> => {
   if (!sharedGeosPromise) {
+    const maxErrorLogs = 25
+    let errorLogCount = 0
+    const errorCountsByKey = new Map<string, number>()
+    const maxNoticeLogs = 25
+    let noticeLogCount = 0
     sharedGeosPromise = initGeosJs({
-      errorHandler: message => console.warn('[pcb-analysis][geos] error', message),
-      noticeHandler: message => console.info('[pcb-analysis][geos] notice', message),
+      errorHandler: message => {
+        const normalized = String(message || '')
+        const key =
+          normalized.startsWith('TopologyException:')
+            ? 'TopologyException'
+            : normalized.startsWith('IllegalArgumentException: Overlay input is mixed-dimension')
+              ? 'Overlay input is mixed-dimension'
+              : normalized
+        const perKeyCount = (errorCountsByKey.get(key) ?? 0) + 1
+        errorCountsByKey.set(key, perKeyCount)
+        if (perKeyCount > 3) return
+        errorLogCount += 1
+        if (errorLogCount <= maxErrorLogs) {
+          console.warn('[pcb-analysis][geos] error', message)
+        } else if (errorLogCount === maxErrorLogs + 1) {
+          console.warn('[pcb-analysis][geos] further errors suppressed')
+        }
+      },
+      noticeHandler: message => {
+        noticeLogCount += 1
+        if (noticeLogCount <= maxNoticeLogs) {
+          console.info('[pcb-analysis][geos] notice', message)
+        } else if (noticeLogCount === maxNoticeLogs + 1) {
+          console.info('[pcb-analysis][geos] further notices suppressed')
+        }
+      },
     })
   }
   return sharedGeosPromise
@@ -72,14 +98,17 @@ const DEFAULT_OPTIONS: EnigAreaOptions = Object.freeze({
   arcToleranceRad: Math.PI / 32,
   pathBufferQuadrantSegments: 8,
   polygonSimplifyGridSize: null,
-  soldermaskInterpretation: 'auto',
-  soldermaskCoverageThreshold: 0.6,
   clipToBoard: true,
 })
 
 const clampNumber = (value: unknown, fallback = 0): number => {
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric : fallback
+}
+
+const normalizePositiveNumber = (value: unknown): number | null => {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null
 }
 
 const closeRing = (ring: number[][]): number[][] => {
@@ -376,136 +405,344 @@ const makeValidOrClone = (geos: GeosModule, geomPtr: number | null): number | nu
   return cloneGeom(geos, geomPtr)
 }
 
-const unionFeatureCollection = (
+const GEOS_GEOMETRY_TYPE_POLYGON = 3
+const GEOS_GEOMETRY_TYPE_MULTIPOLYGON = 6
+const GEOS_GEOMETRY_TYPE_GEOMETRY_COLLECTION = 7
+
+const isPolygonalTypeId = (typeId: number): boolean =>
+  typeId === GEOS_GEOMETRY_TYPE_POLYGON || typeId === GEOS_GEOMETRY_TYPE_MULTIPOLYGON
+
+const normalizePolygonalGeometry = (
   geos: GeosModule,
-  geometries: Array<{type: string; coordinates: unknown}>
+  geomPtr: number | null,
+  gridSize?: number | null
 ): number | null => {
-  if (!geometries.length) return null
-  const fc = {
-    type: 'FeatureCollection',
-    features: geometries.map(geometry => ({
-      type: 'Feature',
-      properties: {},
-      geometry,
-    })),
+  if (!geomPtr) return null
+  let typeId = -1
+  try {
+    typeId = geos.GEOSGeomTypeId(geomPtr as never)
+  } catch {
+    return geomPtr
   }
-  const collectionPtr = geojsonToGeosGeom(fc as never, geos as never)
-  if (collectionPtr) {
-    const unionPtr = geos.GEOSUnaryUnion(collectionPtr as never)
-    destroyGeom(geos, collectionPtr)
-    if (unionPtr) return unionPtr || null
+  if (isPolygonalTypeId(typeId)) return geomPtr
+  if (typeId !== GEOS_GEOMETRY_TYPE_GEOMETRY_COLLECTION) {
+    destroyGeom(geos, geomPtr)
+    return null
   }
 
-  let result: number | null = null
-  for (const geometry of geometries) {
-    const geomPtr = geojsonToGeosGeom(geometry as never, geos as never) || null
-    if (!geomPtr) continue
-    // unionTwo consumes inputs
-    result = unionTwo(geos, result, geomPtr)
+  let count = 0
+  try {
+    count = geos.GEOSGetNumGeometries(geomPtr as never)
+  } catch {
+    destroyGeom(geos, geomPtr)
+    return null
   }
-  return result
+  if (!Number.isFinite(count) || count <= 0) {
+    destroyGeom(geos, geomPtr)
+    return null
+  }
+
+  const grid = normalizePositiveNumber(gridSize)
+  let extracted: number | null = null
+  for (let index = 0; index < count; index += 1) {
+    let childPtr = 0
+    try {
+      childPtr = geos.GEOSGetGeometryN(geomPtr as never, index)
+    } catch {
+      childPtr = 0
+    }
+    if (!childPtr) continue
+    let childType = -1
+    try {
+      childType = geos.GEOSGeomTypeId(childPtr as never)
+    } catch {
+      childType = -1
+    }
+    if (!isPolygonalTypeId(childType)) continue
+    const clone = cloneGeom(geos, childPtr)
+    extracted = unionTwo(geos, extracted, clone, grid)
+  }
+
+  destroyGeom(geos, geomPtr)
+  return normalizePolygonalGeometry(geos, extracted, grid)
 }
 
-const unionTwo = (geos: GeosModule, a: number | null, b: number | null): number | null => {
+const unionFeatureCollection = (
+  geos: GeosModule,
+  geometries: Array<{type: string; coordinates: unknown}>,
+  gridSize?: number | null
+): number | null => {
+  if (!geometries.length) return null
+  const grid = normalizePositiveNumber(gridSize)
+  if (geometries.length === 1) {
+    return normalizePolygonalGeometry(geos, geojsonToGeosGeom(geometries[0] as never, geos as never) || null, grid)
+  }
+
+  const collection = {type: 'GeometryCollection', geometries}
+  const collectionPtr = geojsonToGeosGeom(collection as never, geos as never)
+  if (collectionPtr) {
+    let unionPtr: number | null = null
+    try {
+      unionPtr = geos.GEOSUnaryUnion(collectionPtr as never) || null
+    } catch {
+      unionPtr = null
+    }
+    if (!unionPtr && grid) {
+      try {
+        unionPtr = geos.GEOSUnaryUnionPrec(collectionPtr as never, grid) || null
+      } catch {
+        unionPtr = null
+      }
+    }
+    if (!unionPtr) {
+      const fixedCollection = makeValidOrClone(geos, collectionPtr as unknown as number)
+      if (fixedCollection) {
+        try {
+          unionPtr = geos.GEOSUnaryUnion(fixedCollection as never) || null
+        } catch {
+          unionPtr = null
+        }
+        if (!unionPtr && grid) {
+          try {
+            unionPtr = geos.GEOSUnaryUnionPrec(fixedCollection as never, grid) || null
+          } catch {
+            unionPtr = null
+          }
+        }
+        destroyGeom(geos, fixedCollection)
+      }
+    }
+    destroyGeom(geos, collectionPtr)
+    if (unionPtr) return normalizePolygonalGeometry(geos, unionPtr, grid)
+  }
+
+  let pending = geometries.map(geometry => geojsonToGeosGeom(geometry as never, geos as never) || null).filter(Boolean) as number[]
+  while (pending.length > 1) {
+    const next: number[] = []
+    for (let index = 0; index < pending.length; index += 2) {
+      const a = pending[index] ?? null
+      const b = pending[index + 1] ?? null
+      const merged = unionTwo(geos, a, b, grid)
+      if (merged) next.push(merged)
+    }
+    pending = next
+  }
+  return normalizePolygonalGeometry(geos, pending[0] ?? null, grid)
+}
+
+const unionTwo = (geos: GeosModule, a: number | null, b: number | null, gridSize?: number | null): number | null => {
   if (!a && !b) return null
-  if (a && !b) return a
-  if (!a && b) return b
+  if (a && !b) return normalizePolygonalGeometry(geos, a, gridSize)
+  if (!a && b) return normalizePolygonalGeometry(geos, b, gridSize)
+  const grid = normalizePositiveNumber(gridSize)
+
   try {
     const result = geos.GEOSUnion(a as never, b as never) || null
     if (result) {
       destroyGeom(geos, a)
       destroyGeom(geos, b)
-      return result
+      return normalizePolygonalGeometry(geos, result, grid)
     }
   } catch {
-    // fallthrough to make-valid path
+    // try precision overlay next
   }
 
-  const aFixed = makeValidOrClone(geos, a)
-  const bFixed = makeValidOrClone(geos, b)
+  if (grid) {
+    try {
+      const result = geos.GEOSUnionPrec(a as never, b as never, grid) || null
+      if (result) {
+        destroyGeom(geos, a)
+        destroyGeom(geos, b)
+        return normalizePolygonalGeometry(geos, result, grid)
+      }
+    } catch {
+      // fallthrough to make-valid path
+    }
+  }
+
+  let aFixed = makeValidOrClone(geos, a)
+  let bFixed = makeValidOrClone(geos, b)
   destroyGeom(geos, a)
   destroyGeom(geos, b)
+  aFixed = normalizePolygonalGeometry(geos, aFixed, grid)
+  bFixed = normalizePolygonalGeometry(geos, bFixed, grid)
   if (!aFixed && !bFixed) return null
-  if (aFixed && !bFixed) return aFixed
-  if (!aFixed && bFixed) return bFixed
+  if (aFixed && !bFixed) return normalizePolygonalGeometry(geos, aFixed, grid)
+  if (!aFixed && bFixed) return normalizePolygonalGeometry(geos, bFixed, grid)
+
   try {
     const result = geos.GEOSUnion(aFixed as never, bFixed as never) || null
-    destroyGeom(geos, aFixed)
-    destroyGeom(geos, bFixed)
-    return result
+    if (result) {
+      destroyGeom(geos, aFixed)
+      destroyGeom(geos, bFixed)
+      return normalizePolygonalGeometry(geos, result, grid)
+    }
   } catch {
-    destroyGeom(geos, aFixed)
-    destroyGeom(geos, bFixed)
-    return null
+    // try precision overlay next
   }
+
+  if (grid) {
+    try {
+      const result = geos.GEOSUnionPrec(aFixed as never, bFixed as never, grid) || null
+      destroyGeom(geos, aFixed)
+      destroyGeom(geos, bFixed)
+      return normalizePolygonalGeometry(geos, result, grid)
+    } catch {
+      destroyGeom(geos, aFixed)
+      destroyGeom(geos, bFixed)
+      return null
+    }
+  }
+
+  destroyGeom(geos, aFixed)
+  destroyGeom(geos, bFixed)
+  return null
 }
 
-const difference = (geos: GeosModule, subject: number | null, clip: number | null): number | null => {
+const difference = (geos: GeosModule, subject: number | null, clip: number | null, gridSize?: number | null): number | null => {
   if (!subject) {
     destroyGeom(geos, clip)
     return null
   }
-  if (!clip) return subject
+  if (!clip) return normalizePolygonalGeometry(geos, subject, gridSize)
+  const grid = normalizePositiveNumber(gridSize)
+
   try {
-    const result = geos.GEOSDifference(subject as never, clip as never) || null
-    destroyGeom(geos, subject)
-    destroyGeom(geos, clip)
-    return result
-  } catch {
-    const subjectFixed = makeValidOrClone(geos, subject)
-    const clipFixed = makeValidOrClone(geos, clip)
-    destroyGeom(geos, subject)
-    destroyGeom(geos, clip)
-    if (!subjectFixed) {
-      destroyGeom(geos, clipFixed)
-      return null
+    const fallback = geos.GEOSDifference(subject as never, clip as never) || null
+    if (fallback) {
+      destroyGeom(geos, subject)
+      destroyGeom(geos, clip)
+      return normalizePolygonalGeometry(geos, fallback, grid)
     }
-    if (!clipFixed) return subjectFixed
+  } catch {
+    // try precision overlay next
+  }
+
+  if (grid) {
     try {
-      const result = geos.GEOSDifference(subjectFixed as never, clipFixed as never) || null
+      const direct = geos.GEOSDifferencePrec(subject as never, clip as never, grid) || null
+      if (direct) {
+        destroyGeom(geos, subject)
+        destroyGeom(geos, clip)
+        return normalizePolygonalGeometry(geos, direct, grid)
+      }
+    } catch {
+      // fallthrough to make-valid path
+    }
+  }
+
+  let subjectFixed = makeValidOrClone(geos, subject)
+  let clipFixed = makeValidOrClone(geos, clip)
+  destroyGeom(geos, subject)
+  destroyGeom(geos, clip)
+  subjectFixed = normalizePolygonalGeometry(geos, subjectFixed, grid)
+  clipFixed = normalizePolygonalGeometry(geos, clipFixed, grid)
+  if (!subjectFixed) {
+    destroyGeom(geos, clipFixed)
+    return null
+  }
+  if (!clipFixed) return normalizePolygonalGeometry(geos, subjectFixed, grid)
+
+  try {
+    const result = geos.GEOSDifference(subjectFixed as never, clipFixed as never) || null
+    if (result) {
       destroyGeom(geos, subjectFixed)
       destroyGeom(geos, clipFixed)
-      return result
+      return normalizePolygonalGeometry(geos, result, grid)
+    }
+  } catch {
+    // try precision overlay next
+  }
+
+  if (grid) {
+    try {
+      const result = geos.GEOSDifferencePrec(subjectFixed as never, clipFixed as never, grid) || null
+      destroyGeom(geos, subjectFixed)
+      destroyGeom(geos, clipFixed)
+      return normalizePolygonalGeometry(geos, result, grid)
     } catch {
       destroyGeom(geos, subjectFixed)
       destroyGeom(geos, clipFixed)
       return null
     }
   }
+
+  destroyGeom(geos, subjectFixed)
+  destroyGeom(geos, clipFixed)
+  return null
 }
 
-const intersection = (geos: GeosModule, a: number | null, b: number | null): number | null => {
+const intersection = (geos: GeosModule, a: number | null, b: number | null, gridSize?: number | null): number | null => {
   if (!a || !b) {
     destroyGeom(geos, a)
     destroyGeom(geos, b)
     return null
   }
+  const grid = normalizePositiveNumber(gridSize)
+
   try {
-    const result = geos.GEOSIntersection(a as never, b as never) || null
-    destroyGeom(geos, a)
-    destroyGeom(geos, b)
-    return result
-  } catch {
-    const aFixed = makeValidOrClone(geos, a)
-    const bFixed = makeValidOrClone(geos, b)
-    destroyGeom(geos, a)
-    destroyGeom(geos, b)
-    if (!aFixed || !bFixed) {
-      destroyGeom(geos, aFixed)
-      destroyGeom(geos, bFixed)
-      return null
+    const fallback = geos.GEOSIntersection(a as never, b as never) || null
+    if (fallback) {
+      destroyGeom(geos, a)
+      destroyGeom(geos, b)
+      return normalizePolygonalGeometry(geos, fallback, grid)
     }
+  } catch {
+    // try precision overlay next
+  }
+
+  if (grid) {
     try {
-      const result = geos.GEOSIntersection(aFixed as never, bFixed as never) || null
+      const direct = geos.GEOSIntersectionPrec(a as never, b as never, grid) || null
+      if (direct) {
+        destroyGeom(geos, a)
+        destroyGeom(geos, b)
+        return normalizePolygonalGeometry(geos, direct, grid)
+      }
+    } catch {
+      // fallthrough to make-valid path
+    }
+  }
+
+  let aFixed = makeValidOrClone(geos, a)
+  let bFixed = makeValidOrClone(geos, b)
+  destroyGeom(geos, a)
+  destroyGeom(geos, b)
+  aFixed = normalizePolygonalGeometry(geos, aFixed, grid)
+  bFixed = normalizePolygonalGeometry(geos, bFixed, grid)
+  if (!aFixed || !bFixed) {
+    destroyGeom(geos, aFixed)
+    destroyGeom(geos, bFixed)
+    return null
+  }
+
+  try {
+    const result = geos.GEOSIntersection(aFixed as never, bFixed as never) || null
+    if (result) {
       destroyGeom(geos, aFixed)
       destroyGeom(geos, bFixed)
-      return result
+      return normalizePolygonalGeometry(geos, result, grid)
+    }
+  } catch {
+    // try precision overlay next
+  }
+
+  if (grid) {
+    try {
+      const result = geos.GEOSIntersectionPrec(aFixed as never, bFixed as never, grid) || null
+      destroyGeom(geos, aFixed)
+      destroyGeom(geos, bFixed)
+      return normalizePolygonalGeometry(geos, result, grid)
     } catch {
       destroyGeom(geos, aFixed)
       destroyGeom(geos, bFixed)
       return null
     }
   }
+
+  destroyGeom(geos, aFixed)
+  destroyGeom(geos, bFixed)
+  return null
 }
 
 const simplifyIfNeeded = (
@@ -516,9 +753,17 @@ const simplifyIfNeeded = (
   if (!geomPtr) return null
   const grid = Number(gridSize)
   if (!Number.isFinite(grid) || grid <= 0) return geomPtr
-  const simplified = geos.GEOSUnaryUnionPrec(geomPtr as never, grid)
-  destroyGeom(geos, geomPtr)
-  return simplified || null
+  let simplified: number | null = null
+  try {
+    simplified = geos.GEOSUnaryUnionPrec(geomPtr as never, grid) || null
+  } catch {
+    simplified = null
+  }
+  if (simplified) {
+    destroyGeom(geos, geomPtr)
+    return normalizePolygonalGeometry(geos, simplified, grid)
+  }
+  return normalizePolygonalGeometry(geos, geomPtr, grid)
 }
 
 const buildLayerGeometryFromTree = async (
@@ -527,39 +772,26 @@ const buildLayerGeometryFromTree = async (
   options: EnigAreaOptions,
   extra?: {
     preferClearWhenDarkEmpty?: boolean
+    overlayGridSize?: number | null
   }
 ): Promise<number | null> => {
-  const darkPolygons: Array<{type: 'Polygon'; coordinates: number[][][]}> = []
-  const clearPolygons: Array<{type: 'Polygon'; coordinates: number[][][]}> = []
-  const darkLinesByRadius = new Map<number, number[][][]>()
-  const clearLinesByRadius = new Map<number, number[][][]>()
+  type SegmentPolarity = 'dark' | 'clear'
   const preferClearWhenDarkEmpty = extra?.preferClearWhenDarkEmpty === true
+  const overlayGridSize = extra?.overlayGridSize ?? null
 
-  const children = Array.isArray(tree?.children) ? (tree.children as ImageGraphic[]) : []
-  for (const graphic of children) {
-    if (!graphic) continue
-    const isClear = (graphic as unknown as {erase?: boolean}).erase === true || graphic.polarity === CLEAR
-    const {polygons, lineStrings} = graphicToGeoJsonParts(graphic, {arcToleranceRad: options.arcToleranceRad})
-    const polygonTargets = isClear ? clearPolygons : darkPolygons
-    polygons.forEach(polygon => {
-      polygonTargets.push({type: 'Polygon', coordinates: polygon})
-    })
+  let result: number | null = null
+  let sawDarkGeometry = false
+  let clearFallback: number | null = null
 
-    if (graphic.type === IMAGE_PATH) {
-      const width = clampNumber((graphic as unknown as {width?: unknown}).width)
-      const radiusRaw = width / 2
-      const radius = Number.isFinite(radiusRaw) && radiusRaw > 0 ? radiusRaw : 0
-      if (radius > 0 && lineStrings.length) {
-        const map = isClear ? clearLinesByRadius : darkLinesByRadius
-        const existing = map.get(radius) ?? []
-        existing.push(...lineStrings)
-        map.set(radius, existing)
-      }
-    }
-  }
+  let segmentPolarity: SegmentPolarity | null = null
+  let segmentPolygons: Array<{type: string; coordinates: unknown}> = []
+  let segmentLinesByRadius = new Map<number, number[][][]>()
+  let segmentPolygonCount = 0
+  let segmentLineCount = 0
+  const segmentFeatureLimit = 20000
 
   const unionBufferedLines = (byRadius: Map<number, number[][][]>): number | null => {
-    let result: number | null = null
+    let bufferedUnion: number | null = null
     for (const [radius, lines] of byRadius.entries()) {
       if (!lines.length) continue
       const ml = {type: 'MultiLineString', coordinates: lines}
@@ -567,29 +799,97 @@ const buildLayerGeometryFromTree = async (
       if (!linePtr) continue
       const buffered = geos.GEOSBuffer(linePtr as never, radius, options.pathBufferQuadrantSegments)
       destroyGeom(geos, linePtr)
-      result = unionTwo(geos, result, buffered || null)
+      bufferedUnion = unionTwo(geos, bufferedUnion, buffered || null, overlayGridSize)
     }
-    return result
+    return bufferedUnion
   }
 
-  const darkUnion = simplifyIfNeeded(
-    geos,
-    unionTwo(geos, unionFeatureCollection(geos, darkPolygons), unionBufferedLines(darkLinesByRadius)),
-    options.polygonSimplifyGridSize
-  )
-  const clearUnion = simplifyIfNeeded(
-    geos,
-    unionTwo(geos, unionFeatureCollection(geos, clearPolygons), unionBufferedLines(clearLinesByRadius)),
-    options.polygonSimplifyGridSize
-  )
-
-  if (!darkUnion) {
-    if (preferClearWhenDarkEmpty) return clearUnion
-    destroyGeom(geos, clearUnion)
-    return null
+  const buildSegmentGeometry = (): number | null => {
+    if (segmentPolygons.length === 0 && segmentLinesByRadius.size === 0) return null
+    const polygonPtr = unionFeatureCollection(geos, segmentPolygons, overlayGridSize)
+    const linePtr = unionBufferedLines(segmentLinesByRadius)
+    const combined = unionTwo(geos, polygonPtr, linePtr, overlayGridSize)
+    return simplifyIfNeeded(geos, combined, options.polygonSimplifyGridSize)
   }
-  if (!clearUnion) return darkUnion
-  return difference(geos, darkUnion, clearUnion)
+
+  const resetSegment = () => {
+    segmentPolarity = null
+    segmentPolygons = []
+    segmentLinesByRadius = new Map<number, number[][][]>()
+    segmentPolygonCount = 0
+    segmentLineCount = 0
+  }
+
+  const flushSegment = () => {
+    if (!segmentPolarity) return
+    const polarity = segmentPolarity
+    const segmentGeom = buildSegmentGeometry()
+    resetSegment()
+    if (!segmentGeom) return
+
+    if (polarity === 'dark') {
+      sawDarkGeometry = true
+      if (clearFallback) {
+        destroyGeom(geos, clearFallback)
+        clearFallback = null
+      }
+      result = unionTwo(geos, result, segmentGeom, overlayGridSize)
+      return
+    }
+
+    if (preferClearWhenDarkEmpty && !sawDarkGeometry) {
+      const clone = cloneGeom(geos, segmentGeom)
+      clearFallback = unionTwo(geos, clearFallback, clone, overlayGridSize)
+    }
+    result = difference(geos, result, segmentGeom, overlayGridSize)
+  }
+
+  const children = Array.isArray(tree?.children) ? (tree.children as ImageGraphic[]) : []
+  for (const graphic of children) {
+    if (!graphic) continue
+    const isClear =
+      (graphic as unknown as {erase?: boolean}).erase === true || graphic.polarity === CLEAR
+    const nextPolarity: SegmentPolarity = isClear ? 'clear' : 'dark'
+    if (segmentPolarity && nextPolarity !== segmentPolarity) {
+      flushSegment()
+    }
+    if (!segmentPolarity) segmentPolarity = nextPolarity
+
+    const {polygons, lineStrings} = graphicToGeoJsonParts(graphic, {
+      arcToleranceRad: options.arcToleranceRad,
+    })
+    polygons.forEach(polygon => {
+      segmentPolygons.push({type: 'Polygon', coordinates: polygon})
+    })
+    segmentPolygonCount += polygons.length
+
+    if (graphic.type === IMAGE_PATH) {
+      const width = clampNumber((graphic as unknown as {width?: unknown}).width)
+      const radiusRaw = width / 2
+      const radius = Number.isFinite(radiusRaw) && radiusRaw > 0 ? radiusRaw : 0
+      if (radius > 0 && lineStrings.length) {
+        segmentLineCount += lineStrings.length
+        const existing = segmentLinesByRadius.get(radius) ?? []
+        existing.push(...lineStrings)
+        segmentLinesByRadius.set(radius, existing)
+      }
+    }
+
+    if (segmentPolarity && segmentPolygonCount + segmentLineCount >= segmentFeatureLimit) {
+      flushSegment()
+      segmentPolarity = nextPolarity
+    }
+  }
+
+  flushSegment()
+
+  if (preferClearWhenDarkEmpty && !sawDarkGeometry && clearFallback) {
+    destroyGeom(geos, result)
+    return simplifyIfNeeded(geos, clearFallback, options.polygonSimplifyGridSize)
+  }
+
+  destroyGeom(geos, clearFallback)
+  return simplifyIfNeeded(geos, result, options.polygonSimplifyGridSize)
 }
 
 const buildLayerGeometryFromTrees = async (
@@ -598,13 +898,15 @@ const buildLayerGeometryFromTrees = async (
   options: EnigAreaOptions,
   extra?: {
     preferClearWhenDarkEmpty?: boolean
+    overlayGridSize?: number | null
   }
 ): Promise<number | null> => {
   const list = Array.isArray(trees) ? trees.filter(Boolean) : []
+  const overlayGridSize = extra?.overlayGridSize ?? null
   let result: number | null = null
   for (const tree of list) {
     const geom = await buildLayerGeometryFromTree(geos, tree, options, extra)
-    result = unionTwo(geos, result, geom)
+    result = unionTwo(geos, result, geom, overlayGridSize)
   }
   return simplifyIfNeeded(geos, result, options.polygonSimplifyGridSize)
 }
@@ -624,93 +926,101 @@ export const computeEnigAreaForSide = async (
     ...(input.options || {}),
   }
   const mmPerUnit = clampNumber(input.mmPerUnit, 1) || 1
-  let boardPtr = buildBoardGeometry(geos, input.boardPolygons)
-  const drillTrees = Array.isArray(input.drillTrees) ? input.drillTrees.filter(Boolean) : []
-  if (boardPtr && drillTrees.length) {
-    const drillPtr = await buildLayerGeometryFromTrees(geos, drillTrees, options, {
-      preferClearWhenDarkEmpty: true,
-    })
-    if (drillPtr) {
-      const boardClone = geos.GEOSGeom_clone(boardPtr as never)
-      if (boardClone) {
-        const subtracted = difference(geos, boardClone as unknown as number, drillPtr)
-        if (subtracted) {
-          destroyGeom(geos, boardPtr)
-          boardPtr = subtracted
+  const overlayGridSize = normalizePositiveNumber(options.polygonSimplifyGridSize) ?? null
+
+  const boundsFromPolygons = (polygons: BoardMultiPolygon): [number, number, number, number] | null => {
+    if (!Array.isArray(polygons) || polygons.length === 0) return null
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    for (const polygon of polygons) {
+      if (!Array.isArray(polygon)) continue
+      for (const ring of polygon) {
+        if (!Array.isArray(ring)) continue
+        for (const point of ring) {
+          if (!Array.isArray(point) || point.length < 2) continue
+          const x = Number(point[0])
+          const y = Number(point[1])
+          if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+          minX = Math.min(minX, x)
+          minY = Math.min(minY, y)
+          maxX = Math.max(maxX, x)
+          maxY = Math.max(maxY, y)
         }
-      } else {
-        destroyGeom(geos, drillPtr)
       }
     }
+    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+      return null
+    }
+    return [minX, minY, maxX, maxY]
   }
-  const boardAreaUnits2 = computeArea(geos, boardPtr)
+
+  const bounds = boundsFromPolygons(input.boardPolygons)
+  const boundsPolygon: BoardMultiPolygon | null =
+    bounds && bounds[2] > bounds[0] && bounds[3] > bounds[1]
+      ? [
+          [
+            [
+              [bounds[0], bounds[1]],
+              [bounds[2], bounds[1]],
+              [bounds[2], bounds[3]],
+              [bounds[0], bounds[3]],
+              [bounds[0], bounds[1]],
+            ],
+          ],
+        ]
+      : null
+
+  const boardWidth = bounds ? Math.abs(bounds[2] - bounds[0]) : 0
+  const boardHeight = bounds ? Math.abs(bounds[3] - bounds[1]) : 0
+  const boardAreaUnits2 = Number.isFinite(boardWidth) && Number.isFinite(boardHeight) ? boardWidth * boardHeight : 0
   const boardAreaMm2 = boardAreaUnits2 * mmPerUnit * mmPerUnit
 
-  let copperPtr = await buildLayerGeometryFromTrees(geos, input.copperTrees, options)
-  let soldermaskRawPtr = await buildLayerGeometryFromTrees(geos, input.soldermaskTrees, options, {
-    preferClearWhenDarkEmpty: true,
-  })
+  let boardClipPtr = boundsPolygon ? buildBoardGeometry(geos, boundsPolygon) : buildBoardGeometry(geos, input.boardPolygons)
 
-  const interpretMask = (): {openPtr: number | null; mode: 'openings' | 'coverage'} => {
-    if (!soldermaskRawPtr) return {openPtr: null, mode: 'openings'}
-    const requested = options.soldermaskInterpretation
-    if (requested === 'openings') return {openPtr: soldermaskRawPtr, mode: 'openings'}
-    if (requested === 'coverage') {
-      if (!boardPtr) return {openPtr: soldermaskRawPtr, mode: 'openings'}
-      const boardClone = geos.GEOSGeom_clone(boardPtr as never)
-      if (!boardClone) {
-        return {openPtr: soldermaskRawPtr, mode: 'openings'}
-      }
-      const openingsPtr = geos.GEOSDifference(boardClone as never, soldermaskRawPtr as never) || null
-      destroyGeom(geos, boardClone || null)
-      destroyGeom(geos, soldermaskRawPtr)
-      soldermaskRawPtr = null
-      return {openPtr: openingsPtr, mode: 'coverage'}
+  const drillTrees = Array.isArray(input.drillTrees) ? input.drillTrees.filter(Boolean) : []
+  if (boardClipPtr && drillTrees.length) {
+    const drillPtr = await buildLayerGeometryFromTrees(geos, drillTrees, options, {
+      preferClearWhenDarkEmpty: true,
+      overlayGridSize,
+    })
+    if (drillPtr) {
+      const subtracted = difference(geos, boardClipPtr, drillPtr, overlayGridSize)
+      boardClipPtr = subtracted || null
     }
-    if (!boardPtr) return {openPtr: soldermaskRawPtr, mode: 'openings'}
-    const rawArea = computeArea(geos, soldermaskRawPtr)
-    const threshold = Number.isFinite(options.soldermaskCoverageThreshold)
-      ? Math.max(0, Math.min(1, options.soldermaskCoverageThreshold))
-      : DEFAULT_OPTIONS.soldermaskCoverageThreshold
-    if (boardAreaUnits2 > 0 && rawArea / boardAreaUnits2 >= threshold) {
-      const boardClone = geos.GEOSGeom_clone(boardPtr as never)
-      if (!boardClone) return {openPtr: soldermaskRawPtr, mode: 'openings'}
-      const openingsPtr = geos.GEOSDifference(boardClone as never, soldermaskRawPtr as never) || null
-      destroyGeom(geos, boardClone || null)
-      destroyGeom(geos, soldermaskRawPtr)
-      soldermaskRawPtr = null
-      return {openPtr: openingsPtr, mode: 'coverage'}
-    }
-    return {openPtr: soldermaskRawPtr, mode: 'openings'}
   }
 
-  const {openPtr: maskOpenPtr, mode: maskMode} = interpretMask()
-  soldermaskRawPtr = null
+  let copperPtr = await buildLayerGeometryFromTrees(geos, input.copperTrees, options, {
+    overlayGridSize,
+  })
+  let soldermaskOpenPtr = await buildLayerGeometryFromTrees(geos, input.soldermaskTrees, options, {
+    preferClearWhenDarkEmpty: true,
+    overlayGridSize,
+  })
 
-  let clippedMaskOpenPtr = maskOpenPtr
-
-  if (options.clipToBoard && boardPtr) {
-    const boardCloneForCopper = geos.GEOSGeom_clone(boardPtr as never)
+  if (options.clipToBoard && boardClipPtr) {
+    const boardCloneForCopper = geos.GEOSGeom_clone(boardClipPtr as never)
     if (boardCloneForCopper) {
-      copperPtr = intersection(geos, copperPtr, boardCloneForCopper as unknown as number)
+      copperPtr = intersection(geos, copperPtr, boardCloneForCopper as unknown as number, overlayGridSize)
     }
-    const boardCloneForMask = geos.GEOSGeom_clone(boardPtr as never)
+    const boardCloneForMask = geos.GEOSGeom_clone(boardClipPtr as never)
     if (boardCloneForMask) {
-      clippedMaskOpenPtr = intersection(geos, clippedMaskOpenPtr, boardCloneForMask as unknown as number)
+      soldermaskOpenPtr = intersection(geos, soldermaskOpenPtr, boardCloneForMask as unknown as number, overlayGridSize)
     }
   }
 
   const copperAreaUnits2 = computeArea(geos, copperPtr)
-  const soldermaskOpenAreaUnits2 = computeArea(geos, clippedMaskOpenPtr)
+  const soldermaskOpenAreaUnits2 = computeArea(geos, soldermaskOpenPtr)
 
-  const exposedPtr = intersection(geos, copperPtr, clippedMaskOpenPtr)
+  const exposedPtr = intersection(geos, copperPtr, soldermaskOpenPtr, overlayGridSize)
   copperPtr = null
-  // clippedMaskOpenPtr is consumed by intersection()
+  // soldermaskOpenPtr is consumed by intersection()
   const exposedAreaUnits2 = computeArea(geos, exposedPtr)
   const enigAreaMm2 = exposedAreaUnits2 * mmPerUnit * mmPerUnit
 
   destroyGeom(geos, exposedPtr)
-  destroyGeom(geos, boardPtr)
+  destroyGeom(geos, boardClipPtr)
 
   const enigAreaPercent = boardAreaMm2 > 0 ? (enigAreaMm2 / boardAreaMm2) * 100 : 0
 
@@ -718,7 +1028,6 @@ export const computeEnigAreaForSide = async (
     enigAreaMm2,
     boardAreaMm2,
     enigAreaPercent,
-    soldermaskInterpretation: maskMode,
     debug: {
       copperAreaMm2: copperAreaUnits2 * mmPerUnit * mmPerUnit,
       soldermaskOpenAreaMm2: soldermaskOpenAreaUnits2 * mmPerUnit * mmPerUnit,

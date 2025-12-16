@@ -47,7 +47,12 @@ console.log(result.enigAreaMm2, result.enigAreaPercent)
 **Definitions**
 
 - `沉金面积 (ENIG area)` = `(Copper ∩ soldermask openings)` per side, summed top+bottom in the consumer.
-- `沉金面积百分比` = `(总沉金面积 / 板框总面积) * 100%`.
+- `沉金面积百分比` = `(总沉金面积 / 轮廓层ViewBox矩形面积) * 100%` (board area uses the bounding-box rectangle of `boardPolygons`).
+
+**Notes**
+
+- Layer booleans follow draw order: `LPD`/dark adds, `LPC`/clear (and `erase`) subtracts from the accumulated geometry.
+- When `clipToBoard` is enabled, copper/soldermask geometries are clipped to the outline ViewBox rectangle; anything outside is ignored for area.
 
 ## Options
 
@@ -58,8 +63,6 @@ console.log(result.enigAreaMm2, result.enigAreaPercent)
   arcToleranceRad?: number
   pathBufferQuadrantSegments?: number
   polygonSimplifyGridSize?: number | null
-  soldermaskInterpretation?: 'auto' | 'openings' | 'coverage'
-  soldermaskCoverageThreshold?: number
   clipToBoard?: boolean
 }
 ```

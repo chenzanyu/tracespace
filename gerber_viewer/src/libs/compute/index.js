@@ -443,6 +443,8 @@ export const enqueueComputeEnigAreaJob = async ({
   side,
   copperLayerIds,
   soldermaskLayerIds,
+  drillLayerIds,
+  holeWall,
   mmPerUnit,
   boardPolygons,
   options,
@@ -457,6 +459,11 @@ export const enqueueComputeEnigAreaJob = async ({
   const requiredLayerIds = [
     ...(Array.isArray(copperLayerIds) ? copperLayerIds : []),
     ...(Array.isArray(soldermaskLayerIds) ? soldermaskLayerIds : []),
+    ...(Array.isArray(drillLayerIds) ? drillLayerIds : []),
+    ...(Array.isArray(holeWall?.copperTopLayerIds) ? holeWall.copperTopLayerIds : []),
+    ...(Array.isArray(holeWall?.copperBottomLayerIds) ? holeWall.copperBottomLayerIds : []),
+    ...(Array.isArray(holeWall?.soldermaskTopLayerIds) ? holeWall.soldermaskTopLayerIds : []),
+    ...(Array.isArray(holeWall?.soldermaskBottomLayerIds) ? holeWall.soldermaskBottomLayerIds : []),
   ].filter(Boolean)
   await ensureLayersAvailableInWorker({ projectId, workerIndex: resolvedWorkerIndex, layerIds: requiredLayerIds })
   return pool.enqueue({
@@ -468,6 +475,8 @@ export const enqueueComputeEnigAreaJob = async ({
       side: normalizedSide,
       copperLayerIds: Array.isArray(copperLayerIds) ? copperLayerIds : [],
       soldermaskLayerIds: Array.isArray(soldermaskLayerIds) ? soldermaskLayerIds : [],
+      drillLayerIds: Array.isArray(drillLayerIds) ? drillLayerIds : [],
+      holeWall: holeWall ?? undefined,
       mmPerUnit,
       boardPolygons,
       options,

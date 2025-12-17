@@ -153,6 +153,8 @@ export function plotBoardShape(
 
   let derivedRegions: ImageRegion[] = []
   let openPaths: ImagePath[] = []
+  let strokeBounds: SizeEnvelope | null = null
+  let usedStrokeReconstruction = false
 
   if (pathSegments.length > 0) {
     const allPaths = walkPaths(pathSegments)
@@ -179,11 +181,13 @@ export function plotBoardShape(
     polygonCoverageRatio < STROKE_AREA_RATIO_THRESHOLD
 
   if (looksLikeStrokeOnly) {
+    strokeBounds = derivedRegionBounds
     const reconstructedPolygons = reconstructStrokeBoardPolygons(mergedPolygons, {
       layers,
       plotTreesById,
     })
     if (reconstructedPolygons) {
+      usedStrokeReconstruction = true
       mergedPolygons = reconstructedPolygons
       mergedRegions = polygonToRegions(reconstructedPolygons)
       derivedRegionBounds = BoundingBox.fromGraphics(mergedRegions)
@@ -297,7 +301,28 @@ export function plotBoardShape(
     return {size, regions: [], openPaths, polygons: null, failureReason: NO_CLOSED_REGIONS_FOUND}
   }
 
-  const finalSize = derivedRegionBounds ?? BoundingBox.fromGraphics(mergedRegions) ?? size
+  const finalSize = (() => {
+    const innerBounds = derivedRegionBounds
+    if (
+      usedStrokeReconstruction &&
+      strokeBounds &&
+      innerBounds &&
+      !BoundingBox.isEmpty(strokeBounds) &&
+      !BoundingBox.isEmpty(innerBounds) &&
+      boundsContains(strokeBounds, innerBounds)
+    ) {
+      const [outerMinX, outerMinY, outerMaxX, outerMaxY] = strokeBounds
+      const [innerMinX, innerMinY, innerMaxX, innerMaxY] = innerBounds
+      const midpointBounds: SizeEnvelope = [
+        (outerMinX + innerMinX) / 2,
+        (outerMinY + innerMinY) / 2,
+        (outerMaxX + innerMaxX) / 2,
+        (outerMaxY + innerMaxY) / 2,
+      ]
+      if (!BoundingBox.isEmpty(midpointBounds)) return midpointBounds
+    }
+    return derivedRegionBounds ?? BoundingBox.fromGraphics(mergedRegions) ?? size
+  })()
 
   const derivedBoundsArea = boundingBoxArea(derivedRegionBounds)
   if (

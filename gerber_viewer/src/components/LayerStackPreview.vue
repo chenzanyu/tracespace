@@ -37,7 +37,16 @@
       >
         <div class="board-size-overlay__dim-content board-size-overlay__dim-content--height">
           <span class="board-size-overlay__dim-label">高</span>
-          <span class="board-size-overlay__dim-value">{{ boardSizeOverlayHeightLabel }}</span>
+          <div class="board-size-overlay__dim-value board-size-overlay__dim-value--stacked">
+            <span
+              v-for="(ch, idx) in boardSizeOverlayHeightChars"
+              :key="`h-${idx}`"
+              class="board-size-overlay__dim-digit"
+            >
+              {{ ch }}
+            </span>
+          </div>
+          <span class="board-size-overlay__dim-unit">mm</span>
         </div>
       </div>
       <div v-if="boardSizeOverlayWidthLabel && boardSizeOverlayWidthLabelStyle"
@@ -216,7 +225,13 @@ const boardSizeOverlayWidthLabel = computed(() => {
 const boardSizeOverlayHeightLabel = computed(() => {
   if (!boardSizeOverlayVisible.value) return null
   const formatted = formatDimensionValue(boardSizeOverlayState.heightMm)
-  return formatted ? `${formatted}mm` : null
+  return formatted ?? null
+})
+
+const boardSizeOverlayHeightChars = computed(() => {
+  const label = boardSizeOverlayHeightLabel.value
+  if (typeof label !== 'string' || label.length === 0) return []
+  return label.split('')
 })
 
 const boardSizeOverlayRectPx = computed(() => {
@@ -1266,6 +1281,30 @@ onBeforeUnmount(() => {
 
 .board-size-overlay__dim-content--height {
   animation: boardSizeSlideLeft 3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  flex-direction: column;
+  gap: 0.22rem;
+  padding: 0.32rem 0.62rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.board-size-overlay__dim-content--height .board-size-overlay__dim-unit {
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  opacity: 0.92;
+}
+
+.board-size-overlay__dim-value--stacked {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.02rem;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.board-size-overlay__dim-digit {
+  display: block;
 }
 
 .board-size-overlay__dim-content--width {
@@ -1282,5 +1321,12 @@ onBeforeUnmount(() => {
 .board-size-overlay__dim-value {
   font-size: 1.4rem;
   font-weight: 700;
+}
+
+.board-size-overlay__dim-unit {
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  opacity: 0.9;
 }
 </style>

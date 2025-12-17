@@ -1,5 +1,5 @@
 import initGeosJs from 'geos-wasm'
-import {geojsonToGeosGeom} from 'geos-wasm/helpers'
+import {geojsonToGeosGeom, geosGeomToGeojson} from 'geos-wasm/helpers'
 import {CLEAR} from '@tracespace/parser'
 import {
   ARC,
@@ -22,12 +22,32 @@ import type {
   PathSegment,
   SimpleShape,
 } from '@tracespace/plotter'
+import type {Geometry as GeoJsonGeometry} from 'geojson'
 
 export type BoardMultiPolygon = number[][][][]
+
+export type Bounds = [number, number, number, number]
+
+export interface ResolvePcbSizeInput {
+  mmPerUnit: number
+  boardBounds?: Bounds | null
+  outlineBounds?: Bounds | null
+  boardPolygons?: BoardMultiPolygon | null
+}
+
+export interface ResolvePcbSizeResult {
+  bounds: Bounds
+  widthUnits: number
+  heightUnits: number
+  widthMm: number
+  heightMm: number
+  source: 'boardBounds' | 'outlineAndPolygonsMidpoint' | 'outlineBounds' | 'boardPolygons'
+}
 
 export interface EnigAreaSideInput {
   mmPerUnit: number
   boardPolygons: BoardMultiPolygon
+  boardBounds?: Bounds | null
   copperTrees: ImageTree[]
   soldermaskTrees: ImageTree[]
   drillTrees?: ImageTree[]
@@ -49,6 +69,43 @@ export interface EnigAreaSideResult {
     copperAreaMm2: number
     soldermaskOpenAreaMm2: number
   }
+}
+
+export interface EnigAreaTimingSample {
+  step: string
+  ms: number
+  meta?: Record<string, unknown>
+}
+
+export interface EnigAreaSideDebugResult extends EnigAreaSideResult {
+  outlineAreaMm2: number
+  options: EnigAreaOptions
+  mmPerUnit: number
+  timings: EnigAreaTimingSample[]
+  geometries: {
+    boardOutline: GeoJsonGeometry | null
+    boardClip: GeoJsonGeometry | null
+    copper: GeoJsonGeometry | null
+    soldermaskOpen: GeoJsonGeometry | null
+    exposed: GeoJsonGeometry | null
+  }
+}
+
+export interface HoleWallEnigInput {
+  mmPerUnit: number
+  drillTrees: ImageTree[]
+  copperTopTrees: ImageTree[]
+  copperBottomTrees: ImageTree[]
+  soldermaskTopTrees: ImageTree[]
+  soldermaskBottomTrees: ImageTree[]
+  boardThicknessMm?: number
+  options?: Partial<EnigAreaOptions>
+}
+
+export interface HoleWallEnigResult {
+  holeWallEnigAreaMm2: number
+  holeWallPerimeterMm: number
+  boardThicknessMm: number
 }
 
 type GeosModule = Awaited<ReturnType<typeof initGeosJs>>
@@ -105,6 +162,219 @@ const DEFAULT_OPTIONS: EnigAreaOptions = Object.freeze({
 const clampNumber = (value: unknown, fallback = 0): number => {
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric : fallback
+}
+
+const normalizeBounds = (value: unknown): Bounds | null => {
+  if (!Array.isArray(value) || value.length < 4) return null
+  const [x1, y1, x2, y2] = value.map(entry => Number(entry))
+  if (![x1, y1, x2, y2].every(entry => Number.isFinite(entry))) return null
+  const minX = Math.min(x1, x2)
+  const minY = Math.min(y1, y2)
+  const maxX = Math.max(x1, x2)
+  const maxY = Math.max(y1, y2)
+  if (maxX <= minX || maxY <= minY) return null
+  return [minX, minY, maxX, maxY]
+}
+
+const boundsFromPolygons = (polygons?: BoardMultiPolygon | null): Bounds | null => {
+  if (!Array.isArray(polygons) || polygons.length === 0) return null
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const polygon of polygons) {
+    if (!Array.isArray(polygon)) continue
+    for (const ring of polygon) {
+      if (!Array.isArray(ring)) continue
+      for (const point of ring) {
+        if (!Array.isArray(point) || point.length < 2) continue
+        const x = Number(point[0])
+        const y = Number(point[1])
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+        minX = Math.min(minX, x)
+        minY = Math.min(minY, y)
+        maxX = Math.max(maxX, x)
+        maxY = Math.max(maxY, y)
+      }
+    }
+  }
+  if (
+    !Number.isFinite(minX) ||
+    !Number.isFinite(minY) ||
+    !Number.isFinite(maxX) ||
+    !Number.isFinite(maxY) ||
+    maxX <= minX ||
+    maxY <= minY
+  ) {
+    return null
+  }
+  return [minX, minY, maxX, maxY]
+}
+
+const boundsContains = (outer: Bounds, inner: Bounds): boolean =>
+  outer[0] <= inner[0] && outer[1] <= inner[1] && outer[2] >= inner[2] && outer[3] >= inner[3]
+
+const mergeBounds = (current: Bounds | null, candidate: Bounds | null): Bounds | null => {
+  if (!candidate) return current
+  if (!current) return candidate
+  return [
+    Math.min(current[0], candidate[0]),
+    Math.min(current[1], candidate[1]),
+    Math.max(current[2], candidate[2]),
+    Math.max(current[3], candidate[3]),
+  ]
+}
+
+const boundsFromPoint = (x: number, y: number): Bounds => [x, y, x, y]
+
+const boundsFromCircle = (cx: number, cy: number, radius: number): Bounds => [
+  cx - radius,
+  cy - radius,
+  cx + radius,
+  cy + radius,
+]
+
+const boundsFromSegments = (segments: PathSegment[], strokeWidthUnits = 0): Bounds | null => {
+  if (!Array.isArray(segments) || segments.length === 0) return null
+  let bounds: Bounds | null = null
+  for (const segment of segments) {
+    if (!segment) continue
+    const [sx, sy] = toXY(segment.start)
+    const [ex, ey] = toXY(segment.end)
+    bounds = mergeBounds(bounds, boundsFromPoint(sx, sy))
+    bounds = mergeBounds(bounds, boundsFromPoint(ex, ey))
+    if (segment.type === ARC) {
+      const [cx, cy] = toXY(segment.center)
+      const radius = Math.abs(clampNumber(segment.radius))
+      if (Number.isFinite(radius) && radius > 0) {
+        bounds = mergeBounds(bounds, boundsFromCircle(cx, cy, radius))
+      }
+    }
+  }
+  if (!bounds) return null
+  const width = Math.abs(bounds[2] - bounds[0])
+  const height = Math.abs(bounds[3] - bounds[1])
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
+  const stroke = Math.abs(clampNumber(strokeWidthUnits))
+  if (stroke > 0) {
+    const inset = stroke / 2
+    return [bounds[0] - inset, bounds[1] - inset, bounds[2] + inset, bounds[3] + inset]
+  }
+  return bounds
+}
+
+const boundsFromShape = (shape: SimpleShape | null | undefined): Bounds | null => {
+  if (!shape) return null
+  switch (shape.type) {
+    case CIRCLE: {
+      const cx = clampNumber((shape as unknown as {cx?: unknown}).cx)
+      const cy = clampNumber((shape as unknown as {cy?: unknown}).cy)
+      const r = Math.abs(clampNumber((shape as unknown as {r?: unknown}).r))
+      if (!Number.isFinite(r) || r <= 0) return null
+      return boundsFromCircle(cx, cy, r)
+    }
+    case RECTANGLE: {
+      const x = clampNumber((shape as unknown as {x?: unknown}).x)
+      const y = clampNumber((shape as unknown as {y?: unknown}).y)
+      const w = Math.abs(clampNumber((shape as unknown as {xSize?: unknown}).xSize))
+      const h = Math.abs(clampNumber((shape as unknown as {ySize?: unknown}).ySize))
+      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null
+      return [x, y, x + w, y + h]
+    }
+    case POLYGON: {
+      const points = Array.isArray((shape as unknown as {points?: unknown}).points)
+        ? ((shape as unknown as {points: Array<[number, number]>}).points)
+        : []
+      if (points.length < 3) return null
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      for (const point of points) {
+        const x = clampNumber(point?.[0])
+        const y = clampNumber(point?.[1])
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+        minX = Math.min(minX, x)
+        minY = Math.min(minY, y)
+        maxX = Math.max(maxX, x)
+        maxY = Math.max(maxY, y)
+      }
+      if (
+        !Number.isFinite(minX) ||
+        !Number.isFinite(minY) ||
+        !Number.isFinite(maxX) ||
+        !Number.isFinite(maxY) ||
+        maxX <= minX ||
+        maxY <= minY
+      ) {
+        return null
+      }
+      return [minX, minY, maxX, maxY]
+    }
+    case OUTLINE: {
+      const segments = Array.isArray((shape as unknown as {segments?: unknown}).segments)
+        ? ((shape as unknown as {segments: PathSegment[]}).segments)
+        : []
+      return boundsFromSegments(segments)
+    }
+    case LAYERED_SHAPE: {
+      const shapes = Array.isArray((shape as unknown as {shapes?: unknown}).shapes)
+        ? ((shape as unknown as {shapes: SimpleShape[]}).shapes)
+        : []
+      if (!shapes.length) return null
+      let merged: Bounds | null = null
+      for (const part of shapes) {
+        merged = mergeBounds(merged, boundsFromShape(part))
+      }
+      return merged
+    }
+    default:
+      return null
+  }
+}
+
+export const resolvePcbSize = (input: ResolvePcbSizeInput): ResolvePcbSizeResult | null => {
+  const mmPerUnit = clampNumber(input?.mmPerUnit, 1) || 1
+  const boardBounds = normalizeBounds(input?.boardBounds)
+  const outlineBounds = normalizeBounds(input?.outlineBounds)
+  const polygonBounds = boundsFromPolygons(input?.boardPolygons)
+
+  const bounds = (() => {
+    if (boardBounds) return {bounds: boardBounds, source: 'boardBounds' as const}
+    if (outlineBounds && polygonBounds && boundsContains(outlineBounds, polygonBounds)) {
+      const midpoint: Bounds = [
+        (outlineBounds[0] + polygonBounds[0]) / 2,
+        (outlineBounds[1] + polygonBounds[1]) / 2,
+        (outlineBounds[2] + polygonBounds[2]) / 2,
+        (outlineBounds[3] + polygonBounds[3]) / 2,
+      ]
+      if (midpoint[2] > midpoint[0] && midpoint[3] > midpoint[1]) {
+        return {bounds: midpoint, source: 'outlineAndPolygonsMidpoint' as const}
+      }
+    }
+    if (outlineBounds) return {bounds: outlineBounds, source: 'outlineBounds' as const}
+    if (polygonBounds) return {bounds: polygonBounds, source: 'boardPolygons' as const}
+    return null
+  })()
+
+  if (!bounds) return null
+  const widthUnits = bounds.bounds[2] - bounds.bounds[0]
+  const heightUnits = bounds.bounds[3] - bounds.bounds[1]
+  const widthMm = widthUnits * mmPerUnit
+  const heightMm = heightUnits * mmPerUnit
+  if (!Number.isFinite(widthMm) || !Number.isFinite(heightMm) || widthMm <= 0 || heightMm <= 0) return null
+  return {
+    ...bounds,
+    widthUnits,
+    heightUnits,
+    widthMm,
+    heightMm,
+  }
+}
+
+const nowMs = (): number => {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') return performance.now()
+  return Date.now()
 }
 
 const normalizePositiveNumber = (value: unknown): number | null => {
@@ -382,6 +652,18 @@ const computeArea = (geos: GeosModule, geomPtr: number | null): number => {
     return geos.Module.getValue(areaPtr, 'double')
   } finally {
     geos.Module._free(areaPtr)
+  }
+}
+
+const computeLength = (geos: GeosModule, geomPtr: number | null): number => {
+  if (!geomPtr) return 0
+  const lengthPtr = geos.Module._malloc(8)
+  try {
+    const ok = geos.GEOSLength(geomPtr as never, lengthPtr as never)
+    if (!ok) return 0
+    return geos.Module.getValue(lengthPtr, 'double')
+  } finally {
+    geos.Module._free(lengthPtr)
   }
 }
 
@@ -958,35 +1240,7 @@ export const computeEnigAreaForSide = async (
   const mmPerUnit = clampNumber(input.mmPerUnit, 1) || 1
   const overlayGridSize = normalizePositiveNumber(options.polygonSimplifyGridSize) ?? null
 
-  const boundsFromPolygons = (polygons: BoardMultiPolygon): [number, number, number, number] | null => {
-    if (!Array.isArray(polygons) || polygons.length === 0) return null
-    let minX = Infinity
-    let minY = Infinity
-    let maxX = -Infinity
-    let maxY = -Infinity
-    for (const polygon of polygons) {
-      if (!Array.isArray(polygon)) continue
-      for (const ring of polygon) {
-        if (!Array.isArray(ring)) continue
-        for (const point of ring) {
-          if (!Array.isArray(point) || point.length < 2) continue
-          const x = Number(point[0])
-          const y = Number(point[1])
-          if (!Number.isFinite(x) || !Number.isFinite(y)) continue
-          minX = Math.min(minX, x)
-          minY = Math.min(minY, y)
-          maxX = Math.max(maxX, x)
-          maxY = Math.max(maxY, y)
-        }
-      }
-    }
-    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
-      return null
-    }
-    return [minX, minY, maxX, maxY]
-  }
-
-  const bounds = boundsFromPolygons(input.boardPolygons)
+  const bounds = normalizeBounds(input.boardBounds) ?? boundsFromPolygons(input.boardPolygons)
   const boundsPolygon: BoardMultiPolygon | null =
     bounds && bounds[2] > bounds[0] && bounds[3] > bounds[1]
       ? [
@@ -1062,5 +1316,231 @@ export const computeEnigAreaForSide = async (
       copperAreaMm2: copperAreaUnits2 * mmPerUnit * mmPerUnit,
       soldermaskOpenAreaMm2: soldermaskOpenAreaUnits2 * mmPerUnit * mmPerUnit,
     },
+  }
+}
+
+export const computeEnigAreaForSideDebug = async (
+  input: EnigAreaSideInput
+): Promise<EnigAreaSideDebugResult> => {
+  const timings: EnigAreaTimingSample[] = []
+  const time = (step: string, meta?: Record<string, unknown>) => {
+    const start = nowMs()
+    return (extra?: Record<string, unknown>) => {
+      timings.push({
+        step,
+        ms: nowMs() - start,
+        meta: extra ? {...(meta ?? {}), ...extra} : meta,
+      })
+    }
+  }
+
+  const endGeos = time('geos:init')
+  const geos = await getSharedGeos()
+  endGeos()
+
+  const options: EnigAreaOptions = {
+    ...DEFAULT_OPTIONS,
+    ...(input.options || {}),
+  }
+  const mmPerUnit = clampNumber(input.mmPerUnit, 1) || 1
+  const overlayGridSize = normalizePositiveNumber(options.polygonSimplifyGridSize) ?? null
+
+  const endBounds = time('board:bounds')
+  const boundsSource = normalizeBounds(input.boardBounds) ? 'boardBounds' : 'boardPolygons'
+  const bounds = normalizeBounds(input.boardBounds) ?? boundsFromPolygons(input.boardPolygons)
+  const boundsPolygon: BoardMultiPolygon | null =
+    bounds && bounds[2] > bounds[0] && bounds[3] > bounds[1]
+      ? [
+          [
+            [
+              [bounds[0], bounds[1]],
+              [bounds[2], bounds[1]],
+              [bounds[2], bounds[3]],
+              [bounds[0], bounds[3]],
+              [bounds[0], bounds[1]],
+            ],
+          ],
+        ]
+      : null
+
+  const boardWidth = bounds ? Math.abs(bounds[2] - bounds[0]) : 0
+  const boardHeight = bounds ? Math.abs(bounds[3] - bounds[1]) : 0
+  const boardAreaUnits2 = Number.isFinite(boardWidth) && Number.isFinite(boardHeight) ? boardWidth * boardHeight : 0
+  const boardAreaMm2 = boardAreaUnits2 * mmPerUnit * mmPerUnit
+  endBounds({hasBounds: Boolean(bounds), source: boundsSource, mmPerUnit, boardAreaMm2})
+
+  const endOutline = time('board:outline')
+  const outlinePtr = buildBoardGeometry(geos, input.boardPolygons)
+  const outlineAreaUnits2 = computeArea(geos, outlinePtr)
+  const outlineAreaMm2 = outlineAreaUnits2 * mmPerUnit * mmPerUnit
+  const outlineExportPtr = outlinePtr ? geos.GEOSGeom_clone(outlinePtr as never) : null
+  destroyGeom(geos, outlinePtr)
+  endOutline({outlineAreaMm2})
+
+  const endClip = time('board:clip')
+  let boardClipPtr = boundsPolygon ? buildBoardGeometry(geos, boundsPolygon) : buildBoardGeometry(geos, input.boardPolygons)
+
+  const drillTrees = Array.isArray(input.drillTrees) ? input.drillTrees.filter(Boolean) : []
+  if (boardClipPtr && drillTrees.length) {
+    const drillPtr = await buildLayerGeometryFromTrees(geos, drillTrees, options, {
+      preferClearWhenDarkEmpty: true,
+      overlayGridSize,
+    })
+    if (drillPtr) {
+      const subtracted = difference(geos, boardClipPtr, drillPtr, overlayGridSize)
+      boardClipPtr = subtracted || null
+    }
+  }
+  const boardClipExportPtr = boardClipPtr ? geos.GEOSGeom_clone(boardClipPtr as never) : null
+  endClip({hasClip: Boolean(boardClipPtr), drillTrees: drillTrees.length})
+
+  const endCopper = time('layer:copper')
+  let copperPtr = await buildLayerGeometryFromTrees(geos, input.copperTrees, options, {
+    overlayGridSize,
+  })
+  endCopper({trees: input.copperTrees?.length ?? 0, hasGeom: Boolean(copperPtr)})
+
+  const endMask = time('layer:soldermask')
+  let soldermaskOpenPtr = await buildLayerGeometryFromTrees(geos, input.soldermaskTrees, options, {
+    preferClearWhenDarkEmpty: true,
+    overlayGridSize,
+  })
+  endMask({trees: input.soldermaskTrees?.length ?? 0, hasGeom: Boolean(soldermaskOpenPtr)})
+
+  if (options.clipToBoard && boardClipPtr) {
+    const endCopperClip = time('clip:copper')
+    const boardCloneForCopper = geos.GEOSGeom_clone(boardClipPtr as never)
+    if (boardCloneForCopper) {
+      copperPtr = intersection(geos, copperPtr, boardCloneForCopper as unknown as number, overlayGridSize)
+    }
+    endCopperClip({hasGeom: Boolean(copperPtr)})
+
+    const endMaskClip = time('clip:soldermask')
+    const boardCloneForMask = geos.GEOSGeom_clone(boardClipPtr as never)
+    if (boardCloneForMask) {
+      soldermaskOpenPtr = intersection(geos, soldermaskOpenPtr, boardCloneForMask as unknown as number, overlayGridSize)
+    }
+    endMaskClip({hasGeom: Boolean(soldermaskOpenPtr)})
+  }
+
+  const endAreas = time('area:inputs')
+  const copperAreaUnits2 = computeArea(geos, copperPtr)
+  const soldermaskOpenAreaUnits2 = computeArea(geos, soldermaskOpenPtr)
+  const copperAreaMm2 = copperAreaUnits2 * mmPerUnit * mmPerUnit
+  const soldermaskOpenAreaMm2 = soldermaskOpenAreaUnits2 * mmPerUnit * mmPerUnit
+  endAreas({copperAreaMm2, soldermaskOpenAreaMm2})
+
+  const copperExportPtr = copperPtr ? geos.GEOSGeom_clone(copperPtr as never) : null
+  const soldermaskExportPtr = soldermaskOpenPtr ? geos.GEOSGeom_clone(soldermaskOpenPtr as never) : null
+
+  const endIntersection = time('exposed:intersection')
+  const exposedPtr = intersection(geos, copperPtr, soldermaskOpenPtr, overlayGridSize)
+  copperPtr = null
+  soldermaskOpenPtr = null
+  endIntersection({hasGeom: Boolean(exposedPtr)})
+
+  const endExposedArea = time('area:exposed')
+  const exposedAreaUnits2 = computeArea(geos, exposedPtr)
+  const enigAreaMm2 = exposedAreaUnits2 * mmPerUnit * mmPerUnit
+  endExposedArea({enigAreaMm2})
+
+  const endGeojson = time('geojson:export')
+  const toGeojson = (geomPtr: number | null): GeoJsonGeometry | null => {
+    if (!geomPtr) return null
+    try {
+      return geosGeomToGeojson(geomPtr as never, geos as never) as GeoJsonGeometry
+    } catch {
+      return null
+    }
+  }
+
+  const geometries = {
+    boardOutline: toGeojson(outlineExportPtr),
+    boardClip: toGeojson(boardClipExportPtr),
+    copper: toGeojson(copperExportPtr),
+    soldermaskOpen: toGeojson(soldermaskExportPtr),
+    exposed: toGeojson(exposedPtr),
+  }
+  endGeojson()
+
+  destroyGeom(geos, outlineExportPtr)
+  destroyGeom(geos, boardClipExportPtr)
+  destroyGeom(geos, copperExportPtr)
+  destroyGeom(geos, soldermaskExportPtr)
+  destroyGeom(geos, exposedPtr)
+  destroyGeom(geos, boardClipPtr)
+
+  const enigAreaPercent = boardAreaMm2 > 0 ? (enigAreaMm2 / boardAreaMm2) * 100 : 0
+
+  return {
+    enigAreaMm2,
+    boardAreaMm2,
+    enigAreaPercent,
+    outlineAreaMm2,
+    options,
+    mmPerUnit,
+    timings,
+    geometries,
+    debug: {
+      copperAreaMm2,
+      soldermaskOpenAreaMm2,
+    },
+  }
+}
+
+export const computeHoleWallEnigArea = async (input: HoleWallEnigInput): Promise<HoleWallEnigResult> => {
+  const geos = await getSharedGeos()
+  const options: EnigAreaOptions = {
+    ...DEFAULT_OPTIONS,
+    ...(input.options || {}),
+  }
+  const mmPerUnit = clampNumber(input.mmPerUnit, 1) || 1
+  const boardThicknessMmRaw = clampNumber(input.boardThicknessMm ?? 1.6, 1.6)
+  const boardThicknessMm = Number.isFinite(boardThicknessMmRaw) && boardThicknessMmRaw > 0 ? boardThicknessMmRaw : 1.6
+  const overlayGridSize = normalizePositiveNumber(options.polygonSimplifyGridSize) ?? null
+
+  const drillTrees = Array.isArray(input.drillTrees) ? input.drillTrees.filter(Boolean) : []
+  const drillPtr = await buildLayerGeometryFromTrees(geos, drillTrees, options, {
+    preferClearWhenDarkEmpty: true,
+    overlayGridSize,
+  })
+
+  const copperTopTrees = Array.isArray(input.copperTopTrees) ? input.copperTopTrees.filter(Boolean) : []
+  const copperBottomTrees = Array.isArray(input.copperBottomTrees) ? input.copperBottomTrees.filter(Boolean) : []
+  const soldermaskTopTrees = Array.isArray(input.soldermaskTopTrees) ? input.soldermaskTopTrees.filter(Boolean) : []
+  const soldermaskBottomTrees = Array.isArray(input.soldermaskBottomTrees) ? input.soldermaskBottomTrees.filter(Boolean) : []
+
+  const copperTopPtr = await buildLayerGeometryFromTrees(geos, copperTopTrees, options, {
+    overlayGridSize,
+  })
+  const copperBottomPtr = await buildLayerGeometryFromTrees(geos, copperBottomTrees, options, {
+    overlayGridSize,
+  })
+
+  let selectedDrillsPtr = intersection(geos, drillPtr, copperTopPtr, overlayGridSize)
+  selectedDrillsPtr = intersection(geos, selectedDrillsPtr, copperBottomPtr, overlayGridSize)
+
+  const maskOpenTopPtr = await buildLayerGeometryFromTrees(geos, soldermaskTopTrees, options, {
+    preferClearWhenDarkEmpty: true,
+    overlayGridSize,
+  })
+  const maskOpenBottomPtr = await buildLayerGeometryFromTrees(geos, soldermaskBottomTrees, options, {
+    preferClearWhenDarkEmpty: true,
+    overlayGridSize,
+  })
+  const maskOpenAnyPtr = unionTwo(geos, maskOpenTopPtr, maskOpenBottomPtr, overlayGridSize)
+  if (maskOpenAnyPtr) {
+    selectedDrillsPtr = difference(geos, selectedDrillsPtr, maskOpenAnyPtr, overlayGridSize)
+  }
+
+  const holeWallPerimeterUnits = computeLength(geos, selectedDrillsPtr)
+  const holeWallPerimeterMm = holeWallPerimeterUnits * mmPerUnit
+  const holeWallEnigAreaMm2 = holeWallPerimeterMm * boardThicknessMm
+  destroyGeom(geos, selectedDrillsPtr)
+
+  return {
+    holeWallEnigAreaMm2,
+    holeWallPerimeterMm,
+    boardThicknessMm,
   }
 }

@@ -536,16 +536,12 @@ const handleComputeEnigArea = async (payload) => {
   const copperLayerIds = Array.isArray(payload?.copperLayerIds) ? payload.copperLayerIds : []
   const soldermaskLayerIds = Array.isArray(payload?.soldermaskLayerIds) ? payload.soldermaskLayerIds : []
   const mmPerUnit = Number(payload?.mmPerUnit) || 1
+  const boardBounds = payload?.boardBounds ?? globals3d.boardOutline?.bounds ?? null
   const boardPolygons =
     payload?.boardPolygons ?? globals3d.boardOutline?.polygons ?? null
   if (!Array.isArray(boardPolygons) || boardPolygons.length === 0) {
     throw new Error('Missing board polygons')
   }
-  const drillShapes = payload?.drillShapes ?? globals3d.drillShapes ?? null
-  const drillTrees =
-    drillShapes?.format === DRILL_SHAPE_FORMAT_IMAGE_TREES && Array.isArray(drillShapes.imageTrees)
-      ? drillShapes.imageTrees.filter(Boolean)
-      : []
   const getPlotTree = (layerId) => {
     const entry = layerStateById.get(layerId)
     if (!entry) return null
@@ -562,6 +558,16 @@ const handleComputeEnigArea = async (payload) => {
       return null
     }
   }
+
+  const drillLayerIds = Array.isArray(payload?.drillLayerIds) ? payload.drillLayerIds : []
+  const drillTrees = drillLayerIds.length
+    ? drillLayerIds.map(getPlotTree).filter(Boolean)
+    : (() => {
+        const drillShapes = payload?.drillShapes ?? globals3d.drillShapes ?? null
+        return drillShapes?.format === DRILL_SHAPE_FORMAT_IMAGE_TREES && Array.isArray(drillShapes.imageTrees)
+          ? drillShapes.imageTrees.filter(Boolean)
+          : []
+      })()
   const copperTrees = copperLayerIds.map(getPlotTree).filter(Boolean)
   const soldermaskTrees = soldermaskLayerIds.map(getPlotTree).filter(Boolean)
   if (copperTrees.length === 0) {
@@ -570,18 +576,43 @@ const handleComputeEnigArea = async (payload) => {
   if (soldermaskTrees.length === 0) {
     throw new Error('Missing soldermask plot trees for ENIG analysis')
   }
-  const { computeEnigAreaForSide } = await ensurePcbAnalysis()
+  const { computeEnigAreaForSide, computeHoleWallEnigArea } = await ensurePcbAnalysis()
   const result = await computeEnigAreaForSide({
     mmPerUnit,
     boardPolygons,
+    boardBounds,
     copperTrees,
     soldermaskTrees,
     drillTrees,
     options: payload?.options ?? undefined,
   })
+
+  let holeWall = null
+  const holeWallPayload = payload?.holeWall ?? null
+  const holeWallCopperTopIds = Array.isArray(holeWallPayload?.copperTopLayerIds) ? holeWallPayload.copperTopLayerIds : []
+  const holeWallCopperBottomIds = Array.isArray(holeWallPayload?.copperBottomLayerIds) ? holeWallPayload.copperBottomLayerIds : []
+  const holeWallMaskTopIds = Array.isArray(holeWallPayload?.soldermaskTopLayerIds) ? holeWallPayload.soldermaskTopLayerIds : []
+  const holeWallMaskBottomIds = Array.isArray(holeWallPayload?.soldermaskBottomLayerIds) ? holeWallPayload.soldermaskBottomLayerIds : []
+  if (holeWallCopperTopIds.length > 0 && holeWallCopperBottomIds.length > 0 && holeWallMaskTopIds.length > 0 && holeWallMaskBottomIds.length > 0) {
+    const holeWallCopperTopTrees = holeWallCopperTopIds.map(getPlotTree).filter(Boolean)
+    const holeWallCopperBottomTrees = holeWallCopperBottomIds.map(getPlotTree).filter(Boolean)
+    const holeWallMaskTopTrees = holeWallMaskTopIds.map(getPlotTree).filter(Boolean)
+    const holeWallMaskBottomTrees = holeWallMaskBottomIds.map(getPlotTree).filter(Boolean)
+    holeWall = await computeHoleWallEnigArea({
+      mmPerUnit,
+      drillTrees,
+      copperTopTrees: holeWallCopperTopTrees,
+      copperBottomTrees: holeWallCopperBottomTrees,
+      soldermaskTopTrees: holeWallMaskTopTrees,
+      soldermaskBottomTrees: holeWallMaskBottomTrees,
+      boardThicknessMm: holeWallPayload?.boardThicknessMm,
+      options: holeWallPayload?.options ?? payload?.options ?? undefined,
+    })
+  }
   return {
     side: payload?.side ?? null,
     ...result,
+    holeWall,
   }
 }
 

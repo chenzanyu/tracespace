@@ -9,10 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tracespace/core": "workspace:*",
     "@tracespace/parser": "workspace:*",
     "@tracespace/plotter": "workspace:*",
     "@tracespace/pcb-analysis": "workspace:*",
     "jsts": "^2.12.1",
+    "pixi.js": "^8.2.2",
     "preact": "^10.11.3"
   },
   "devDependencies": {

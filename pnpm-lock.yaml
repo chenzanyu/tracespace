@@ -307,6 +307,9 @@ importers:
 
   pcb_analysis_playground:
     dependencies:
+      '@tracespace/core':
+        specifier: workspace:*
+        version: link:../packages/core
       '@tracespace/parser':
         specifier: workspace:*
         version: link:../packages/parser
@@ -319,6 +322,9 @@ importers:
       jsts:
         specifier: ^2.12.1
         version: 2.12.1
+      pixi.js:
+        specifier: ^8.2.2
+        version: 8.14.0
       preact:
         specifier: ^10.11.3
         version: 10.27.2

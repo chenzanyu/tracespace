@@ -1,23 +1,23 @@
 import type {JSX} from 'preact/jsx-runtime'
+import {useEffect, useState} from 'preact/hooks'
+
+import {EnigAreaPage} from './pages/enig-area'
+import {HomePage} from './pages/home'
+import {getRouteFromHash} from './router'
 
 export function App(): JSX.Element {
-  return (
-    <div class="app">
-      <header>
-        <div>
-          <p class="eyebrow">PCB Analysis Playground</p>
-          <h1>PCB Analysis Playground</h1>
-          <p class="lede">
-            The <code>@tracespace/pcb-analysis</code> package is being refactored to use{' '}
-            <code>geos-wasm</code>. This playground will be updated once the new DFM metrics land.
-          </p>
-        </div>
-      </header>
+  const [route, setRoute] = useState(() => getRouteFromHash(window.location.hash))
 
-      <section class="controls">
-        <p class="lede">No interactive demo is wired up yet.</p>
-      </section>
-    </div>
-  )
+  useEffect(() => {
+    const handleChange = () => setRoute(getRouteFromHash(window.location.hash))
+    window.addEventListener('hashchange', handleChange)
+    return () => window.removeEventListener('hashchange', handleChange)
+  }, [])
+
+  if (route === 'enig-area') {
+    return <EnigAreaPage />
+  }
+
+  return <HomePage />
 }
 

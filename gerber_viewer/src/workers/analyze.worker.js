@@ -51,15 +51,39 @@ const computeOutlineBounds = (layers) => {
   return bounds
 }
 
-const buildBoardSize = (payload) => {
+let pcbAnalysis = null
+const ensurePcbAnalysis = async () => {
+  if (!pcbAnalysis) {
+    pcbAnalysis = await import('@tracespace/pcb-analysis')
+  }
+  return pcbAnalysis
+}
+
+const buildBoardSize = async (payload) => {
   const mmPerUnit = Number(payload?.mmPerUnit) || 1
   const outlineBounds = computeOutlineBounds(payload?.layers)
-  const finalBounds = outlineBounds ?? payload?.boardOutlineBounds ?? null
-  const summary = describeBounds(finalBounds)
-  if (!summary) return null
-  return {
-    widthMm: summary.width * mmPerUnit,
-    heightMm: summary.height * mmPerUnit,
+  const boardBounds = payload?.boardOutlineBounds ?? null
+
+  try {
+    const { resolvePcbSize } = await ensurePcbAnalysis()
+    const resolved = resolvePcbSize({
+      mmPerUnit,
+      boardBounds,
+      outlineBounds,
+    })
+    if (!resolved) return null
+    return {
+      widthMm: resolved.widthMm,
+      heightMm: resolved.heightMm,
+    }
+  } catch (error) {
+    const fallbackBounds = outlineBounds ?? boardBounds ?? null
+    const summary = describeBounds(fallbackBounds)
+    if (!summary) return null
+    return {
+      widthMm: summary.width * mmPerUnit,
+      heightMm: summary.height * mmPerUnit,
+    }
   }
 }
 
@@ -304,11 +328,11 @@ const computeMinTraceWidth = (layers, mmPerUnit) => {
   return Number.isFinite(minWidth) ? minWidth : null
 }
 
-const runAnalysis = (payload) => {
+const runAnalysis = async (payload) => {
   const layers = Array.isArray(payload?.layers) ? payload.layers : []
   const result = {
     copperLayerCount: computeCopperLayerCount(layers),
-    boardSize: buildBoardSize(payload),
+    boardSize: await buildBoardSize(payload),
   }
   if (payload?.includeTraceMetrics) {
     result.minTraceWidth = computeMinTraceWidth(layers, Number(payload.mmPerUnit) || 1)
@@ -326,18 +350,20 @@ self.onmessage = (event) => {
     })
     return
   }
-  try {
-    const result = runAnalysis(payload)
-    self.postMessage({
-      jobId,
-      success: true,
-      result,
+  Promise.resolve()
+    .then(async () => runAnalysis(payload))
+    .then((result) => {
+      self.postMessage({
+        jobId,
+        success: true,
+        result,
+      })
     })
-  } catch (error) {
-    self.postMessage({
-      jobId,
-      success: false,
-      error: error?.message || 'Analysis failed',
+    .catch((error) => {
+      self.postMessage({
+        jobId,
+        success: false,
+        error: error?.message || 'Analysis failed',
+      })
     })
-  }
 }

@@ -16,7 +16,7 @@ export function GeometryCanvas({
   if (!paths.length || viewBox.length === 0) {
     return (
       <div class="viewer viewer--empty">
-        <p>Upload a Gerber layer to inspect the generated geometry.</p>
+        <p>请上传 Gerber 图层以查看生成的几何结果。</p>
       </div>
     )
   }

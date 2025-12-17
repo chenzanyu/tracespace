@@ -1164,9 +1164,9 @@ const collectOutlineBounds = (fm) => {
 const resolveBoardSizeOverlayPayload = computed(() => {
   const fm = fmRef.value
   if (!fm) return null
+  const boardShapeBounds = normalizeBounds(boardOutlineDescriptor.value?.bounds)
   const outlineBounds = collectOutlineBounds(fm)
-  const resolvedBounds =
-    outlineBounds ?? normalizeBounds(boardOutlineDescriptor.value?.bounds)
+  const resolvedBounds = boardShapeBounds ?? outlineBounds
   if (!resolvedBounds) return null
   const viewBox = boundsToViewBox(resolvedBounds)
   if (!viewBox) return null
@@ -1179,7 +1179,7 @@ const resolveBoardSizeOverlayPayload = computed(() => {
     viewBox,
     widthMm,
     heightMm,
-    source: outlineBounds ? 'outline' : 'fallback',
+    source: boardShapeBounds ? 'board-shape' : outlineBounds ? 'outline' : 'fallback',
   }
 })
 
@@ -1224,6 +1224,7 @@ const runEnigAreaAnalysis = async () => {
   const projectId = fm?.__compute?.projectId ?? null
   const boardOutline = toRaw(boardOutlineDescriptor.value)
   let boardPolygons = boardOutline?.polygons ?? null
+  const boardBounds = Array.isArray(boardOutline?.bounds) ? boardOutline.bounds : null
   if (!Array.isArray(boardPolygons) || boardPolygons.length === 0) {
     const bounds = Array.isArray(boardOutline?.bounds) ? boardOutline.bounds : null
     if (bounds && bounds.length >= 4) {
@@ -1328,6 +1329,10 @@ const runEnigAreaAnalysis = async () => {
     })
     .map((layer) => layer.id)
 
+  const drillLayerIds = fmLayers
+    .filter((layer) => normalizeType(layer?.type) === 'drill')
+    .map((layer) => layer.id)
+
   const canComputeTop = copperTopIds.length > 0 && maskTopIds.length > 0
   const canComputeBottom = copperBottomIds.length > 0 && maskBottomIds.length > 0
   if (!canComputeTop && !canComputeBottom) {
@@ -1349,6 +1354,18 @@ const runEnigAreaAnalysis = async () => {
 
   const mmPerUnit = unitMmPerUnit.value
 
+  const holeWallPayload =
+    drillLayerIds.length > 0 && canComputeTop && canComputeBottom
+      ? {
+          copperTopLayerIds: copperTopIds,
+          copperBottomLayerIds: copperBottomIds,
+          soldermaskTopLayerIds: maskTopIds,
+          soldermaskBottomLayerIds: maskBottomIds,
+          boardThicknessMm: 1.6,
+        }
+      : null
+  const holeWallComputeSide = holeWallPayload ? (canComputeTop ? 'top' : canComputeBottom ? 'bottom' : null) : null
+
   const jobForSide = (side) => {
     if (side === 'top') {
       if (!copperTopIds.length || !maskTopIds.length) return Promise.resolve(null)
@@ -1357,7 +1374,10 @@ const runEnigAreaAnalysis = async () => {
         side,
         copperLayerIds: copperTopIds,
         soldermaskLayerIds: maskTopIds,
+        drillLayerIds,
+        holeWall: side === holeWallComputeSide ? holeWallPayload : undefined,
         mmPerUnit,
+        boardBounds,
         boardPolygons,
       })
     }
@@ -1367,7 +1387,10 @@ const runEnigAreaAnalysis = async () => {
       side,
       copperLayerIds: copperBottomIds,
       soldermaskLayerIds: maskBottomIds,
+      drillLayerIds,
+      holeWall: side === holeWallComputeSide ? holeWallPayload : undefined,
       mmPerUnit,
+      boardBounds,
       boardPolygons,
     })
   }
@@ -1397,9 +1420,11 @@ const runEnigAreaAnalysis = async () => {
     throw new Error(messageParts.length ? `ENIG analysis failed (${messageParts.join('; ')})` : 'ENIG analysis failed')
   }
   const boardAreaMm2 = Number(top?.boardAreaMm2 ?? bottom?.boardAreaMm2 ?? 0)
-  const totalAreaMm2 = Number(top?.enigAreaMm2 ?? 0) + Number(bottom?.enigAreaMm2 ?? 0)
+  const planarAreaMm2 = Number(top?.enigAreaMm2 ?? 0) + Number(bottom?.enigAreaMm2 ?? 0)
+  const holeWallAreaMm2 = Number(top?.holeWall?.holeWallEnigAreaMm2 ?? bottom?.holeWall?.holeWallEnigAreaMm2 ?? 0)
+  const totalAreaMm2 = planarAreaMm2 + holeWallAreaMm2
   const percent = boardAreaMm2 > 0 ? (totalAreaMm2 / boardAreaMm2) * 100 : 0
-  return { areaMm2: totalAreaMm2, percent, boardAreaMm2, top, bottom }
+  return { areaMm2: totalAreaMm2, percent, boardAreaMm2, holeWallAreaMm2, top, bottom }
 }
 const applyAnalysisResult = (result) => {
   if (!analysisResults.value.length) return

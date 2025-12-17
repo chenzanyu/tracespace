@@ -1530,7 +1530,7 @@ export const computeHoleWallEnigArea = async (input: HoleWallEnigInput): Promise
   })
   const maskOpenAnyPtr = unionTwo(geos, maskOpenTopPtr, maskOpenBottomPtr, overlayGridSize)
   if (maskOpenAnyPtr) {
-    selectedDrillsPtr = difference(geos, selectedDrillsPtr, maskOpenAnyPtr, overlayGridSize)
+    selectedDrillsPtr = intersection(geos, selectedDrillsPtr, maskOpenAnyPtr, overlayGridSize)
   }
 
   const holeWallPerimeterUnits = computeLength(geos, selectedDrillsPtr)

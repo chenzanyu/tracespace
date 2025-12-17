@@ -46,8 +46,11 @@ console.log(result.enigAreaMm2, result.enigAreaPercent)
 
 ### Definitions
 
-- `沉金面积 (ENIG area)` = `Area(Copper ∩ soldermask openings)` per side.
-- `沉金面积百分比`（双面时的总百分比）= `(ENIG_top + ENIG_bottom) / 轮廓层ViewBox矩形面积 * 100%`.
+- `平面沉金面积 (Planar ENIG area)` = `Area(Copper ∩ soldermask openings)` per side.
+- `孔壁沉金面积 (Hole-wall ENIG area)`（可选，见 `computeHoleWallEnigArea`）：
+  - `selectedHoles = DrillHoles ∩ CopperTop ∩ CopperBottom ∩ (MaskOpenTop ∪ MaskOpenBottom)`
+  - `holeWallAreaMm2 = Length(selectedHoles) * mmPerUnit * boardThicknessMm`
+- `沉金面积百分比`（双面总百分比，是否包含孔壁由调用侧决定）= `(ENIG_top + ENIG_bottom [+ holeWall]) / 轮廓层ViewBox矩形面积 * 100%`.
   - `轮廓层ViewBox矩形面积` = `Area(BoundingBox(boardPolygons))`，即 `boardPolygons` 的外接矩形面积（不是实际轮廓填充面积）。
 
 ### Data Format
@@ -61,14 +64,15 @@ console.log(result.enigAreaMm2, result.enigAreaPercent)
 **Input**
 
 - `mmPerUnit`: plot tree 单位到 mm 的换算系数（`units === 'in' ? 25.4 : 1`）。
-- `boardPolygons`: 轮廓层（或板框）多边形（来自 `plotBoardShape(...).polygons`）。只会用它来取 `BoundingBox`。
+- `boardPolygons`: 轮廓层（或板框）多边形（来自 `plotBoardShape(...).polygons`）。用于取 `BoundingBox`（当未提供 `boardBounds` 时）。
+- `boardBounds`（可选）: `[minX, minY, maxX, maxY]`（plot 单位）。提供时会优先使用它作为 ViewBox 与裁剪区域。
 - `copperTrees`: 当前面的铜层 plot trees（可传多个层，会 union 后一起算）。
 - `soldermaskTrees`: 当前面的阻焊层 plot trees（可传多个层，会 union 后一起算）。
 - `drillTrees`（可选）: 钻孔层 plot trees；用于从裁剪区域中扣除孔洞（避免把孔洞区域计入相交/裁剪结果）。
 
 **Output**
 
-- `enigAreaMm2`: 当前面 ENIG 面积（mm²）。
+- `enigAreaMm2`: 当前面平面 ENIG 面积（mm²）。
 - `boardAreaMm2`: 分母（轮廓 ViewBox 外接矩形面积，mm²）。
 - `enigAreaPercent`: 当前面 `enigAreaMm2 / boardAreaMm2 * 100`（注意：双面总百分比需要你在调用侧把 top+bottom 相加后再除以同一个 `boardAreaMm2`）。
 - `debug.copperAreaMm2` / `debug.soldermaskOpenAreaMm2`: 裁剪后的铜层面积 / 阻焊开窗面积（mm²）。
@@ -99,11 +103,33 @@ const boardAreaMm2 = top.boardAreaMm2 // 两面相同（同一个 boardPolygons 
 const enigTotalPercent = boardAreaMm2 > 0 ? (enigTotalMm2 / boardAreaMm2) * 100 : 0
 ```
 
+### Example: 双面沉金（包含孔壁）
+
+如果你也要计入“钻孔孔壁沉金”（常见于专业 DFM 报价的 plating/finish area），可额外调用 `computeHoleWallEnigArea`：
+
+```ts
+import {computeHoleWallEnigArea} from '@tracespace/pcb-analysis'
+
+const holeWall = await computeHoleWallEnigArea({
+  mmPerUnit,
+  drillTrees,
+  copperTopTrees: topCopperTrees,
+  copperBottomTrees: bottomCopperTrees,
+  soldermaskTopTrees: topMaskTrees,
+  soldermaskBottomTrees: bottomMaskTrees,
+  boardThicknessMm: 1.6, // 传实际板厚；不传默认 1.6
+})
+
+const enigTotalMm2 = top.enigAreaMm2 + bottom.enigAreaMm2 + holeWall.holeWallEnigAreaMm2
+const boardAreaMm2 = top.boardAreaMm2
+const enigTotalPercent = boardAreaMm2 > 0 ? (enigTotalMm2 / boardAreaMm2) * 100 : 0
+```
+
 ### Geometry Rules (how it calculates)
 
 下面用接近代码的伪公式描述整个计算流程（单面）：
 
-1. `boardBounds = BoundingBox(boardPolygons)`
+1. `boardBounds = boardBounds ?? BoundingBox(boardPolygons)`
 2. `boardArea = Area(Rect(boardBounds))`（分母）
 3. `clipRegion = Rect(boardBounds)`
 4. 若提供 `drillTrees`：`clipRegion = clipRegion - DrillHoles`
@@ -159,6 +185,17 @@ Gerber 的 `LPD`(dark) / `LPC`(clear) 是“顺序生效”的：clear 只清除
 - 双面总沉金（调用侧计算）：
   - `ENIG_total = ENIG_top + ENIG_bottom`
   - `ENIG_percent_total = ENIG_total / BoardViewBoxRectArea * 100`
+
+#### 6) 钻孔孔壁 ENIG 面积（可选）
+
+`computeHoleWallEnigArea` 用“孔洞周长 × 板厚”近似孔壁面积，并只统计“可能会沉金”的孔：
+
+1. 先筛选可能为“通孔电镀孔”的孔洞：`selected = DrillHoles ∩ CopperTop ∩ CopperBottom`
+2. 再要求孔洞在任意一面被阻焊开窗暴露：`selected = selected ∩ (MaskOpenTop ∪ MaskOpenBottom)`
+3. `holeWallPerimeterMm = Length(selected) * mmPerUnit`
+4. `holeWallEnigAreaMm2 = holeWallPerimeterMm * boardThicknessMm`
+
+> 注意：该计算默认按“整板厚通孔”处理；盲/埋孔会被高估（需要调用侧做更精细的孔类型区分后再按深度换算）。
 
 ## Options
 

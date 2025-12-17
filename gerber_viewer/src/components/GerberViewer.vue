@@ -1361,7 +1361,7 @@ const runEnigAreaAnalysis = async () => {
           copperBottomLayerIds: copperBottomIds,
           soldermaskTopLayerIds: maskTopIds,
           soldermaskBottomLayerIds: maskBottomIds,
-          boardThicknessMm: 1.6,
+          boardThicknessMm: resolvedBoardThicknessMm.value,
         }
       : null
   const holeWallComputeSide = holeWallPayload ? (canComputeTop ? 'top' : canComputeBottom ? 'bottom' : null) : null

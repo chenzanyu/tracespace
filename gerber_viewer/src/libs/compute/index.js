@@ -483,3 +483,45 @@ export const enqueueComputeEnigAreaJob = async ({
     },
   })
 }
+
+export const enqueueComputeFlyingProbeCountJob = async ({
+  projectId,
+  soldermaskTopLayerIds,
+  soldermaskBottomLayerIds,
+  drillLayerIds,
+  mmPerUnit,
+  boardBounds,
+  boardPolygons,
+  options,
+} = {}) => {
+  const pool = getPool()
+  if (!currentProject || currentProject.id !== projectId) {
+    throw new Error('compute project not initialized')
+  }
+  const combinedMaskIds = [
+    ...(Array.isArray(soldermaskTopLayerIds) ? soldermaskTopLayerIds : []),
+    ...(Array.isArray(soldermaskBottomLayerIds) ? soldermaskBottomLayerIds : []),
+  ].filter(Boolean)
+  const workerIndex = resolveWorkerIndexForEnig({ copperLayerIds: [], soldermaskLayerIds: combinedMaskIds })
+  const resolvedWorkerIndex = Math.max(0, Math.min(pool.instances.length - 1, workerIndex))
+  const requiredLayerIds = [
+    ...combinedMaskIds,
+    ...(Array.isArray(drillLayerIds) ? drillLayerIds : []),
+  ].filter(Boolean)
+  await ensureLayersAvailableInWorker({ projectId, workerIndex: resolvedWorkerIndex, layerIds: requiredLayerIds })
+  return pool.enqueue({
+    workerIndex: resolvedWorkerIndex,
+    action: 'compute-flying-probe-count',
+    priority: PRIORITY.analysis,
+    payload: {
+      projectId,
+      soldermaskTopLayerIds: Array.isArray(soldermaskTopLayerIds) ? soldermaskTopLayerIds : [],
+      soldermaskBottomLayerIds: Array.isArray(soldermaskBottomLayerIds) ? soldermaskBottomLayerIds : [],
+      drillLayerIds: Array.isArray(drillLayerIds) ? drillLayerIds : [],
+      mmPerUnit,
+      boardBounds,
+      boardPolygons,
+      options,
+    },
+  })
+}

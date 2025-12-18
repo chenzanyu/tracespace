@@ -616,6 +616,63 @@ const handleComputeEnigArea = async (payload) => {
   }
 }
 
+const handleComputeFlyingProbeCount = async (payload) => {
+  const soldermaskTopLayerIds = Array.isArray(payload?.soldermaskTopLayerIds) ? payload.soldermaskTopLayerIds : []
+  const soldermaskBottomLayerIds = Array.isArray(payload?.soldermaskBottomLayerIds) ? payload.soldermaskBottomLayerIds : []
+  const mmPerUnit = Number(payload?.mmPerUnit) || 1
+  const boardBounds = payload?.boardBounds ?? globals3d.boardOutline?.bounds ?? null
+  const boardPolygons = payload?.boardPolygons ?? globals3d.boardOutline?.polygons ?? null
+  if (!Array.isArray(boardPolygons) || boardPolygons.length === 0) {
+    throw new Error('Missing board polygons')
+  }
+
+  const getPlotTree = (layerId) => {
+    const entry = layerStateById.get(layerId)
+    if (!entry) return null
+    if (entry.plotTree) return entry.plotTree
+    if (!entry.parseTree) return null
+    try {
+      const plotTree = plotter.plot(entry.parseTree)
+      entry.plotTree = plotTree
+      entry.plotUnits = plotTree?.units ?? null
+      entry.plotSize = Array.isArray(plotTree?.size) ? plotTree.size : null
+      entry.plotRev = (entry.plotRev || 0) + 1
+      return plotTree
+    } catch (error) {
+      return null
+    }
+  }
+
+  const drillLayerIds = Array.isArray(payload?.drillLayerIds) ? payload.drillLayerIds : []
+  const drillTrees = drillLayerIds.length
+    ? drillLayerIds.map(getPlotTree).filter(Boolean)
+    : (() => {
+        const drillShapes = payload?.drillShapes ?? globals3d.drillShapes ?? null
+        return drillShapes?.format === DRILL_SHAPE_FORMAT_IMAGE_TREES && Array.isArray(drillShapes.imageTrees)
+          ? drillShapes.imageTrees.filter(Boolean)
+          : []
+      })()
+
+  const soldermaskTopTrees = soldermaskTopLayerIds.map(getPlotTree).filter(Boolean)
+  const soldermaskBottomTrees = soldermaskBottomLayerIds.map(getPlotTree).filter(Boolean)
+  if (soldermaskTopTrees.length === 0 && soldermaskBottomTrees.length === 0) {
+    throw new Error('Missing soldermask plot trees for flying probe analysis')
+  }
+
+  const { computeFlyingProbeCount } = await ensurePcbAnalysis()
+  const result = await computeFlyingProbeCount({
+    mmPerUnit,
+    boardPolygons,
+    boardBounds,
+    drillTrees,
+    soldermaskTopTrees,
+    soldermaskBottomTrees,
+    options: payload?.options ?? undefined,
+  })
+
+  return result
+}
+
 const dispatch = async (action, payload) => {
   switch (action) {
     case 'reset':
@@ -638,6 +695,8 @@ const dispatch = async (action, payload) => {
       return handleCollectTraceData(payload)
     case 'compute-enig-area':
       return handleComputeEnigArea(payload)
+    case 'compute-flying-probe-count':
+      return handleComputeFlyingProbeCount(payload)
     default:
       throw new Error(`Unsupported action: ${action}`)
   }

@@ -71,6 +71,38 @@ export interface EnigAreaSideResult {
   }
 }
 
+export interface FlyingProbeCountSideInput {
+  mmPerUnit: number
+  boardPolygons: BoardMultiPolygon
+  boardBounds?: Bounds | null
+  drillTrees?: ImageTree[]
+  soldermaskTrees: ImageTree[]
+  options?: Partial<EnigAreaOptions>
+}
+
+export interface FlyingProbeCountSideResult {
+  flyingProbeCount: number
+}
+
+export interface FlyingProbeCountInput {
+  mmPerUnit: number
+  boardPolygons: BoardMultiPolygon
+  boardBounds?: Bounds | null
+  drillTrees?: ImageTree[]
+  soldermaskTopTrees?: ImageTree[]
+  soldermaskBottomTrees?: ImageTree[]
+  options?: Partial<EnigAreaOptions>
+}
+
+export interface FlyingProbeCountResult {
+  flyingProbeCount: number
+  debug?: {
+    maskTopCount: number
+    maskBottomCount: number
+    drillCount: number
+  }
+}
+
 export interface EnigAreaTimingSample {
   step: string
   ms: number
@@ -382,6 +414,20 @@ const normalizePositiveNumber = (value: unknown): number | null => {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null
 }
 
+const mmPerUnitForUnits = (units: unknown): number | null => {
+  const normalized = typeof units === 'string' ? units.toLowerCase() : ''
+  if (normalized === 'mm') return 1
+  if (normalized === 'in') return 25.4
+  return null
+}
+
+const scaleFactorForUnitsToTargetMmPerUnit = (units: unknown, targetMmPerUnit: number): number => {
+  const target = normalizePositiveNumber(targetMmPerUnit) ?? 1
+  const sourceMmPerUnit = mmPerUnitForUnits(units)
+  if (!sourceMmPerUnit) return 1
+  return sourceMmPerUnit / target
+}
+
 const closeRing = (ring: number[][]): number[][] => {
   if (!ring.length) return ring
   const first = ring[0]
@@ -634,6 +680,18 @@ const graphicToGeoJsonParts = (
   return {polygons, lineStrings}
 }
 
+const scaleGeoJsonPolygons = (polygons: number[][][][], scale: number): number[][][][] => {
+  if (!Number.isFinite(scale) || scale === 1) return polygons
+  return polygons.map(polygon =>
+    polygon.map(ring => ring.map(([x, y]) => [Number(x) * scale, Number(y) * scale]))
+  )
+}
+
+const scaleGeoJsonLineStrings = (lineStrings: number[][][], scale: number): number[][][] => {
+  if (!Number.isFinite(scale) || scale === 1) return lineStrings
+  return lineStrings.map(line => line.map(([x, y]) => [Number(x) * scale, Number(y) * scale]))
+}
+
 const destroyGeom = (geos: GeosModule, ptr: number | null) => {
   if (!ptr) return
   try {
@@ -694,6 +752,116 @@ const GEOS_GEOMETRY_TYPE_GEOMETRY_COLLECTION = 7
 
 const isPolygonalTypeId = (typeId: number): boolean =>
   typeId === GEOS_GEOMETRY_TYPE_POLYGON || typeId === GEOS_GEOMETRY_TYPE_MULTIPOLYGON
+
+const countPolygonComponents = (geos: GeosModule, geomPtr: number | null): number => {
+  if (!geomPtr) return 0
+  let empty = 0
+  try {
+    empty = geos.GEOSisEmpty(geomPtr as never)
+  } catch {
+    empty = 0
+  }
+  if (empty === 1) return 0
+
+  const countFor = (ptr: number | null): number => {
+    if (!ptr) return 0
+    let typeId = -1
+    try {
+      typeId = geos.GEOSGeomTypeId(ptr as never)
+    } catch {
+      typeId = -1
+    }
+    if (typeId === GEOS_GEOMETRY_TYPE_POLYGON) return 1
+    if (typeId === GEOS_GEOMETRY_TYPE_MULTIPOLYGON) {
+      try {
+        const count = geos.GEOSGetNumGeometries(ptr as never)
+        return Number.isFinite(count) && count > 0 ? count : 0
+      } catch {
+        return 0
+      }
+    }
+    if (typeId !== GEOS_GEOMETRY_TYPE_GEOMETRY_COLLECTION) return 0
+
+    let total = 0
+    let childCount = 0
+    try {
+      childCount = geos.GEOSGetNumGeometries(ptr as never)
+    } catch {
+      childCount = 0
+    }
+    if (!Number.isFinite(childCount) || childCount <= 0) return 0
+    for (let index = 0; index < childCount; index += 1) {
+      let childPtr = 0
+      try {
+        childPtr = geos.GEOSGetGeometryN(ptr as never, index)
+      } catch {
+        childPtr = 0
+      }
+      if (!childPtr) continue
+      total += countFor(childPtr as unknown as number)
+    }
+    return total
+  }
+
+  return countFor(geomPtr)
+}
+
+const countPolygonComponentsWhere = (
+  geos: GeosModule,
+  geomPtr: number | null,
+  predicate: (polygonPtr: number) => boolean
+): number => {
+  if (!geomPtr) return 0
+  let empty = 0
+  try {
+    empty = geos.GEOSisEmpty(geomPtr as never)
+  } catch {
+    empty = 0
+  }
+  if (empty === 1) return 0
+
+  const countFor = (ptr: number | null): number => {
+    if (!ptr) return 0
+    let typeId = -1
+    try {
+      typeId = geos.GEOSGeomTypeId(ptr as never)
+    } catch {
+      typeId = -1
+    }
+    if (typeId === GEOS_GEOMETRY_TYPE_POLYGON) {
+      try {
+        return predicate(ptr) ? 1 : 0
+      } catch {
+        return 0
+      }
+    }
+    if (typeId !== GEOS_GEOMETRY_TYPE_MULTIPOLYGON && typeId !== GEOS_GEOMETRY_TYPE_GEOMETRY_COLLECTION) {
+      return 0
+    }
+
+    let total = 0
+    let childCount = 0
+    try {
+      childCount = geos.GEOSGetNumGeometries(ptr as never)
+    } catch {
+      childCount = 0
+    }
+    if (!Number.isFinite(childCount) || childCount <= 0) return 0
+    for (let index = 0; index < childCount; index += 1) {
+      let childPtr = 0
+      try {
+        childPtr = geos.GEOSGetGeometryN(ptr as never, index)
+      } catch {
+        childPtr = 0
+      }
+      if (!childPtr) continue
+      total += countFor(childPtr as unknown as number)
+    }
+    return total
+  }
+
+  return countFor(geomPtr)
+}
 
 const normalizePolygonalGeometry = (
   geos: GeosModule,
@@ -1085,11 +1253,13 @@ const buildLayerGeometryFromTree = async (
   extra?: {
     preferClearWhenDarkEmpty?: boolean
     overlayGridSize?: number | null
+    mmPerUnit?: number
   }
 ): Promise<number | null> => {
   type SegmentPolarity = 'dark' | 'clear'
   const preferClearWhenDarkEmpty = extra?.preferClearWhenDarkEmpty === true
   const overlayGridSize = extra?.overlayGridSize ?? null
+  const treeScale = scaleFactorForUnitsToTargetMmPerUnit(tree?.units, extra?.mmPerUnit ?? 1)
 
   let result: number | null = null
   let sawDarkGeometry = false
@@ -1167,9 +1337,11 @@ const buildLayerGeometryFromTree = async (
     }
     if (!segmentPolarity) segmentPolarity = nextPolarity
 
-    const {polygons, lineStrings} = graphicToGeoJsonParts(graphic, {
+    const {polygons: rawPolygons, lineStrings: rawLineStrings} = graphicToGeoJsonParts(graphic, {
       arcToleranceRad: options.arcToleranceRad,
     })
+    const polygons = scaleGeoJsonPolygons(rawPolygons, treeScale)
+    const lineStrings = scaleGeoJsonLineStrings(rawLineStrings, treeScale)
     polygons.forEach(polygon => {
       segmentPolygons.push({type: 'Polygon', coordinates: polygon})
     })
@@ -1177,7 +1349,7 @@ const buildLayerGeometryFromTree = async (
 
     if (graphic.type === IMAGE_PATH) {
       const width = clampNumber((graphic as unknown as {width?: unknown}).width)
-      const radiusRaw = width / 2
+      const radiusRaw = (width / 2) * treeScale
       const radius = Number.isFinite(radiusRaw) && radiusRaw > 0 ? radiusRaw : 0
       if (radius > 0 && lineStrings.length) {
         segmentLineCount += lineStrings.length
@@ -1211,6 +1383,7 @@ const buildLayerGeometryFromTrees = async (
   extra?: {
     preferClearWhenDarkEmpty?: boolean
     overlayGridSize?: number | null
+    mmPerUnit?: number
   }
 ): Promise<number | null> => {
   const list = Array.isArray(trees) ? trees.filter(Boolean) : []
@@ -1268,6 +1441,7 @@ export const computeEnigAreaForSide = async (
     const drillPtr = await buildLayerGeometryFromTrees(geos, drillTrees, options, {
       preferClearWhenDarkEmpty: true,
       overlayGridSize,
+      mmPerUnit,
     })
     if (drillPtr) {
       const subtracted = difference(geos, boardClipPtr, drillPtr, overlayGridSize)
@@ -1277,10 +1451,12 @@ export const computeEnigAreaForSide = async (
 
   let copperPtr = await buildLayerGeometryFromTrees(geos, input.copperTrees, options, {
     overlayGridSize,
+    mmPerUnit,
   })
   let soldermaskOpenPtr = await buildLayerGeometryFromTrees(geos, input.soldermaskTrees, options, {
     preferClearWhenDarkEmpty: true,
     overlayGridSize,
+    mmPerUnit,
   })
 
   if (options.clipToBoard && boardClipPtr) {
@@ -1315,6 +1491,301 @@ export const computeEnigAreaForSide = async (
     debug: {
       copperAreaMm2: copperAreaUnits2 * mmPerUnit * mmPerUnit,
       soldermaskOpenAreaMm2: soldermaskOpenAreaUnits2 * mmPerUnit * mmPerUnit,
+    },
+  }
+}
+
+const computeFlyingProbeMaskIslandCountForTrees = async (params: {
+  geos: GeosModule
+  soldermaskTrees: ImageTree[]
+  boardClipPtr: number | null
+  drillPtr: number | null
+  options: EnigAreaOptions
+  overlayGridSize: number | null
+  mmPerUnit: number
+}): Promise<number> => {
+  const {geos, soldermaskTrees, boardClipPtr, drillPtr, options, overlayGridSize, mmPerUnit} = params
+
+  const buildGraphicGeometry = (graphic: ImageGraphic, scale: number): number | null => {
+    const {polygons: rawPolygons, lineStrings: rawLineStrings} = graphicToGeoJsonParts(graphic, {
+      arcToleranceRad: options.arcToleranceRad,
+    })
+    const polygons = scaleGeoJsonPolygons(rawPolygons, scale)
+    const lineStrings = scaleGeoJsonLineStrings(rawLineStrings, scale)
+    const polygonFeatures = polygons.map(polygon => ({type: 'Polygon', coordinates: polygon}))
+    const polygonPtr = unionFeatureCollection(geos, polygonFeatures, overlayGridSize)
+
+    let bufferedPtr: number | null = null
+    if (graphic.type === IMAGE_PATH) {
+      const width = clampNumber((graphic as unknown as {width?: unknown}).width)
+      const radiusRaw = (width / 2) * scale
+      const radius = Number.isFinite(radiusRaw) && radiusRaw > 0 ? radiusRaw : 0
+      if (radius > 0 && lineStrings.length) {
+        const ml = {type: 'MultiLineString', coordinates: lineStrings}
+        const linePtr = geojsonToGeosGeom(ml as never, geos as never)
+        if (linePtr) {
+          bufferedPtr =
+            geos.GEOSBuffer(linePtr as never, radius, options.pathBufferQuadrantSegments) || null
+          destroyGeom(geos, linePtr)
+        }
+      }
+    }
+
+    const combined = unionTwo(geos, polygonPtr, bufferedPtr, overlayGridSize)
+    return simplifyIfNeeded(geos, combined, options.polygonSimplifyGridSize)
+  }
+
+  const countMaskIslands = (geomPtr: number | null): number => {
+    if (!geomPtr) return 0
+    if (!drillPtr) return countPolygonComponents(geos, geomPtr)
+    return countPolygonComponentsWhere(geos, geomPtr, polyPtr => {
+      try {
+        return geos.GEOSIntersects(polyPtr as never, drillPtr as never) !== 1
+      } catch {
+        return true
+      }
+    })
+  }
+
+  const trees = Array.isArray(soldermaskTrees) ? soldermaskTrees.filter(Boolean) : []
+  let flyingProbeCount = 0
+  for (const tree of trees) {
+    const treeScale = scaleFactorForUnitsToTargetMmPerUnit(tree?.units, mmPerUnit)
+    const children = Array.isArray(tree?.children) ? (tree.children as ImageGraphic[]) : []
+    let clearAfterPtr: number | null = null
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      const graphic = children[index]
+      if (!graphic) continue
+
+      const isClear =
+        (graphic as unknown as {erase?: boolean}).erase === true || graphic.polarity === CLEAR
+      const geomPtr = buildGraphicGeometry(graphic, treeScale)
+      if (!geomPtr) continue
+
+      if (isClear) {
+        clearAfterPtr = unionTwo(geos, clearAfterPtr, geomPtr, overlayGridSize)
+        continue
+      }
+
+      let effectivePtr: number | null = geomPtr
+      if (clearAfterPtr) {
+        const clearClone = geos.GEOSGeom_clone(clearAfterPtr as never) || null
+        if (clearClone) {
+          effectivePtr = difference(geos, effectivePtr, clearClone as unknown as number, overlayGridSize)
+        }
+      }
+
+      if (options.clipToBoard && boardClipPtr) {
+        const boardClone = geos.GEOSGeom_clone(boardClipPtr as never) || null
+        if (boardClone) {
+          effectivePtr = intersection(geos, effectivePtr, boardClone as unknown as number, overlayGridSize)
+        }
+      }
+
+      flyingProbeCount += countMaskIslands(effectivePtr)
+      destroyGeom(geos, effectivePtr)
+    }
+    destroyGeom(geos, clearAfterPtr)
+  }
+
+  return flyingProbeCount
+}
+
+const buildFlyingProbeMaskOpenUnionClipped = async (params: {
+  geos: GeosModule
+  soldermaskTrees: ImageTree[]
+  boardClipPtr: number | null
+  options: EnigAreaOptions
+  overlayGridSize: number | null
+  mmPerUnit: number
+}): Promise<number | null> => {
+  const {geos, soldermaskTrees, boardClipPtr, options, overlayGridSize, mmPerUnit} = params
+  const trees = Array.isArray(soldermaskTrees) ? soldermaskTrees.filter(Boolean) : []
+  if (!trees.length) return null
+
+  let maskPtr = await buildLayerGeometryFromTrees(geos, trees, options, {
+    preferClearWhenDarkEmpty: true,
+    overlayGridSize,
+    mmPerUnit,
+  })
+
+  if (options.clipToBoard && boardClipPtr) {
+    const boardClone = geos.GEOSGeom_clone(boardClipPtr as never) || null
+    if (boardClone) {
+      maskPtr = intersection(geos, maskPtr, boardClone as unknown as number, overlayGridSize)
+    }
+  }
+
+  return maskPtr
+}
+
+export const computeFlyingProbeCountForSide = async (
+  input: FlyingProbeCountSideInput
+): Promise<FlyingProbeCountSideResult> => {
+  const geos = await getSharedGeos()
+  const options: EnigAreaOptions = {
+    ...DEFAULT_OPTIONS,
+    ...(input.options || {}),
+  }
+  const mmPerUnit = clampNumber(input.mmPerUnit, 1) || 1
+  const overlayGridSize = normalizePositiveNumber(options.polygonSimplifyGridSize) ?? null
+
+  const bounds = normalizeBounds(input.boardBounds) ?? boundsFromPolygons(input.boardPolygons)
+  const boundsPolygon: BoardMultiPolygon | null =
+    bounds && bounds[2] > bounds[0] && bounds[3] > bounds[1]
+      ? [
+          [
+            [
+              [bounds[0], bounds[1]],
+              [bounds[2], bounds[1]],
+              [bounds[2], bounds[3]],
+              [bounds[0], bounds[3]],
+              [bounds[0], bounds[1]],
+            ],
+          ],
+        ]
+      : null
+
+  const drillTrees = Array.isArray(input.drillTrees) ? input.drillTrees.filter(Boolean) : []
+  const drillPtr =
+    drillTrees.length > 0
+      ? await buildLayerGeometryFromTrees(geos, drillTrees, options, {
+          preferClearWhenDarkEmpty: true,
+          overlayGridSize,
+          mmPerUnit,
+        })
+      : null
+
+  const trees = Array.isArray(input.soldermaskTrees) ? input.soldermaskTrees.filter(Boolean) : []
+  let boardClipPtr = boundsPolygon
+    ? buildBoardGeometry(geos, boundsPolygon)
+    : buildBoardGeometry(geos, input.boardPolygons)
+
+  const flyingProbeCount = await computeFlyingProbeMaskIslandCountForTrees({
+    geos,
+    soldermaskTrees: trees,
+    boardClipPtr,
+    drillPtr,
+    options,
+    overlayGridSize,
+    mmPerUnit,
+  })
+
+  destroyGeom(geos, boardClipPtr)
+  boardClipPtr = null
+  destroyGeom(geos, drillPtr)
+
+  return {flyingProbeCount}
+}
+
+export const computeFlyingProbeCount = async (
+  input: FlyingProbeCountInput
+): Promise<FlyingProbeCountResult> => {
+  const geos = await getSharedGeos()
+  const options: EnigAreaOptions = {
+    ...DEFAULT_OPTIONS,
+    ...(input.options || {}),
+  }
+  const mmPerUnit = clampNumber(input.mmPerUnit, 1) || 1
+  const overlayGridSize = normalizePositiveNumber(options.polygonSimplifyGridSize) ?? null
+
+  const bounds = normalizeBounds(input.boardBounds) ?? boundsFromPolygons(input.boardPolygons)
+  const boundsPolygon: BoardMultiPolygon | null =
+    bounds && bounds[2] > bounds[0] && bounds[3] > bounds[1]
+      ? [
+          [
+            [
+              [bounds[0], bounds[1]],
+              [bounds[2], bounds[1]],
+              [bounds[2], bounds[3]],
+              [bounds[0], bounds[3]],
+              [bounds[0], bounds[1]],
+            ],
+          ],
+        ]
+      : null
+
+  let boardClipPtr = boundsPolygon
+    ? buildBoardGeometry(geos, boundsPolygon)
+    : buildBoardGeometry(geos, input.boardPolygons)
+
+  const drillTrees = Array.isArray(input.drillTrees) ? input.drillTrees.filter(Boolean) : []
+  const drillPtr =
+    drillTrees.length > 0
+      ? await buildLayerGeometryFromTrees(geos, drillTrees, options, {
+          preferClearWhenDarkEmpty: true,
+          overlayGridSize,
+          mmPerUnit,
+        })
+      : null
+
+  const soldermaskTopTrees = Array.isArray(input.soldermaskTopTrees) ? input.soldermaskTopTrees.filter(Boolean) : []
+  const soldermaskBottomTrees = Array.isArray(input.soldermaskBottomTrees)
+    ? input.soldermaskBottomTrees.filter(Boolean)
+    : []
+
+  const maskTopCount = await computeFlyingProbeMaskIslandCountForTrees({
+    geos,
+    soldermaskTrees: soldermaskTopTrees,
+    boardClipPtr,
+    drillPtr,
+    options,
+    overlayGridSize,
+    mmPerUnit,
+  })
+  const maskBottomCount = await computeFlyingProbeMaskIslandCountForTrees({
+    geos,
+    soldermaskTrees: soldermaskBottomTrees,
+    boardClipPtr,
+    drillPtr,
+    options,
+    overlayGridSize,
+    mmPerUnit,
+  })
+
+  const topMaskUnionPtr = await buildFlyingProbeMaskOpenUnionClipped({
+    geos,
+    soldermaskTrees: soldermaskTopTrees,
+    boardClipPtr,
+    options,
+    overlayGridSize,
+    mmPerUnit,
+  })
+  const bottomMaskUnionPtr = await buildFlyingProbeMaskOpenUnionClipped({
+    geos,
+    soldermaskTrees: soldermaskBottomTrees,
+    boardClipPtr,
+    options,
+    overlayGridSize,
+    mmPerUnit,
+  })
+
+  const maskUnionPtr = unionTwo(geos, topMaskUnionPtr, bottomMaskUnionPtr, overlayGridSize)
+
+  const drillCount =
+    drillPtr && maskUnionPtr
+      ? countPolygonComponentsWhere(geos, drillPtr, polyPtr => {
+          try {
+            return geos.GEOSIntersects(polyPtr as never, maskUnionPtr as never) === 1
+          } catch {
+            return false
+          }
+        })
+      : 0
+
+  const flyingProbeCount = maskTopCount + maskBottomCount + drillCount
+
+  destroyGeom(geos, maskUnionPtr)
+  destroyGeom(geos, drillPtr)
+  destroyGeom(geos, boardClipPtr)
+  boardClipPtr = null
+
+  return {
+    flyingProbeCount,
+    debug: {
+      maskTopCount,
+      maskBottomCount,
+      drillCount,
     },
   }
 }
@@ -1385,6 +1856,7 @@ export const computeEnigAreaForSideDebug = async (
     const drillPtr = await buildLayerGeometryFromTrees(geos, drillTrees, options, {
       preferClearWhenDarkEmpty: true,
       overlayGridSize,
+      mmPerUnit,
     })
     if (drillPtr) {
       const subtracted = difference(geos, boardClipPtr, drillPtr, overlayGridSize)
@@ -1397,6 +1869,7 @@ export const computeEnigAreaForSideDebug = async (
   const endCopper = time('layer:copper')
   let copperPtr = await buildLayerGeometryFromTrees(geos, input.copperTrees, options, {
     overlayGridSize,
+    mmPerUnit,
   })
   endCopper({trees: input.copperTrees?.length ?? 0, hasGeom: Boolean(copperPtr)})
 
@@ -1404,6 +1877,7 @@ export const computeEnigAreaForSideDebug = async (
   let soldermaskOpenPtr = await buildLayerGeometryFromTrees(geos, input.soldermaskTrees, options, {
     preferClearWhenDarkEmpty: true,
     overlayGridSize,
+    mmPerUnit,
   })
   endMask({trees: input.soldermaskTrees?.length ?? 0, hasGeom: Boolean(soldermaskOpenPtr)})
 
@@ -1503,6 +1977,7 @@ export const computeHoleWallEnigArea = async (input: HoleWallEnigInput): Promise
   const drillPtr = await buildLayerGeometryFromTrees(geos, drillTrees, options, {
     preferClearWhenDarkEmpty: true,
     overlayGridSize,
+    mmPerUnit,
   })
 
   const copperTopTrees = Array.isArray(input.copperTopTrees) ? input.copperTopTrees.filter(Boolean) : []
@@ -1512,9 +1987,11 @@ export const computeHoleWallEnigArea = async (input: HoleWallEnigInput): Promise
 
   const copperTopPtr = await buildLayerGeometryFromTrees(geos, copperTopTrees, options, {
     overlayGridSize,
+    mmPerUnit,
   })
   const copperBottomPtr = await buildLayerGeometryFromTrees(geos, copperBottomTrees, options, {
     overlayGridSize,
+    mmPerUnit,
   })
 
   let selectedDrillsPtr = intersection(geos, drillPtr, copperTopPtr, overlayGridSize)
@@ -1523,10 +2000,12 @@ export const computeHoleWallEnigArea = async (input: HoleWallEnigInput): Promise
   const maskOpenTopPtr = await buildLayerGeometryFromTrees(geos, soldermaskTopTrees, options, {
     preferClearWhenDarkEmpty: true,
     overlayGridSize,
+    mmPerUnit,
   })
   const maskOpenBottomPtr = await buildLayerGeometryFromTrees(geos, soldermaskBottomTrees, options, {
     preferClearWhenDarkEmpty: true,
     overlayGridSize,
+    mmPerUnit,
   })
   const maskOpenAnyPtr = unionTwo(geos, maskOpenTopPtr, maskOpenBottomPtr, overlayGridSize)
   if (maskOpenAnyPtr) {

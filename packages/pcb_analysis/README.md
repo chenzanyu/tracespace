@@ -197,6 +197,40 @@ Gerber 的 `LPD`(dark) / `LPC`(clear) 是“顺序生效”的：clear 只清除
 
 > 注意：该计算默认按“整板厚通孔”处理；盲/埋孔会被高估（需要调用侧做更精细的孔类型区分后再按深度换算）。
 
+## API: `computeFlyingProbeCount`
+
+`飞针点数 (Flying probe count)` = 阻焊开窗点数（Top+Bottom） + 钻孔点数（Top/Bottom 去重）：
+
+- `maskTopCount = computeFlyingProbeCountForSide(...)`
+- `maskBottomCount = computeFlyingProbeCountForSide(...)`
+- `drillCount = Count(DrillHoles ∩ (MaskOpenTop ∪ MaskOpenBottom))`（相交/贴边/重叠都算；同一孔只计 1 次）
+- `total = maskTopCount + maskBottomCount + drillCount`
+
+> 注：若输入 `ImageTree.units` 存在 mm/in 混合，会按 `mmPerUnit` 自动换算到同一坐标单位后再做布尔运算。
+
+```ts
+import {computeFlyingProbeCount} from '@tracespace/pcb-analysis'
+
+const result = await computeFlyingProbeCount({
+  mmPerUnit,
+  boardPolygons,
+  boardBounds,
+  drillTrees,
+  soldermaskTopTrees: topMaskTrees,
+  soldermaskBottomTrees: bottomMaskTrees,
+})
+
+const flyingProbeTotal = result.flyingProbeCount
+```
+
+## API: `computeFlyingProbeCountForSide`
+
+`computeFlyingProbeCountForSide` 返回“单面阻焊开窗岛”数量（用于上面 total 的 `maskTopCount/maskBottomCount`），规则如下：
+
+- **不做 dark↔dark 并集**：以每个 dark `ImageGraphic` 为独立统计源（即使两个 dark 图形紧密贴合/重叠，也不合并）
+- **按岛数计**：若某个图形被 clear/裁剪切成多个不连通岛，则按岛数计多次
+- **剔除钻孔相关岛**：若某个岛与任意钻孔（`drillTrees`）发生相交/贴边/重叠，则该岛不计入点数（同一图形的其它不相交岛仍计入）
+
 ## Options
 
 `computeEnigAreaForSide` accepts an optional `options` object:

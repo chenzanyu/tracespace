@@ -696,6 +696,7 @@ import {
   buildPipelineFromMemoryLayers,
   broadcastCompute3dGlobals,
   enqueueComputeEnigAreaJob,
+  enqueueComputeFlyingProbeCountJob,
   enqueueComputePcb3dJob,
   enqueueComputeProjectSummaryJob,
   enqueueComputeTraceDataJob,
@@ -1213,6 +1214,14 @@ const formatPercentValue = (value) => {
 const clearEnigMetrics = () => {
   updateAnalysisValue('enigArea', getDefaultAnalysisValue('enigArea'))
 }
+const clearFlyingProbeMetrics = () => {
+  updateAnalysisValue('flyingProbeCount', getDefaultAnalysisValue('flyingProbeCount'))
+}
+const formatFlyingProbeCountValue = (value) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric < 0) return getDefaultAnalysisValue('flyingProbeCount')
+  return `${Math.round(numeric)}`
+}
 const formatEnigAreaValue = ({ areaMm2, percent } = {}) => {
   const area = formatAreaMm2Value(areaMm2)
   const ratio = formatPercentValue(percent)
@@ -1333,10 +1342,16 @@ const runEnigAreaAnalysis = async () => {
     .filter((layer) => normalizeType(layer?.type) === 'drill')
     .map((layer) => layer.id)
 
-  const canComputeTop = copperTopIds.length > 0 && maskTopIds.length > 0
-  const canComputeBottom = copperBottomIds.length > 0 && maskBottomIds.length > 0
-  if (!canComputeTop && !canComputeBottom) {
-    console.warn('[GerberViewer] ENIG analysis skipped: missing copper/mask layer pairing', {
+  const canComputeProbeTop = maskTopIds.length > 0
+  const canComputeProbeBottom = maskBottomIds.length > 0
+  const canComputeProbe = canComputeProbeTop || canComputeProbeBottom
+
+  const canComputeEnigTop = copperTopIds.length > 0 && maskTopIds.length > 0
+  const canComputeEnigBottom = copperBottomIds.length > 0 && maskBottomIds.length > 0
+  const canComputeEnig = canComputeEnigTop || canComputeEnigBottom
+
+  if (!canComputeEnig && !canComputeProbe) {
+    console.warn('[GerberViewer] DFM analysis skipped: missing soldermask layers', {
       copperTop: copperTopIds.length,
       copperBottom: copperBottomIds.length,
       maskTop: maskTopIds.length,
@@ -1355,7 +1370,7 @@ const runEnigAreaAnalysis = async () => {
   const mmPerUnit = unitMmPerUnit.value
 
   const holeWallPayload =
-    drillLayerIds.length > 0 && canComputeTop && canComputeBottom
+    drillLayerIds.length > 0 && canComputeEnigTop && canComputeEnigBottom
       ? {
           copperTopLayerIds: copperTopIds,
           copperBottomLayerIds: copperBottomIds,
@@ -1364,11 +1379,11 @@ const runEnigAreaAnalysis = async () => {
           boardThicknessMm: resolvedBoardThicknessMm.value,
         }
       : null
-  const holeWallComputeSide = holeWallPayload ? (canComputeTop ? 'top' : canComputeBottom ? 'bottom' : null) : null
+  const holeWallComputeSide = holeWallPayload ? (canComputeEnigTop ? 'top' : canComputeEnigBottom ? 'bottom' : null) : null
 
-  const jobForSide = (side) => {
+  const enigJobForSide = (side) => {
     if (side === 'top') {
-      if (!copperTopIds.length || !maskTopIds.length) return Promise.resolve(null)
+      if (!canComputeEnigTop) return Promise.resolve(null)
       return enqueueComputeEnigAreaJob({
         projectId,
         side,
@@ -1381,7 +1396,7 @@ const runEnigAreaAnalysis = async () => {
         boardPolygons,
       })
     }
-    if (!copperBottomIds.length || !maskBottomIds.length) return Promise.resolve(null)
+    if (!canComputeEnigBottom) return Promise.resolve(null)
     return enqueueComputeEnigAreaJob({
       projectId,
       side,
@@ -1395,9 +1410,23 @@ const runEnigAreaAnalysis = async () => {
     })
   }
 
-  const [topResult, bottomResult] = await Promise.allSettled([
-    jobForSide('top'),
-    jobForSide('bottom'),
+  const probeJob = () => {
+    if (!canComputeProbe) return Promise.resolve(null)
+    return enqueueComputeFlyingProbeCountJob({
+      projectId,
+      soldermaskTopLayerIds: maskTopIds,
+      soldermaskBottomLayerIds: maskBottomIds,
+      drillLayerIds,
+      mmPerUnit,
+      boardBounds,
+      boardPolygons,
+    })
+  }
+
+  const [topEnigResult, bottomEnigResult, probeResult] = await Promise.allSettled([
+    enigJobForSide('top'),
+    enigJobForSide('bottom'),
+    probeJob(),
   ])
 
   const unwrap = (settled) => {
@@ -1407,24 +1436,36 @@ const runEnigAreaAnalysis = async () => {
     const error = reason instanceof Error ? reason : new Error(reason?.message || String(reason || 'ENIG analysis failed'))
     return { value: null, error }
   }
-  const topOutcome = unwrap(topResult)
-  const bottomOutcome = unwrap(bottomResult)
-  if (topOutcome.error) console.warn('[GerberViewer] ENIG top analysis failed', topOutcome.error)
-  if (bottomOutcome.error) console.warn('[GerberViewer] ENIG bottom analysis failed', bottomOutcome.error)
-  const top = topOutcome.value
-  const bottom = bottomOutcome.value
-  if (!top && !bottom) {
-    const messageParts = []
-    if (topOutcome.error) messageParts.push(`top: ${topOutcome.error.message}`)
-    if (bottomOutcome.error) messageParts.push(`bottom: ${bottomOutcome.error.message}`)
-    throw new Error(messageParts.length ? `ENIG analysis failed (${messageParts.join('; ')})` : 'ENIG analysis failed')
-  }
-  const boardAreaMm2 = Number(top?.boardAreaMm2 ?? bottom?.boardAreaMm2 ?? 0)
-  const planarAreaMm2 = Number(top?.enigAreaMm2 ?? 0) + Number(bottom?.enigAreaMm2 ?? 0)
-  const holeWallAreaMm2 = Number(top?.holeWall?.holeWallEnigAreaMm2 ?? bottom?.holeWall?.holeWallEnigAreaMm2 ?? 0)
-  const totalAreaMm2 = planarAreaMm2 + holeWallAreaMm2
-  const percent = boardAreaMm2 > 0 ? (totalAreaMm2 / boardAreaMm2) * 100 : 0
-  return { areaMm2: totalAreaMm2, percent, boardAreaMm2, holeWallAreaMm2, top, bottom }
+  const topEnigOutcome = unwrap(topEnigResult)
+  const bottomEnigOutcome = unwrap(bottomEnigResult)
+  const probeOutcome = unwrap(probeResult)
+
+  if (topEnigOutcome.error) console.warn('[GerberViewer] ENIG top analysis failed', topEnigOutcome.error)
+  if (bottomEnigOutcome.error) console.warn('[GerberViewer] ENIG bottom analysis failed', bottomEnigOutcome.error)
+  if (probeOutcome.error) console.warn('[GerberViewer] flying probe analysis failed', probeOutcome.error)
+
+  const top = topEnigOutcome.value
+  const bottom = bottomEnigOutcome.value
+  const probe = probeOutcome.value
+
+  const enig = (() => {
+    if (!top && !bottom) return null
+    const boardAreaMm2 = Number(top?.boardAreaMm2 ?? bottom?.boardAreaMm2 ?? 0)
+    const planarAreaMm2 = Number(top?.enigAreaMm2 ?? 0) + Number(bottom?.enigAreaMm2 ?? 0)
+    const holeWallAreaMm2 = Number(top?.holeWall?.holeWallEnigAreaMm2 ?? bottom?.holeWall?.holeWallEnigAreaMm2 ?? 0)
+    const totalAreaMm2 = planarAreaMm2 + holeWallAreaMm2
+    const percent = boardAreaMm2 > 0 ? (totalAreaMm2 / boardAreaMm2) * 100 : 0
+    return { areaMm2: totalAreaMm2, percent, boardAreaMm2, holeWallAreaMm2, top, bottom }
+  })()
+
+  const flyingProbeCount = (() => {
+    if (!probe) return null
+    const total = Number(probe?.flyingProbeCount ?? 0)
+    return Number.isFinite(total) && total >= 0 ? total : null
+  })()
+
+  if (!enig && flyingProbeCount === null) return null
+  return { enig, flyingProbeCount }
 }
 const applyAnalysisResult = (result) => {
   if (!analysisResults.value.length) return
@@ -1447,6 +1488,7 @@ const runAnalysis = ({ includeTraceMetrics = false } = {}) => {
     analysisError.value = null
     clearTraceMetrics()
     clearEnigMetrics()
+    clearFlyingProbeMetrics()
   }
   const jobId = ++analysisJobSeq
   return (async () => {
@@ -1496,20 +1538,32 @@ const runAnalysis = ({ includeTraceMetrics = false } = {}) => {
           console.error('[GerberViewer] ENIG analysis failed', enigResult.__error)
           analysisError.value = enigResult.__error?.message || '沉金面积解析失败'
           clearEnigMetrics()
+          clearFlyingProbeMetrics()
         } else if (enigResult) {
-          updateAnalysisValue(
-            'enigArea',
-            formatEnigAreaValue({ areaMm2: enigResult.areaMm2, percent: enigResult.percent })
-          )
-          if (enablePerfLogs && Number(enigResult.areaMm2) === 0) {
-            console.warn('[GerberViewer] ENIG area computed as 0', {
-              boardAreaMm2: enigResult.boardAreaMm2 ?? null,
-              top: enigResult.top ?? null,
-              bottom: enigResult.bottom ?? null,
-            })
+          const enigMetrics = enigResult?.enig ?? null
+          if (enigMetrics) {
+            updateAnalysisValue(
+              'enigArea',
+              formatEnigAreaValue({ areaMm2: enigMetrics.areaMm2, percent: enigMetrics.percent })
+            )
+            if (enablePerfLogs && Number(enigMetrics.areaMm2) === 0) {
+              console.warn('[GerberViewer] ENIG area computed as 0', {
+                boardAreaMm2: enigMetrics.boardAreaMm2 ?? null,
+                top: enigMetrics.top ?? null,
+                bottom: enigMetrics.bottom ?? null,
+              })
+            }
+          } else {
+            clearEnigMetrics()
           }
+
+          updateAnalysisValue(
+            'flyingProbeCount',
+            formatFlyingProbeCountValue(enigResult?.flyingProbeCount ?? null)
+          )
         } else {
           clearEnigMetrics()
+          clearFlyingProbeMetrics()
         }
       }
     } catch (error) {
@@ -1519,6 +1573,7 @@ const runAnalysis = ({ includeTraceMetrics = false } = {}) => {
         console.error('[GerberViewer] analysis worker failed', error)
         clearTraceMetrics()
         clearEnigMetrics()
+        clearFlyingProbeMetrics()
       }
     } finally {
       if (jobId === analysisJobSeq && includeTraceMetrics) {

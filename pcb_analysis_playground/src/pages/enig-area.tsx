@@ -94,6 +94,7 @@ const buildViewerLayers = (
   const plotTreesById = coreResult.plotResult.plotTreesById
 
   const treesByIds = (ids: string[]): ImageTree[] => ids.map(id => plotTreesById[id]).filter(isImageTree)
+  const drillTrees = treesByIds(sideAnalysis.drillLayerIds)
   const outlineTrees = coreResult.plotResult.layers
     .filter(layer => layer.type === 'outline')
     .map(layer => plotTreesById[layer.id])
@@ -130,6 +131,18 @@ const buildViewerLayers = (
       visible: true,
       source: {kind: 'geojson', geometry: sideResult.geometries.boardClip},
     },
+    ...(drillTrees.length
+      ? [
+          {
+            id: 'drill-raw',
+            label: '钻孔层（Gerber）',
+            color: '#ff6b6b',
+            opacity: 0.35,
+            visible: true,
+            source: {kind: 'plotTrees', trees: drillTrees},
+          },
+        ]
+      : []),
     {
       id: `${side}-copper-raw`,
       label: `${sideLabel}铜层（Gerber）`,
@@ -200,6 +213,7 @@ const TimingList = ({rows}: {rows: PerfRow[]}): JSX.Element => {
 
 export function EnigAreaPage(): JSX.Element {
   const [endpoint, setEndpoint] = useState(DEFAULT_ENDPOINT)
+  const [boardThicknessMmInput, setBoardThicknessMmInput] = useState('1.6')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [coreResult, setCoreResult] = useState<FromMemoryLayersResult | null>(null)
@@ -218,6 +232,28 @@ export function EnigAreaPage(): JSX.Element {
     const boardAreaMm2 = top?.boardAreaMm2 ?? bottom?.boardAreaMm2 ?? Number.NaN
     const outlineAreaMm2 = top?.outlineAreaMm2 ?? bottom?.outlineAreaMm2 ?? Number.NaN
     const totals = analysis?.totals ?? null
+    const holeWall = analysis?.holeWall ?? null
+    const drillLayerIds = analysis?.drills.layerIds ?? []
+    const drillFilenames =
+      coreResult && drillLayerIds.length
+        ? coreResult.plotResult.layers.filter(layer => drillLayerIds.includes(layer.id)).map(layer => layer.filename)
+        : []
+    const boardThicknessMm = (() => {
+      const parsed = Number(boardThicknessMmInput)
+      if (Number.isFinite(parsed) && parsed > 0) return parsed
+      return holeWall?.boardThicknessMm ?? Number.NaN
+    })()
+    const holeWallPerimeterMm = holeWall?.holeWallPerimeterMm ?? Number.NaN
+    const holeWallEnigAreaMm2 =
+      Number.isFinite(holeWallPerimeterMm) && Number.isFinite(boardThicknessMm) && boardThicknessMm > 0
+        ? holeWallPerimeterMm * boardThicknessMm
+        : Number.NaN
+    const enigTotalWithHoleWallMm2 =
+      totals && Number.isFinite(holeWallEnigAreaMm2) ? totals.enigTotalMm2 + holeWallEnigAreaMm2 : Number.NaN
+    const enigPercentTotalWithHoleWall =
+      boardAreaMm2 > 0 && Number.isFinite(enigTotalWithHoleWallMm2)
+        ? (enigTotalWithHoleWallMm2 / boardAreaMm2) * 100
+        : Number.NaN
     const boardWidthMm = coreResult ? (coreResult.boardViewBox?.[2] ?? 0) * mmPerUnit : Number.NaN
     const boardHeightMm = coreResult ? (coreResult.boardViewBox?.[3] ?? 0) * mmPerUnit : Number.NaN
 
@@ -225,12 +261,20 @@ export function EnigAreaPage(): JSX.Element {
       top,
       bottom,
       totals,
+      drillLayerIds,
+      drillFilenames,
+      holeWall,
+      boardThicknessMm,
+      holeWallPerimeterMm,
+      holeWallEnigAreaMm2,
+      enigTotalWithHoleWallMm2,
+      enigPercentTotalWithHoleWall,
       boardAreaMm2,
       outlineAreaMm2,
       boardWidthMm,
       boardHeightMm,
     }
-  }, [analysis, coreResult, mmPerUnit])
+  }, [analysis, boardThicknessMmInput, coreResult, mmPerUnit])
 
   const perfGroups = useMemo(() => {
     const overview = perfRows.filter(row => row.group === 'overview')
@@ -281,7 +325,11 @@ export function EnigAreaPage(): JSX.Element {
       setCoreResult(core)
 
       const analysisStart = nowMs()
-      const enig = await runEnigAreaAnalysis({coreResult: core})
+      const thickness = (() => {
+        const parsed = Number(boardThicknessMmInput)
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+      })()
+      const enig = await runEnigAreaAnalysis({coreResult: core, boardThicknessMm: thickness})
       record('analysis:enig', '沉金面积计算（顶层 + 底层）', nowMs() - analysisStart, 'overview')
       setAnalysis(enig)
 
@@ -408,6 +456,24 @@ export function EnigAreaPage(): JSX.Element {
               <dd>{formatNumber(derivedMetrics.outlineAreaMm2)}</dd>
               <dt>外接矩形面积（mm²）</dt>
               <dd>{formatNumber(derivedMetrics.boardAreaMm2)}</dd>
+              <dt>板厚（mm）</dt>
+              <dd>
+                <input
+                  class="control-input"
+                  style={{maxWidth: '140px'}}
+                  value={boardThicknessMmInput}
+                  onInput={e => setBoardThicknessMmInput((e.currentTarget as HTMLInputElement).value)}
+                  spellcheck={false}
+                />
+              </dd>
+              <dt>钻孔层（Gerber）</dt>
+              <dd>
+                {analysis
+                  ? derivedMetrics.drillFilenames.length > 0
+                    ? `${derivedMetrics.drillFilenames.length}（${derivedMetrics.drillFilenames.join(', ')}）`
+                    : '0'
+                  : '-'}
+              </dd>
               <dt>沉金（顶层）</dt>
               <dd>
                 {formatNumber(derivedMetrics.top?.enigAreaMm2 ?? Number.NaN)} mm²（
@@ -422,6 +488,15 @@ export function EnigAreaPage(): JSX.Element {
               <dd>
                 {formatNumber(derivedMetrics.totals?.enigTotalMm2 ?? Number.NaN)} mm²（
                 {formatNumber(derivedMetrics.totals?.enigPercentTotal ?? Number.NaN)}%）
+              </dd>
+              <dt>孔壁周长（mm）</dt>
+              <dd>{formatNumber(derivedMetrics.holeWallPerimeterMm ?? Number.NaN)}</dd>
+              <dt>沉金（孔壁）</dt>
+              <dd>{formatNumber(derivedMetrics.holeWallEnigAreaMm2 ?? Number.NaN)} mm²</dd>
+              <dt>沉金（含孔壁合计）</dt>
+              <dd>
+                {formatNumber(derivedMetrics.enigTotalWithHoleWallMm2 ?? Number.NaN)} mm²（
+                {formatNumber(derivedMetrics.enigPercentTotalWithHoleWall ?? Number.NaN)}%）
               </dd>
             </dl>
 
@@ -447,6 +522,9 @@ export function EnigAreaPage(): JSX.Element {
               <code class="formula-line">沉金%(单面) = 沉金(单面) / 外接矩形面积 × 100</code>
               <code class="formula-line">沉金(合计) = 沉金(顶层) + 沉金(底层)</code>
               <code class="formula-line">沉金%(合计) = 沉金(合计) / 外接矩形面积 × 100</code>
+              <code class="formula-line">孔壁沉金 = Length( Drill ∩ TopCu ∩ BotCu ∩ (TopOpen ∪ BotOpen) ) × 板厚</code>
+              <code class="formula-line">沉金(含孔壁合计) = 沉金(合计) + 孔壁沉金</code>
+              <code class="formula-line">沉金%(含孔壁合计) = 沉金(含孔壁合计) / 外接矩形面积 × 100</code>
             </div>
           </div>
 

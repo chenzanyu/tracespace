@@ -72,7 +72,7 @@ interface GraphicPlotterImpl extends GraphicPlotter {
     node: GerberNode,
     nextTool: Tool | undefined,
     nextGraphicType: GraphicType | undefined
-  ) => Tree.ImageGraphicBase | undefined
+  ) => Tree.ImageRegion | undefined
 }
 
 interface CurrentPath {
@@ -222,7 +222,7 @@ const GraphicPlotterPrototype: GraphicPlotterImpl = {
     node: GerberNode,
     nextTool: Tool | undefined,
     nextGraphicType: GraphicType | undefined
-  ): Tree.ImageGraphicBase | undefined {
+  ): Tree.ImageRegion | undefined {
     if (this._currentPath === undefined) {
       return undefined
     }

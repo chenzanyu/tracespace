@@ -223,6 +223,36 @@ const result = await computeFlyingProbeCount({
 const flyingProbeTotal = result.flyingProbeCount
 ```
 
+## API: `computeFlyingProbeCountDebug`
+
+`computeFlyingProbeCountDebug` 与 `computeFlyingProbeCount` 的计算结果一致，但会额外返回：
+
+- `timings`: 分步耗时（用于定位性能瓶颈）
+- `geometries`: 关键中间几何（GeoJSON，用于可视化/排障）
+  - `boardOutline`: 轮廓多边形
+  - `boardClip`: 外接矩形裁剪区域
+  - `drill`: 钻孔并集
+  - `maskTopOpen` / `maskBottomOpen`: 顶/底阻焊开窗并集（裁剪后）
+  - `maskOpenUnion`: `(maskTopOpen ∪ maskBottomOpen)`
+  - `drillSelected`: `drill ∩ maskOpenUnion`（参与计算的钻孔）
+
+> 注意：GeoJSON 导出可能很大且较慢，建议只在开发/排障时使用。
+
+```ts
+import {computeFlyingProbeCountDebug} from '@tracespace/pcb-analysis'
+
+const debug = await computeFlyingProbeCountDebug({
+  mmPerUnit,
+  boardPolygons,
+  boardBounds,
+  drillTrees,
+  soldermaskTopTrees: topMaskTrees,
+  soldermaskBottomTrees: bottomMaskTrees,
+})
+
+console.log(debug.flyingProbeCount, debug.debug, debug.timings)
+```
+
 ## API: `computeFlyingProbeCountForSide`
 
 `computeFlyingProbeCountForSide` 返回“单面阻焊开窗岛”数量（用于上面 total 的 `maskTopCount/maskBottomCount`），规则如下：

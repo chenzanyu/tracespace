@@ -23,7 +23,7 @@ export function plotSegment(
 
 export function plotContour(
   segments: Tree.PathSegment[]
-): Tree.ImageGraphicBase | undefined {
+): Tree.ImageRegion | undefined {
   if (segments.length > 0) {
     return {type: Tree.IMAGE_REGION, segments}
   }
@@ -32,7 +32,7 @@ export function plotContour(
 export function plotLine(
   segment: Tree.PathSegment,
   tool: Tool | undefined
-): Tree.ImageGraphicBase | undefined {
+): Tree.ImageRegion | undefined {
   if (tool?.type === SIMPLE_TOOL && tool.shape.type === Tree.CIRCLE) {
     return {
       type: Tree.IMAGE_REGION,

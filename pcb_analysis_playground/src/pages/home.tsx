@@ -19,6 +19,14 @@ export function HomePage(): JSX.Element {
           <div class="nav-card__desc">叠层预览轮廓/铜层/阻焊开窗/沉金区域，并展示面积与耗时明细。</div>
           <div class="nav-card__cta">进入「沉金面积测试」</div>
         </a>
+
+        <a class="nav-card" href={ROUTE_HASH['flying-probe']}>
+          <div class="nav-card__title">飞针点数</div>
+          <div class="nav-card__desc">
+            预览钻孔/阻焊开窗与参与计算的钻孔，并展示顶/底点数、钻孔点数与耗时明细。
+          </div>
+          <div class="nav-card__cta">进入「飞针点数测试」</div>
+        </a>
       </section>
     </div>
   )

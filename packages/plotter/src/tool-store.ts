@@ -24,12 +24,16 @@ export const MACRO_TOOL = 'macroTool'
 
 export interface SimpleTool {
   type: typeof SIMPLE_TOOL
+  /** Gerber d-code（例如 "D10"） */
+  dcode: string
   shape: SimpleShape
   hole: HoleShape | undefined
 }
 
 export interface MacroTool {
   type: typeof MACRO_TOOL
+  /** Gerber d-code（例如 "D10"） */
+  dcode: string
   macro: MacroBlock[]
   variableValues: number[]
 }
@@ -97,6 +101,7 @@ const ToolStorePrototype: ToolStore & ToolStoreState = {
       if (shape.type === MACRO_SHAPE) {
         this._toolsByCode[code] = {
           type: MACRO_TOOL,
+          dcode: code,
           macro: this._macrosByName[shape.name] ?? [],
           variableValues: shape.variableValues,
         }
@@ -111,6 +116,7 @@ const ToolStorePrototype: ToolStore & ToolStoreState = {
         )
         this._toolsByCode[code] = {
           type: SIMPLE_TOOL,
+          dcode: code,
           shape: normalizedShape,
           hole: normalizedHole,
         }

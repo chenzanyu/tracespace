@@ -167,6 +167,15 @@ export interface FlyingProbeCountResult {
  *
  * 注意：该输出可能很大，建议只在开发/排障时使用。
  */
+export interface FlyingProbeIslandLabelPoint {
+  x: number
+  y: number
+}
+
+export interface FlyingProbeIslandDebug extends FlyingProbeIslandLabelPoint {
+  excludedByDrill: boolean
+}
+
 export interface FlyingProbeCountDebugResult extends FlyingProbeCountResult {
   /** 实际使用的 options（合并默认值后的结果） */
   options: EnigAreaOptions
@@ -188,6 +197,18 @@ export interface FlyingProbeCountDebugResult extends FlyingProbeCountResult {
     maskBottomOpen: GeoJsonGeometry | null
     maskOpenUnion: GeoJsonGeometry | null
     drillSelected: GeoJsonGeometry | null
+    maskTopIslandsAll: GeoJsonGeometry | null
+    maskTopIslandsExcludedByDrill: GeoJsonGeometry | null
+    maskBottomIslandsAll: GeoJsonGeometry | null
+    maskBottomIslandsExcludedByDrill: GeoJsonGeometry | null
+  }
+  islandLabelPoints: {
+    top: FlyingProbeIslandLabelPoint[]
+    bottom: FlyingProbeIslandLabelPoint[]
+  }
+  islands: {
+    top: FlyingProbeIslandDebug[]
+    bottom: FlyingProbeIslandDebug[]
   }
   debug: {
     maskTopCount: number
@@ -196,6 +217,10 @@ export interface FlyingProbeCountDebugResult extends FlyingProbeCountResult {
     drillCount: number
     /** 钻孔总数（用于对照） */
     drillTotalCount: number
+    maskTopCountAll: number
+    maskBottomCountAll: number
+    maskTopExcludedByDrillCount: number
+    maskBottomExcludedByDrillCount: number
   }
 }
 

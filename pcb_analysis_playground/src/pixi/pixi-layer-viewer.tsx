@@ -5,6 +5,7 @@ import type {Geometry as GeoJsonGeometry} from 'geojson'
 import type {ImageTree} from '@tracespace/plotter'
 
 import {createGeoJsonDisplay, type GeoJsonDisplayOptions} from './geojson-display'
+import {createLabelDisplay, type LabelDisplayOptions, type PixiLabel} from './label-display'
 import {createLayerDisplay, parseHexColor, type PixiRenderContext} from './gerber-stack'
 
 const PIXELS_PER_MM = 96 / 25.4
@@ -13,6 +14,7 @@ export type PixiLayerSource =
   | {kind: 'plotTree'; tree: ImageTree}
   | {kind: 'plotTrees'; trees: ImageTree[]}
   | {kind: 'geojson'; geometry: GeoJsonGeometry | null; display?: GeoJsonDisplayOptions}
+  | {kind: 'labels'; labels: PixiLabel[]; display?: LabelDisplayOptions}
 
 export interface PixiLayer {
   id: string
@@ -28,6 +30,8 @@ export interface PixiLayerViewerProps {
   mmPerUnit: number
   layers: PixiLayer[]
   recenterSignal?: number
+  focusPoint?: {x: number; y: number} | null
+  focusSignal?: number
 }
 
 type ViewState = {
@@ -46,6 +50,8 @@ export function PixiLayerViewer({
   mmPerUnit,
   layers,
   recenterSignal = 0,
+  focusPoint = null,
+  focusSignal = 0,
 }: PixiLayerViewerProps): JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const appRef = useRef<Application | null>(null)
@@ -207,6 +213,29 @@ export function PixiLayerViewer({
 
   useEffect(() => {
     const host = hostRef.current
+    const nextCtx = ctxRef.current
+    if (!ready || !host || !nextCtx || !focusPoint) return
+
+    const width = Math.max(host.clientWidth, 1)
+    const height = Math.max(host.clientHeight, 1)
+    const current = viewStateRef.current
+    const scale = Number.isFinite(current.scale) && current.scale > 0 ? current.scale : 1
+
+    const [vx, vy] = nextCtx.viewBox
+    const ySvg = -focusPoint.y
+    const worldX = (focusPoint.x - vx) * nextCtx.unitsToPx
+    const worldY = (ySvg - vy) * nextCtx.unitsToPx
+
+    viewStateRef.current = {
+      scale,
+      translateX: width / 2 - worldX * scale,
+      translateY: height / 2 - worldY * scale,
+    }
+    applyViewTransform()
+  }, [focusSignal, focusPoint, ready])
+
+  useEffect(() => {
+    const host = hostRef.current
     const root = rootRef.current
     if (!host || !root) return
 
@@ -309,6 +338,10 @@ export function PixiLayerViewer({
           group.sortableChildren = true
           return group
         }
+        if (layer.source.kind === 'labels') {
+          const labels = Array.isArray(layer.source.labels) ? layer.source.labels : []
+          return createLabelDisplay(labels, ctx, tint, safeAlpha, layer.source.display)
+        }
         return createGeoJsonDisplay(layer.source.geometry, ctx, tint, safeAlpha, layer.source.display)
       })()
       display.zIndex = index
@@ -329,6 +362,7 @@ export function PixiLayerViewer({
           <p>请上传 Gerber 压缩包以预览图层。</p>
         </div>
       )}
+      {focusPoint && <div class="viewer-crosshair" aria-hidden="true" />}
     </div>
   )
 }

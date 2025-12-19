@@ -52,6 +52,171 @@ export const toXY = (pos: unknown): [number, number] => {
   return [clampNumber(pos[0]), clampNumber(pos[1])]
 }
 
+type RingBounds = {minX: number; minY: number; maxX: number; maxY: number}
+
+const ringBounds = (ring: number[][]): RingBounds => {
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  for (const entry of ring) {
+    if (!Array.isArray(entry) || entry.length < 2) continue
+    const x = Number(entry[0])
+    const y = Number(entry[1])
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    minX = Math.min(minX, x)
+    minY = Math.min(minY, y)
+    maxX = Math.max(maxX, x)
+    maxY = Math.max(maxY, y)
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return {minX: 0, minY: 0, maxX: 0, maxY: 0}
+  }
+  return {minX, minY, maxX, maxY}
+}
+
+const boundsContainBounds = (outer: RingBounds, inner: RingBounds): boolean =>
+  outer.minX <= inner.minX && outer.minY <= inner.minY && outer.maxX >= inner.maxX && outer.maxY >= inner.maxY
+
+const ringAreaAbs = (ring: number[][]): number => {
+  if (!Array.isArray(ring) || ring.length < 4) return 0
+  let sum = 0
+  for (let index = 0; index < ring.length - 1; index += 1) {
+    const a = ring[index]
+    const b = ring[index + 1]
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length < 2 || b.length < 2) continue
+    const x1 = Number(a[0])
+    const y1 = Number(a[1])
+    const x2 = Number(b[0])
+    const y2 = Number(b[1])
+    if (!Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(x2) || !Number.isFinite(y2)) continue
+    sum += x1 * y2 - x2 * y1
+  }
+  return Math.abs(sum) / 2
+}
+
+const pointOnSegment = (p: [number, number], a: [number, number], b: [number, number], eps = 1e-10): boolean => {
+  const [px, py] = p
+  const [ax, ay] = a
+  const [bx, by] = b
+  const abx = bx - ax
+  const aby = by - ay
+  const apx = px - ax
+  const apy = py - ay
+  const cross = apx * aby - apy * abx
+  if (Math.abs(cross) > eps) return false
+  const dot = apx * abx + apy * aby
+  if (dot < -eps) return false
+  const lenSq = abx * abx + aby * aby
+  if (dot > lenSq + eps) return false
+  return true
+}
+
+const pointInRing = (p: [number, number], ring: number[][]): boolean => {
+  const points = ring.length > 1 ? ring.slice(0, -1) : ring
+  if (points.length < 3) return false
+
+  const [px, py] = p
+  let inside = false
+
+  for (let i = 0, j = points.length - 1; i < points.length; j = i, i += 1) {
+    const a = points[i]
+    const b = points[j]
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length < 2 || b.length < 2) continue
+    const ax = Number(a[0])
+    const ay = Number(a[1])
+    const bx = Number(b[0])
+    const by = Number(b[1])
+    if (!Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(bx) || !Number.isFinite(by)) continue
+
+    if (pointOnSegment(p, [ax, ay], [bx, by])) return true
+
+    const intersects = (ay > py) !== (by > py) && px < ((bx - ax) * (py - ay)) / (by - ay) + ax
+    if (intersects) inside = !inside
+  }
+
+  return inside
+}
+
+/**
+ * 把一组闭合 ring 组装成 polygons（支持 holes）。
+ *
+ * Gerber/plotter 中同一个 graphic 可能会输出多个 ring（例如“带孔的 pad flash”会用 OUTLINE 输出外环 + 内孔环）。
+ * 这里按 GEOSBuildArea / even-odd 的语义：
+ * - ring 包含 ring 视作 hole
+ * - hole 内的 ring 视作 island（重新变成一个 polygon）
+ */
+const ringsToPolygons = (rings: number[][][]): number[][][][] => {
+  const clean = Array.isArray(rings) ? rings.map(closeRing).filter(ring => ring.length >= 4) : []
+  if (clean.length === 0) return []
+  if (clean.length === 1) return [[clean[0]]]
+
+  type RingMeta = {ring: number[][]; bounds: RingBounds; areaAbs: number; parent: number | null; depth: number | null}
+  const metas: RingMeta[] = clean.map(ring => ({
+    ring,
+    bounds: ringBounds(ring),
+    areaAbs: ringAreaAbs(ring),
+    parent: null,
+    depth: null,
+  }))
+
+  for (let index = 0; index < metas.length; index += 1) {
+    const current = metas[index]
+    const sampleRaw = current.ring[0]
+    const sample: [number, number] = [Number(sampleRaw?.[0] ?? 0), Number(sampleRaw?.[1] ?? 0)]
+
+    let bestParent: number | null = null
+    let bestParentArea = Number.POSITIVE_INFINITY
+
+    for (let candidateIndex = 0; candidateIndex < metas.length; candidateIndex += 1) {
+      if (candidateIndex === index) continue
+      const candidate = metas[candidateIndex]
+      if (candidate.areaAbs <= current.areaAbs) continue
+      if (!boundsContainBounds(candidate.bounds, current.bounds)) continue
+      if (!pointInRing(sample, candidate.ring)) continue
+      if (candidate.areaAbs < bestParentArea) {
+        bestParent = candidateIndex
+        bestParentArea = candidate.areaAbs
+      }
+    }
+
+    current.parent = bestParent
+  }
+
+  const depthFor = (index: number, stack: Set<number>): number => {
+    const meta = metas[index]
+    if (typeof meta.depth === 'number') return meta.depth
+    if (stack.has(index)) return 0
+    stack.add(index)
+    const depth = meta.parent === null ? 0 : depthFor(meta.parent, stack) + 1
+    meta.depth = depth
+    stack.delete(index)
+    return depth
+  }
+
+  for (let index = 0; index < metas.length; index += 1) depthFor(index, new Set<number>())
+
+  const childrenByParent = new Map<number, number[]>()
+  metas.forEach((meta, index) => {
+    if (meta.parent === null) return
+    const existing = childrenByParent.get(meta.parent) ?? []
+    existing.push(index)
+    childrenByParent.set(meta.parent, existing)
+  })
+
+  const polygons: number[][][][] = []
+  metas.forEach((meta, index) => {
+    if ((meta.depth ?? 0) % 2 !== 0) return
+    const childIndices = childrenByParent.get(index) ?? []
+    const holes = childIndices
+      .filter(childIndex => metas[childIndex].depth === (meta.depth ?? 0) + 1)
+      .map(childIndex => metas[childIndex].ring)
+    polygons.push([meta.ring, ...holes])
+  })
+
+  return polygons
+}
+
 const approximateArcPoints = (
   segment: PathSegment,
   maxSegmentAngle = DEFAULT_ENIG_AREA_OPTIONS.arcToleranceRad
@@ -223,7 +388,7 @@ const shapeToPolygons = (
         : []
       const rings = segmentsToSubpaths(segments, {closePath: true, arcToleranceRad})
       if (!rings.length) return []
-      return rings.map(ring => [ring])
+      return ringsToPolygons(rings)
     }
     default:
       return []
@@ -244,7 +409,7 @@ export const graphicToGeoJsonParts = (
       closePath: true,
       arcToleranceRad: options.arcToleranceRad,
     })
-    rings.forEach(ring => polygons.push([ring]))
+    polygons.push(...ringsToPolygons(rings))
     return {polygons, lineStrings}
   }
 

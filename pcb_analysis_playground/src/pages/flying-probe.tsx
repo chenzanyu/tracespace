@@ -2,7 +2,7 @@ import {fromMemoryLayers} from '@tracespace/core'
 import type {FromMemoryLayersResult, MemoryLayerInput} from '@tracespace/core'
 import type {ImageTree} from '@tracespace/plotter'
 import type {JSX} from 'preact/jsx-runtime'
-import {useMemo, useState} from 'preact/hooks'
+import {useMemo, useRef, useState} from 'preact/hooks'
 
 import {parseGerberArchiveViaBackend} from '../api/pcb-parse'
 import {runFlyingProbeAnalysis, type BoardSide, type FlyingProbeAnalysisResult} from '../analysis/flying-probe'
@@ -11,6 +11,8 @@ import {ROUTE_HASH} from '../router'
 
 type PerfGroup = 'overview' | 'top' | 'bottom'
 type PerfRow = {key: string; label: string; ms: number; group: PerfGroup; meta?: Record<string, unknown>}
+type IslandListMode = 'all' | 'included'
+type IslandListState = {side: BoardSide; mode: IslandListMode; title: string}
 
 const DEFAULT_ENDPOINT = 'http://localhost:5004/api/PCBParse/Parse?Mode=0'
 
@@ -164,23 +166,45 @@ const buildViewerLayers = (
       source: {kind: 'plotTrees', trees: treesByIds(maskLayerIds)},
     },
     {
-      id: `${side}-mask-open`,
-      label: `${sideLabel}阻焊开窗（并集 + 裁剪）`,
+      id: `${side}-mask-islands-all`,
+      label: `${sideLabel}阻焊开窗岛（未排除钻孔）`,
       color: '#2d74ff',
-      opacity: 0.4,
+      opacity: 0.35,
       visible: true,
       source: {
         kind: 'geojson',
-        geometry: side === 'top' ? result.geometries.maskTopOpen : result.geometries.maskBottomOpen,
+        geometry: side === 'top' ? result.geometries.maskTopIslandsAll : result.geometries.maskBottomIslandsAll,
       },
     },
     {
-      id: 'mask-open-union',
-      label: '开窗合并（Top ∪ Bottom）',
-      color: '#ffd166',
-      opacity: 0.32,
+      id: `${side}-mask-islands-excluded`,
+      label: `${sideLabel}阻焊开窗岛（排除：与钻孔相交）`,
+      color: '#ff3b30',
+      opacity: 0.65,
       visible: true,
-      source: {kind: 'geojson', geometry: result.geometries.maskOpenUnion},
+      source: {
+        kind: 'geojson',
+        geometry:
+          side === 'top'
+            ? result.geometries.maskTopIslandsExcludedByDrill
+            : result.geometries.maskBottomIslandsExcludedByDrill,
+      },
+    },
+    {
+      id: `${side}-mask-islands-labels`,
+      label: `${sideLabel}阻焊岛编号`,
+      color: '#ffffff',
+      opacity: 0.95,
+      visible: false,
+      source: {
+        kind: 'labels',
+        labels: (side === 'top' ? result.islandLabelPoints.top : result.islandLabelPoints.bottom).map((pt, index) => ({
+          x: pt.x,
+          y: pt.y,
+          text: String(index + 1),
+        })),
+        display: {fontSizePx: 14, strokeWidthPx: 3},
+      },
     },
     {
       id: 'drill-selected',
@@ -234,6 +258,12 @@ export function FlyingProbePage(): JSX.Element {
   const [viewerLayers, setViewerLayers] = useState<PixiLayer[]>([])
   const [perfRows, setPerfRows] = useState<PerfRow[]>([])
   const [rawBackend, setRawBackend] = useState<unknown>(null)
+  const [focusPoint, setFocusPoint] = useState<{x: number; y: number} | null>(null)
+  const [focusSignal, setFocusSignal] = useState(0)
+  const [islandList, setIslandList] = useState<IslandListState | null>(null)
+  const modalRef = useRef<HTMLDivElement | null>(null)
+  const modalDragCleanupRef = useRef<(() => void) | null>(null)
+  const [modalPos, setModalPos] = useState<{x: number; y: number}>({x: 18, y: 98})
 
   const viewBox = coreResult?.compositeViewBox ?? null
   const mmPerUnit = analysis?.mmPerUnit ?? coreResult?.unitMeta?.mmPerUnit ?? 1
@@ -359,6 +389,105 @@ export function FlyingProbePage(): JSX.Element {
     if (analysis && coreResult) setViewerLayers(buildViewerLayers(analysis, coreResult, side))
   }
 
+  const openIslandList = (side: BoardSide, mode: IslandListMode) => {
+    const sideLabel = side === 'top' ? '顶层' : '底层'
+    const modeLabel = mode === 'all' ? '未排除钻孔' : '排除钻孔'
+    setIslandList({side, mode, title: `阻焊开窗岛列表（${sideLabel}，${modeLabel}）`})
+  }
+
+  const closeIslandList = () => {
+    modalDragCleanupRef.current?.()
+    modalDragCleanupRef.current = null
+    setIslandList(null)
+  }
+
+  const focusIsland = (side: BoardSide, point: {x: number; y: number}) => {
+    handleSideChange(side)
+    setFocusPoint(point)
+    setFocusSignal(value => value + 1)
+  }
+
+  const handleModalHeaderPointerDown = (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+
+    modalDragCleanupRef.current?.()
+    modalDragCleanupRef.current = null
+
+    const startX = event.clientX
+    const startY = event.clientY
+    const origin = modalPos
+    const header = event.currentTarget as HTMLElement
+    const pointerId = event.pointerId
+
+    try {
+      header.setPointerCapture(pointerId)
+    } catch {
+      // noop
+    }
+
+    const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
+    const bounds = (): {maxX: number; maxY: number} => {
+      const rect = modalRef.current?.getBoundingClientRect()
+      const width = rect?.width ?? 0
+      const height = rect?.height ?? 0
+      const maxX = Math.max(0, window.innerWidth - width - 8)
+      const maxY = Math.max(0, window.innerHeight - height - 8)
+      return {maxX, maxY}
+    }
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const dx = moveEvent.clientX - startX
+      const dy = moveEvent.clientY - startY
+      const next = {x: origin.x + dx, y: origin.y + dy}
+      const {maxX, maxY} = bounds()
+      setModalPos({x: clamp(next.x, 8, maxX), y: clamp(next.y, 8, maxY)})
+    }
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', cleanup)
+      window.removeEventListener('pointercancel', cleanup)
+      try {
+        header.releasePointerCapture(pointerId)
+      } catch {
+        // noop
+      }
+    }
+
+    modalDragCleanupRef.current = cleanup
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', cleanup)
+    window.addEventListener('pointercancel', cleanup)
+  }
+
+  const getIslandListItems = (): Array<{
+    label: number
+    originalIndex: number
+    x: number
+    y: number
+    excludedByDrill: boolean
+  }> => {
+    if (!analysis || !islandList) return []
+    const source = islandList.side === 'top' ? analysis.result.islands.top : analysis.result.islands.bottom
+    if (islandList.mode === 'all') {
+      return source.map((island, index) => ({
+        label: index + 1,
+        originalIndex: index + 1,
+        x: island.x,
+        y: island.y,
+        excludedByDrill: island.excludedByDrill,
+      }))
+    }
+
+    const included: Array<{originalIndex: number; x: number; y: number; excludedByDrill: boolean}> = []
+    source.forEach((island, index) => {
+      if (island.excludedByDrill) return
+      included.push({originalIndex: index + 1, x: island.x, y: island.y, excludedByDrill: false})
+    })
+    return included.map((island, index) => ({label: index + 1, ...island}))
+  }
+
   return (
     <div class="app page">
       <div class="topbar">
@@ -428,7 +557,13 @@ export function FlyingProbePage(): JSX.Element {
           </div>
 
           <div class="viewer-card">
-            <PixiLayerViewer viewBox={viewBox} mmPerUnit={mmPerUnit} layers={viewerLayers} />
+            <PixiLayerViewer
+              viewBox={viewBox}
+              mmPerUnit={mmPerUnit}
+              layers={viewerLayers}
+              focusPoint={focusPoint}
+              focusSignal={focusSignal}
+            />
           </div>
         </div>
 
@@ -468,10 +603,42 @@ export function FlyingProbePage(): JSX.Element {
                     : '0'
                   : '-'}
               </dd>
-              <dt>点数（顶层开窗岛）</dt>
-              <dd>{analysis ? formatNumber(analysis.result.debug.maskTopCount) : '-'}</dd>
-              <dt>点数（底层开窗岛）</dt>
-              <dd>{analysis ? formatNumber(analysis.result.debug.maskBottomCount) : '-'}</dd>
+              <dt>点数（顶层开窗岛，未排除钻孔）</dt>
+              <dd class="details-value-with-action">
+                <span>{analysis ? formatNumber(analysis.result.debug.maskTopCountAll) : '-'}</span>
+                {analysis && analysis.result.debug.maskTopCountAll > 0 && (
+                  <button type="button" class="details-action" onClick={() => openIslandList('top', 'all')}>
+                    列表
+                  </button>
+                )}
+              </dd>
+              <dt>点数（顶层开窗岛，排除钻孔）</dt>
+              <dd class="details-value-with-action">
+                <span>{analysis ? formatNumber(analysis.result.debug.maskTopCount) : '-'}</span>
+                {analysis && analysis.result.debug.maskTopCount > 0 && (
+                  <button type="button" class="details-action" onClick={() => openIslandList('top', 'included')}>
+                    列表
+                  </button>
+                )}
+              </dd>
+              <dt>点数（底层开窗岛，未排除钻孔）</dt>
+              <dd class="details-value-with-action">
+                <span>{analysis ? formatNumber(analysis.result.debug.maskBottomCountAll) : '-'}</span>
+                {analysis && analysis.result.debug.maskBottomCountAll > 0 && (
+                  <button type="button" class="details-action" onClick={() => openIslandList('bottom', 'all')}>
+                    列表
+                  </button>
+                )}
+              </dd>
+              <dt>点数（底层开窗岛，排除钻孔）</dt>
+              <dd class="details-value-with-action">
+                <span>{analysis ? formatNumber(analysis.result.debug.maskBottomCount) : '-'}</span>
+                {analysis && analysis.result.debug.maskBottomCount > 0 && (
+                  <button type="button" class="details-action" onClick={() => openIslandList('bottom', 'included')}>
+                    列表
+                  </button>
+                )}
+              </dd>
               <dt>钻孔总数</dt>
               <dd>{analysis ? formatNumber(analysis.result.debug.drillTotalCount) : '-'}</dd>
               <dt>参与计算钻孔数</dt>
@@ -516,7 +683,47 @@ export function FlyingProbePage(): JSX.Element {
           )}
         </div>
       </div>
+
+      {analysis && islandList && (
+        <div
+          class="modal modal--floating"
+          ref={modalRef}
+          style={{left: `${modalPos.x}px`, top: `${modalPos.y}px`}}
+        >
+          <div class="modal-header" onPointerDown={handleModalHeaderPointerDown}>
+            <div class="modal-title">{islandList.title}</div>
+            <button
+              type="button"
+              class="modal-close"
+              onPointerDown={e => e.stopPropagation()}
+              onClick={closeIslandList}
+            >
+                ×
+            </button>
+          </div>
+          <div class="modal-body">
+            <p class="modal-hint">点击列表项后，预览会准星居中定位。</p>
+
+            {getIslandListItems().length === 0 ? (
+              <p class="empty-note">暂无岛数据。</p>
+            ) : (
+              <div class="island-grid">
+                {getIslandListItems().map(item => (
+                  <button
+                    key={`island:${islandList.side}:${islandList.mode}:${item.label}:${item.originalIndex}`}
+                    type="button"
+                    class={item.excludedByDrill ? 'island-button island-button--excluded' : 'island-button'}
+                    title={islandList.mode === 'included' ? `原始编号：${item.originalIndex}` : undefined}
+                    onClick={() => focusIsland(islandList.side, {x: item.x, y: item.y})}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
-

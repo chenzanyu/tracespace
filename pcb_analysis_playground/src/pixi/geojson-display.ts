@@ -61,27 +61,35 @@ export function createGeoJsonDisplay(
 
   if (!geometry) return container
 
-  const graphics = new Graphics()
-  graphics.eventMode = 'none'
-  graphics.tint = tint
-  graphics.alpha = alpha
-  container.addChild(graphics)
-
   const fillEnabled = options.fill !== false
   const strokeEnabled = options.stroke === true
   const strokeWidth = Number(options.strokeWidthPx) > 0 ? Number(options.strokeWidthPx) : 1.5
 
-  const fillOuter = () => {
+  const createTintedGraphics = (): Graphics => {
+    const graphics = new Graphics()
+    graphics.eventMode = 'none'
+    graphics.tint = tint
+    graphics.alpha = alpha
+    return graphics
+  }
+
+  const fill = (graphics: Graphics) => {
     if (!fillEnabled) return
     graphics.fill({color: 0xffffff})
   }
-  const cutHole = () => {
-    if (!fillEnabled) return
-    graphics.cut()
-  }
-  const stroke = () => {
+
+  const stroke = (graphics: Graphics) => {
     if (!strokeEnabled) return
     graphics.stroke({width: strokeWidth, color: 0xffffff, alignment: 0.5})
+  }
+
+  let simpleGraphics: Graphics | null = null
+  const ensureSimpleGraphics = (): Graphics => {
+    if (!simpleGraphics) {
+      simpleGraphics = createTintedGraphics()
+      container.addChild(simpleGraphics)
+    }
+    return simpleGraphics
   }
 
   const drawPolygon = (polygon: Position[][]) => {
@@ -89,14 +97,52 @@ export function createGeoJsonDisplay(
     const rings = polygon.map(ring => normalizeRing(ring)).filter(ring => ring.length >= 3)
     if (rings.length === 0) return
 
-    drawRingPath(graphics, rings[0], ctx)
-    if (fillEnabled) fillOuter()
-    if (strokeEnabled) stroke()
+    if (fillEnabled && rings.length > 1) {
+      const group = new Container({isRenderGroup: true})
+      group.eventMode = 'none'
 
-    for (const hole of rings.slice(1)) {
-      drawRingPath(graphics, hole, ctx)
-      cutHole()
-      if (strokeEnabled) stroke()
+      const solid = createTintedGraphics()
+      group.addChild(solid)
+
+      const mask = new Graphics()
+      mask.eventMode = 'none'
+      group.addChild(mask)
+      group.setMask({mask, inverse: true})
+
+      const outline = strokeEnabled ? createTintedGraphics() : null
+      if (outline) group.addChild(outline)
+
+      drawRingPath(solid, rings[0], ctx)
+      fill(solid)
+
+      for (const hole of rings.slice(1)) {
+        drawRingPath(mask, hole, ctx)
+        mask.fill({color: 0xffffff})
+      }
+
+      if (outline) {
+        drawRingPath(outline, rings[0], ctx)
+        stroke(outline)
+        for (const hole of rings.slice(1)) {
+          drawRingPath(outline, hole, ctx)
+          stroke(outline)
+        }
+      }
+
+      container.addChild(group)
+      return
+    }
+
+    const graphics = ensureSimpleGraphics()
+    drawRingPath(graphics, rings[0], ctx)
+    fill(graphics)
+    stroke(graphics)
+
+    if (strokeEnabled && rings.length > 1) {
+      for (const hole of rings.slice(1)) {
+        drawRingPath(graphics, hole, ctx)
+        stroke(graphics)
+      }
     }
   }
 
@@ -122,4 +168,3 @@ export function createGeoJsonDisplay(
 
   return container
 }
-
